@@ -1,0 +1,39 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "types": [
+      "vitest/globals",
+      "@testing-library/jest-dom"
+    ],
+    "paths": {
+      "$app/*": [
+        "./src/app/*"
+      ],
+      "$features/*": [
+        "./src/features/*"
+      ],
+      "$shared/*": [
+        "./src/shared/*"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "src/**/*.d.ts"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.node.json"
+    }
+  ]
+}

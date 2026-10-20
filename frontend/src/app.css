@@ -1,0 +1,83 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/source-serif-4';
+
+/* Class-based dark mode (toggled on <html> by the theme state). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter Variable', system-ui, -apple-system, sans-serif;
+  --font-serif: 'Source Serif 4 Variable', 'Iowan Old Style', Georgia, serif;
+
+  /* Paper & Ink surfaces (light) */
+  --color-paper: #faf9f7;
+  --color-parchment: #f1efea;
+  --color-ink: #1c1917;
+
+  /* Warm dark counterparts */
+  --color-night: #161311;
+  --color-soot: #211d1a;
+
+  /* The seal — signature mark only (TopBar wordmark, Welcome). Never an
+     action color; actions use amber-700/amber-500. */
+  --color-seal: #9e2b25;
+
+  --ease-fluent: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Type scale below/around Tailwind's named sizes, for the dense dock &
+     filter UI. Font-size only — line-height stays inherited or explicit,
+     exactly like the arbitrary text-[Npx] values these replace. */
+  --text-chip: 0.65625rem; /* 10.5px — count badges, status chips */
+  --text-caption: 0.6875rem; /* 11px — uppercase section labels, hints */
+  --text-detail: 0.78125rem; /* 12.5px — metadata lists */
+  --text-reading: 0.84375rem; /* 13.5px — serif reading text (summary, abstract) */
+  --text-lead: 0.9375rem; /* 15px — chat message body */
+}
+
+/* Keep the browser's UA color scheme in sync with the class-based theme
+   toggle (.dark on <html>). Using `light dark` here would make UA defaults
+   — including the `canvastext` fallback color inherited by elements without
+   an explicit text color, such as modal titles rendered outside the themed
+   app wrapper — follow the OS `prefers-color-scheme` instead of the selected
+   theme. On a dark-OS with the app in light mode that renders near-white text
+   on the white modal card (invisible). Tracking the class keeps them legible. */
+:root {
+  color-scheme: light;
+}
+
+:root.dark {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+/* Dark-mode PDF page appearance (reader toolbar cycles it): dim eases the
+   glare of the white page; invert flips it dark (0.93 keeps blacks as dark
+   gray, and hue-rotate restores color hues). Scoped to .dark so the
+   preference is inert in light mode, and applied only to the raster
+   render/tiling layers so selection, search, and citation overlays keep
+   their colors and positioning. */
+.dark [data-pdf-appearance='dim'] {
+  filter: brightness(0.85);
+}
+.dark [data-pdf-appearance='invert'] {
+  filter: invert(0.93) hue-rotate(180deg);
+}
+
+/* Theme toggles use the View Transitions API for a soft crossfade; kill it
+   for users who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
