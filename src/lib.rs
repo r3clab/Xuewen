@@ -4,8 +4,13 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod config;
+pub mod db;
 mod hash;
 mod http;
+pub mod library;
 mod pdf;
 pub mod tasks;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod testutil;
 mod text;
