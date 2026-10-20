@@ -2,6 +2,9 @@ use printpdf::*;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use xuewen::ingest::fetch::Fetcher;
+use xuewen::ingest::pipeline::{IngestCtx, Libraries};
+use xuewen::ingest::Ingest;
 use xuewen::metadata::resolve::Resolver;
 pub use xuewen::testutil::{sample_paper, temp_pool};
 
@@ -83,6 +86,18 @@ pub fn offline_resolver() -> Resolver {
     )
     .unwrap()
     .with_dblp_base("http://127.0.0.1:1".to_string())
+}
+
+pub fn ingest(pool: sqlx::SqlitePool, dir: &Path, resolver: Resolver, fetcher: Fetcher) -> Ingest {
+    Ingest::new(
+        IngestCtx::new(
+            pool,
+            Libraries::under(&dir.join("inbox"), &dir.join("library")),
+            resolver,
+            None,
+        ),
+        fetcher,
+    )
 }
 
 pub async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {

@@ -6,5 +6,9 @@ mod support;
 
 mod agent;
 mod grobid;
+mod pipeline;
+mod refresh;
 mod resolve;
 mod schema;
+mod search;
+mod watcher;

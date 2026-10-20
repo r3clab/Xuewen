@@ -11,6 +11,7 @@ pub mod daily;
 pub mod db;
 mod hash;
 mod http;
+pub mod ingest;
 pub mod library;
 pub mod llm;
 pub mod metadata;
