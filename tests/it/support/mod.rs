@@ -2,6 +2,8 @@ use printpdf::*;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use xuewen::app::App;
+
 use xuewen::ingest::fetch::Fetcher;
 use xuewen::ingest::pipeline::{IngestCtx, Libraries};
 use xuewen::ingest::Ingest;
@@ -98,6 +100,10 @@ pub fn ingest(pool: sqlx::SqlitePool, dir: &Path, resolver: Resolver, fetcher: F
         ),
         fetcher,
     )
+}
+
+pub fn router(pool: sqlx::SqlitePool, library_root: PathBuf) -> axum::Router {
+    xuewen::web::router(App::builder(pool, library_root).build())
 }
 
 pub async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {

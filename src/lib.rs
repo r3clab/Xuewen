@@ -5,6 +5,7 @@
 
 pub mod agent;
 mod annotations;
+pub mod app;
 pub mod citations;
 pub mod config;
 pub mod daily;
@@ -25,3 +26,4 @@ pub mod tasks;
 pub mod testutil;
 mod text;
 pub mod translate;
+pub mod web;
