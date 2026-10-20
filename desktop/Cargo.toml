@@ -1,0 +1,24 @@
+[package]
+name = "xuewen-desktop"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+xuewen = { path = ".." }
+tauri = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+dirs = "6"
+rfd = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

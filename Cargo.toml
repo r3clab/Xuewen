@@ -75,7 +75,7 @@ wiremock = "0.6"
 axum-test = "17"
 
 [workspace]
-members = ["."]
+members = [".", "desktop"]
 
 # Single source of truth for the release version: both crates inherit it,
 # tauri.conf.json (no `version` key) falls back to the desktop crate's, and

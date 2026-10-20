@@ -1,0 +1,8 @@
+{
+  "name": "xuewen-desktop",
+  "private": true,
+  "description": "Pins the Tauri CLI that bundles and signs the .app/.dmg, so two builds of the same tag use the same tool.",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}
