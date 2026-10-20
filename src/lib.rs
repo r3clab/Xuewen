@@ -1,12 +1,10 @@
 #![warn(unreachable_pub)]
-// TODO: drop once the cli layer lands; until then lower layers hold
-// helpers whose callers are not written yet.
-#![allow(dead_code, unused_imports)]
 
 pub mod agent;
 mod annotations;
 pub mod app;
 pub mod citations;
+pub mod cli;
 pub mod config;
 pub mod daily;
 pub mod db;
