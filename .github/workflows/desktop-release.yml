@@ -1,0 +1,61 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  dmg:
+    runs-on: macos-14 # arm64
+    # Cap the job so a hung tool (e.g. dylibbundler prompting with no stdin)
+    # fails fast instead of burning the better part of an hour.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build frontend (embedded into the binary by rust-embed)
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Install agent-runner production deps (bundled as resources)
+        run: npm --prefix agent-runner ci --omit=dev
+
+      - name: Prepare sidecars (node + pdftotext with relocated dylibs)
+        run: |
+          brew install poppler dylibbundler
+          bash desktop/scripts/prepare-sidecars.sh
+
+      # The Tauri CLI performs the bundling and ad-hoc signing, so it is
+      # pinned via desktop/package.json rather than floated with npx: two
+      # builds of the same tag must use the same tool.
+      - name: Build .app and .dmg
+        run: |
+          npm ci
+          npx tauri build
+        working-directory: desktop
+
+      # The dmg is published as a build artifact only. This repo enforces
+      # immutable releases — assets cannot be added to a release after it is
+      # created, and a tag whose release was created can never get another one.
+      # So the release is created atomically WITH the dmg outside CI, once the
+      # build here succeeds:
+      #   gh run download <run-id> -n xuewen-dmg
+      #   gh release create <tag> *.dmg --notes-file <notes>
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xuewen-dmg
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

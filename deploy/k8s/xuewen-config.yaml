@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xuewen-config
+data:
+  xuewen.toml: |
+    inbox_dir     = "/data/inbox"
+    library_root  = "/data/library"
+    database_url  = "sqlite:/data/library.db"
+
+    [preview]
+    cache_dir = "/data/preview-cache"
+
+    [search]
+    index_dir         = "/data/search-index"
+    qdrant_url        = "http://xuewen-qdrant:6333"
+    qdrant_collection = "xuewen"
+
+    [ai]
+    api_key_env = "OPENAI_API_KEY"
+    model       = "gpt-4o-mini"   # default for chat/summary/daily when enabled
+
+    [ai.embedding]
+    model = "text-embedding-3-small"
+    dims  = 1536
+
+    # Daily arXiv recommendations, shown on a Glance dashboard via /api/daily
+    # (optional). Requires [ai.embedding]: the library's title+abstract
+    # vectors are the interest profile the new papers are scored against.
+    #[daily]
+    #categories         = ["cs.AI", "cs.LG"]  # arXiv category codes (required)
+    #include_cross_list = false
+    #max_papers         = 20        # ranked papers kept per day
+    #run_at             = "09:00"   # daily run, UTC wall time
+    #retention_days     = 14
+
+    #[ai.daily]

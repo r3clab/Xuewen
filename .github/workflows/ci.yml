@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # pdftotext (poppler) and node back the ingest/pdf and agent stub-runner
+      # tests; git is preinstalled on the runner. build.rs writes a placeholder
+      # frontend/dist/index.html, so no frontend build is needed here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install poppler-utils (pdftotext)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      # ts-rs never deletes stale bindings, so the export tests in `cargo test`
+      # regenerate the directory from scratch for the drift check below.
+      - name: Remove generated TS bindings
+        run: rm -rf frontend/src/shared/api/generated
+      # Plain `cargo test` builds only the root package; the desktop crate needs
+      # macOS frameworks + sidecars and is covered by the `desktop` job instead.
+      - name: Test
+        run: cargo test
+      - name: Generated TS bindings are current
+        run: |
+          git diff --exit-code -- frontend/src/shared/api/generated
+          test -z "$(git status --porcelain -- frontend/src/shared/api/generated)"
+
+  frontend:
+    name: Frontend (check, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install deps
+        run: npm --prefix frontend ci
+      - name: Type-check (svelte-check)
+        run: npm --prefix frontend run check
+      - name: Test (vitest)
+        run: npm --prefix frontend test
+
+  desktop:
+    name: Desktop (clippy, test)
+    runs-on: macos-14 # arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # tauri-build validates the externalBin paths AND the binaries/libs
+      # resources entry at compile time; the real sidecars are gitignored and
+      # nothing here ever execs them, so empty-ish stand-ins suffice.
+      - name: Stub the gitignored sidecar binaries
+        run: |
+          mkdir -p desktop/binaries/libs
+          cp /usr/bin/true desktop/binaries/pdftotext-aarch64-apple-darwin
+          cp /usr/bin/true desktop/binaries/node-aarch64-apple-darwin
+
+      - name: Clippy
+        run: cargo clippy -p xuewen-desktop --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p xuewen-desktop
+
+  # Cheap hash-drift canaries: both packages pin an npmDepsHash that goes
+  # stale silently whenever the matching package-lock.json changes, and only
+  # a Nix build notices.
+  nix:
+    name: Nix (npm-locked packages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build frontend + agent-runner
+        run: nix build .#frontend .#agent-runner
+      # The pre-commit hook only runs inside the dev shell.
+      - name: treefmt
+        run: nix build .#checks.x86_64-linux.pkgs-formatter-check
+
+  # The expensive half: the release-mode backend build re-runs the whole test
+  # suite in the sandbox, and the VM check is the only end-to-end test of the
+  # deploy modules and agent-runner store wiring. Push-to-main only — on PRs
+  # the backend job already runs the same tests uncached-cheaper.
+  nix-full:
+    name: Nix (release build, VM module test)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      # The VM test needs /dev/kvm usable by the nix build users.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build xuewen (runs the full test suite in release mode)
+        run: nix build .#xuewen
+      - name: NixOS module VM test
+        run: nix build .#checks.x86_64-linux.nixos-module -L

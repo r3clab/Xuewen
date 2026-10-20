@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xuewen-qdrant
+  labels: { app: xuewen-qdrant }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: xuewen-qdrant }
+  template:
+    metadata:
+      labels: { app: xuewen-qdrant }
+    spec:
+      containers:
+        - name: qdrant
+          image: docker.io/qdrant/qdrant:v1.18.2
+          ports:
+            - containerPort: 6333
+              name: http
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 2Gi }
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: xuewen-qdrant-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xuewen-qdrant
+spec:
+  selector: { app: xuewen-qdrant }
+  ports:
+    - port: 6333
+      targetPort: http
+      name: http
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xuewen-qdrant-storage
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
