@@ -8,6 +8,7 @@ pub mod db;
 mod hash;
 mod http;
 pub mod library;
+pub mod metadata;
 mod pdf;
 pub mod tasks;
 #[cfg(any(test, feature = "test-support"))]

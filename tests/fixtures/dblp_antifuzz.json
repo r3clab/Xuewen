@@ -1,0 +1,50 @@
+{
+  "result": {
+    "query": "AntiFuzz Impeding Fuzzing Audits of Binary Executables",
+    "status": {
+      "@code": "200",
+      "text": "OK"
+    },
+    "hits": {
+      "@total": "1",
+      "@computed": "1",
+      "@sent": "1",
+      "@first": "0",
+      "hit": [
+        {
+          "@score": "5",
+          "@id": "3714559",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "248/1578",
+                  "text": "Emre Güler"
+                },
+                {
+                  "@pid": "160/7844",
+                  "text": "Cornelius Aschermann"
+                },
+                {
+                  "@pid": "73/2297-2",
+                  "text": "Ali Abbasi"
+                },
+                {
+                  "@pid": "h/ThorstenHolz",
+                  "text": "Thorsten Holz"
+                }
+              ]
+            },
+            "title": "AntiFuzz: Impeding Fuzzing Audits of Binary Executables.",
+            "venue": "USENIX Security Symposium",
+            "year": "2019",
+            "type": "Conference and Workshop Papers",
+            "key": "conf/uss/GulerAAH19",
+            "ee": "https://www.usenix.org/conference/usenixsecurity19/presentation/guler",
+            "url": "https://dblp.org/rec/conf/uss/GulerAAH19"
+          }
+        }
+      ]
+    }
+  }
+}

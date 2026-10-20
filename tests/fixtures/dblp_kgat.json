@@ -1,0 +1,39 @@
+{
+  "result": {
+    "hits": {
+      "@total": "1",
+      "@sent": "1",
+      "hit": [
+        {
+          "@score": "5",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "180/5794",
+                  "text": "Xiang Wang"
+                },
+                {
+                  "@pid": "59/1007",
+                  "text": "Xiangnan He"
+                },
+                {
+                  "@pid": "24/8048",
+                  "text": "Yixin Cao"
+                }
+              ]
+            },
+            "title": "KGAT: Knowledge Graph Attention Network for Recommendation.",
+            "venue": "KDD",
+            "year": "2019",
+            "type": "Conference and Workshop Papers",
+            "key": "conf/kdd/WangHCLC19",
+            "doi": "10.1145/3292500.3330701",
+            "ee": "https://doi.org/10.1145/3292500.3330701",
+            "url": "https://dblp.org/rec/conf/kdd/WangHCLC19"
+          }
+        }
+      ]
+    }
+  }
+}

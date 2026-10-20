@@ -1,0 +1,33 @@
+{
+  "status": "ok",
+  "message": {
+    "DOI": "10.1145/3292500.3330701",
+    "title": [
+      "KGAT: Knowledge Graph Attention Network for Recommendation"
+    ],
+    "author": [
+      {
+        "given": "Xiang",
+        "family": "Wang"
+      },
+      {
+        "given": "Xiangnan",
+        "family": "He"
+      }
+    ],
+    "container-title": [
+      "Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining"
+    ],
+    "issued": {
+      "date-parts": [
+        [
+          2019,
+          7,
+          25
+        ]
+      ]
+    },
+    "abstract": "<jats:p>Knowledge graphs are used to improve recommendation.</jats:p>",
+    "URL": "http://dx.doi.org/10.1145/3292500.3330701"
+  }
+}

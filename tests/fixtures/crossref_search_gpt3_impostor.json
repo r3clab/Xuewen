@@ -1,0 +1,148 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message": {
+    "items": [
+      {
+        "DOI": "10.65525/svup.9788199778009.2026.224-230",
+        "type": "book-chapter",
+        "title": [
+          "Language Models are Few-Shot Learners"
+        ],
+        "container-title": [
+          "Neural Horizons The Uncharted Future of Deep Learning"
+        ],
+        "publisher": "Swami Vivekananda University",
+        "issued": {
+          "date-parts": [
+            [
+              2026
+            ]
+          ]
+        },
+        "author": [
+          {
+            "given": "Sourav",
+            "family": "Malakar",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "URL": "https://doi.org/10.65525/svup.9788199778009.2026.224-230"
+      },
+      {
+        "DOI": "10.21437/interspeech.2023-1082",
+        "type": "proceedings-article",
+        "title": [
+          "Adapting Language-Audio Models as Few-Shot Audio Learners"
+        ],
+        "container-title": [
+          "INTERSPEECH 2023"
+        ],
+        "publisher": "ISCA",
+        "issued": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              20
+            ]
+          ]
+        },
+        "author": [
+          {
+            "given": "Jinhua",
+            "family": "Liang",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Xubo",
+            "family": "Liu",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Haohe",
+            "family": "Liu",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Huy",
+            "family": "Phan",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Emmanouil",
+            "family": "Benetos",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Mark D.",
+            "family": "Plumbley",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Wenwu",
+            "family": "Wang",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "URL": "https://doi.org/10.21437/interspeech.2023-1082"
+      }
+    ]
+  }
+}

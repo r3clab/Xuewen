@@ -1,0 +1,63 @@
+{
+  "notes": [
+    {
+      "content": {
+        "venue": {
+          "value": "ICLR 2026 Oral"
+        },
+        "keywords": {
+          "value": [
+            "Transformers",
+            "complexity",
+            "expressivity",
+            "automata",
+            "LTL"
+          ]
+        },
+        "abstract": {
+          "value": "We study succinctness as a measure of the expressive power of transformers. Succinctness."
+        },
+        "title": {
+          "value": "Transformers are Inherently Succinct"
+        },
+        "pdf": {
+          "value": "/pdf/90f081a717c7ae3f8ecb46283511beb0acf60765.pdf"
+        },
+        "venueid": {
+          "value": "ICLR.cc/2026/Conference"
+        },
+        "authors": {
+          "value": [
+            "Pascal Bergsträßer",
+            "Ryan Cotterell",
+            "Anthony Widjaja Lin"
+          ]
+        }
+      },
+      "forum": "Yxz92UuPLQ",
+      "number": 18954,
+      "invitations": [
+        "ICLR.cc/2026/Conference/-/Submission",
+        "ICLR.cc/2026/Conference/-/Post_Submission",
+        "ICLR.cc/2026/Conference/Submission18954/-/Full_Submission",
+        "ICLR.cc/2026/Conference/Submission18954/-/Rebuttal_Revision",
+        "ICLR.cc/2026/Conference/-/Edit",
+        "ICLR.cc/2026/Conference/Submission18954/-/Camera_Ready_Revision"
+      ],
+      "id": "Yxz92UuPLQ"
+    },
+    {
+      "content": {
+        "summary": {
+          "value": "This paper studies the class of languages expressible by Uniform Hard Attention Transformers."
+        },
+        "rating": {
+          "value": 8
+        }
+      },
+      "forum": "Yxz92UuPLQ",
+      "id": "TEyJI4DQAP"
+    }
+  ],
+  "count": 10000
+}

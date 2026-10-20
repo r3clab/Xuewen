@@ -1,0 +1,36 @@
+{
+  "result": {
+    "hits": {
+      "@total": "1",
+      "hit": [
+        {
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "text": "Jacob Devlin"
+                },
+                {
+                  "text": "Ming-Wei Chang"
+                },
+                {
+                  "text": "Kenton Lee"
+                },
+                {
+                  "text": "Kristina Toutanova"
+                }
+              ]
+            },
+            "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding.",
+            "venue": "NAACL-HLT",
+            "year": "2019",
+            "key": "conf/naacl/DevlinCLT19",
+            "doi": "10.18653/v1/n19-1423",
+            "ee": "https://doi.org/10.18653/v1/n19-1423",
+            "url": "https://dblp.org/rec/conf/naacl/DevlinCLT19"
+          }
+        }
+      ]
+    }
+  }
+}
