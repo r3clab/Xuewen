@@ -1,0 +1,102 @@
+[package]
+name = "xuewen"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "fs",
+  "time",
+  "sync",
+  "process",
+  "signal",
+] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "sqlite",
+  "macros",
+  "migrate",
+] }
+uuid = { version = "1", features = ["v7", "v5"] }
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+percent-encoding = "2" # already transitive via reqwest/url; promoted for direct use
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "multipart",
+  "json",
+  "stream",
+] }
+futures-util = "0.3"
+async-stream = "0.3"
+serde_json = "1"
+roxmltree = "0.20"
+strsim = "0.11"
+notify = "6"
+unicode-normalization = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+rust-embed = "8"
+mime_guess = "2"
+flate2 = "1"
+brotli = "8"
+tantivy = "0.26"
+hayro = "0.7" # pure-Rust PDF rasterizer for the picker previews (src/preview)
+async-trait = "0.1.89"
+tokio-util = { version = "0.7", features = ["rt"] }
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
+tempfile = { version = "3", optional = true }
+
+# Process-group kill for the agent runner: SIGKILL to the runner alone
+# orphans the SDKs' vendored-CLI grandchildren (src/agent/mod.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+test-support = ["dep:tempfile"]
+
+[dev-dependencies]
+tempfile = "3"
+xuewen = { path = ".", features = ["test-support"] }
+printpdf = "0.12"
+wiremock = "0.6"
+axum-test = "17"
+
+[workspace]
+members = ["."]
+
+# Single source of truth for the release version: both crates inherit it,
+# tauri.conf.json (no `version` key) falls back to the desktop crate's, and
+# the nix/ packages read it with lib.importTOML.
+[workspace.package]
+version = "0.1.2"
+
+# Hashing and compression are the only places a dev build does real work per
+# request, and unoptimized they dominate it: rust-embed re-reads and SHA-256s
+# every asset on every request in debug (that is what makes a frontend rebuild
+# show up without a Rust recompile), which measured 38-44 ms for the 4.6 MB
+# PDFium wasm — ~119 MB/s, exactly unoptimized SHA-256 speed. These crates are
+# pure computation with no debugging value, so optimize them even in dev; they
+# are compiled once and the rest of the tree keeps its fast, debuggable build.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.brotli]
+opt-level = 3
+[profile.dev.package.brotli-decompressor]
+opt-level = 3
