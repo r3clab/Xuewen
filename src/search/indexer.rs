@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::search::{chunker, fts, planner, store, vector, SearchService};
+use crate::search::vector::{OpenError, OpenMode};
+use crate::search::{chunker, fts, planner, store, vector, SearchService, Semantic};
 use crate::tasks::Tasks;
 
 #[derive(Debug, Default)]
@@ -13,6 +14,7 @@ pub struct SweepSummary {
     pub indexed: usize,
     pub(crate) deindexed: usize,
     pub failed: usize,
+    pub(crate) vectors_touched: usize,
 }
 
 /// Which tiers `rebuild` drops and re-derives.
@@ -24,11 +26,12 @@ pub(crate) enum RebuildScope {
 }
 
 /// Drop and re-derive the search indexes from SQLite + PDFs (`xuewen index
-/// rebuild`). Refuses to touch an index another process is writing
-/// (`probe_writable`), then wipes the Tantivy directory BEFORE opening —
-/// `SearchService::open` detects the fresh directory and clears the FTS
-/// stamps itself — clears the requested stamps, recreates the Qdrant
-/// collection, and runs one full sweep.
+/// rebuild`). Nothing is wiped until both indexes are known to be ours:
+/// `probe_writable` refuses a Tantivy index another process is writing, and
+/// the vector store's lock is taken (and, for a vectors rebuild, the store
+/// recreated under it) before the Tantivy directory goes. `SearchService::open`
+/// then detects the fresh Tantivy directory and clears the FTS stamps itself,
+/// a recreated store clears the vector stamps, and one full sweep follows.
 pub(crate) async fn rebuild(
     pool: sqlx::SqlitePool,
     search: &crate::config::SearchConfig,
@@ -43,6 +46,21 @@ pub(crate) async fn rebuild(
     };
     if do_fts {
         fts::FtsIndex::probe_writable(&search.index_dir)?;
+    }
+    let mode = if do_vectors {
+        OpenMode::Recreate
+    } else {
+        OpenMode::LoadOrCreate
+    };
+    let semantic = Semantic::open(&pool, search, ai, mode).await?;
+    match &semantic {
+        Semantic::Unavailable(e @ OpenError::Locked { .. }) => {
+            anyhow::bail!("{e} — stop it and retry")
+        }
+        Semantic::Unavailable(e) if do_vectors => anyhow::bail!("{e}"),
+        _ => {}
+    }
+    if do_fts {
         match std::fs::remove_dir_all(&search.index_dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -52,14 +70,13 @@ pub(crate) async fn rebuild(
             ),
         }
     }
-    let svc = SearchService::open(pool.clone(), search, ai).await?;
+    let svc = SearchService::open(pool.clone(), search, semantic).await?;
     store::clear_stamps(&pool, do_fts, do_vectors).await?;
-    if do_vectors {
-        if let Some(tier) = &svc.semantic {
-            tier.store.recreate_collection().await?;
-        }
+    let summary = sweep(&svc, library_root).await;
+    if let Some(vectors) = svc.semantic.store() {
+        vectors.close_gracefully().await;
     }
-    sweep(&svc, library_root).await
+    summary
 }
 
 /// One full pass: remove tombstones, (re)index every stale paper.
@@ -68,17 +85,23 @@ pub(crate) async fn rebuild(
 pub async fn sweep(svc: &SearchService, library_root: &Path) -> Result<SweepSummary> {
     let papers = svc.paper_states().await?;
     let rows = store::all_index_rows(&svc.pool).await?;
+    let tier = svc.semantic.tier();
     let plan = planner::plan(
         &papers,
         &rows,
-        svc.semantic.as_ref().map(|t| t.embedder.model()),
+        tier.map(|t| t.embedder.model()),
         chrono::Utc::now(),
     );
     let mut summary = SweepSummary::default();
 
     for paper_id in &plan.deindex {
         match deindex_paper(svc, paper_id).await {
-            Ok(()) => summary.deindexed += 1,
+            Ok(()) => {
+                summary.deindexed += 1;
+                if tier.is_some() {
+                    summary.vectors_touched += 1;
+                }
+            }
             Err(e) => {
                 tracing::warn!("deindex {paper_id}: {e}");
                 summary.failed += 1;
@@ -87,7 +110,12 @@ pub async fn sweep(svc: &SearchService, library_root: &Path) -> Result<SweepSumm
     }
     for work in &plan.index {
         match index_paper(svc, library_root, work).await {
-            Ok(true) => summary.indexed += 1,
+            Ok(true) => {
+                summary.indexed += 1;
+                if work.vectors {
+                    summary.vectors_touched += 1;
+                }
+            }
             Ok(false) => {}
             Err(f) => {
                 tracing::warn!("index {}: {}", work.paper_id, f.source);
@@ -96,6 +124,11 @@ pub async fn sweep(svc: &SearchService, library_root: &Path) -> Result<SweepSumm
                     .ok();
                 summary.failed += 1;
             }
+        }
+    }
+    if let Some(tier) = tier.filter(|_| summary.vectors_touched > 0) {
+        if let Err(e) = tier.store.optimize().await {
+            tracing::warn!("vector store optimize: {e:#}");
         }
     }
     Ok(summary)
@@ -122,7 +155,7 @@ async fn index_paper(
     // on it. Without an embedder there is no vector tier to hot-loop — and a
     // `vec_last_error` written then would never be cleared, since no vector
     // pass ever runs to clear it — so the charge narrows to FTS alone.
-    let pre_tier = if svc.semantic.is_some() {
+    let pre_tier = if svc.semantic.tier().is_some() {
         store::ErrorTier::Both
     } else {
         store::ErrorTier::Fts
@@ -215,13 +248,12 @@ async fn index_vectors(
     paper: &crate::library::model::Paper,
     chunks: &[chunker::Chunk],
 ) -> Result<()> {
-    let Some(tier) = &svc.semantic else {
+    let Some(tier) = svc.semantic.tier() else {
         return Ok(()); // planner only schedules vectors when configured
     };
     if !chunks.is_empty() {
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let vectors = tier.embedder.embed(&texts).await?;
-        tier.store.ensure_collection().await?;
         let points: Vec<vector::ChunkPoint> = chunks
             .iter()
             .zip(vectors)
@@ -232,7 +264,7 @@ async fn index_vectors(
                 vector: v,
             })
             .collect();
-        tier.store.upsert(&points).await?;
+        tier.store.upsert(points).await?;
     }
     store::mark_vectors_done(&svc.pool, &paper.id, tier.embedder.model()).await?;
     Ok(())
@@ -240,12 +272,12 @@ async fn index_vectors(
 
 async fn deindex_paper(svc: &SearchService, paper_id: &str) -> Result<()> {
     svc.fts_delete(paper_id.to_string()).await?;
-    if let Some(tier) = &svc.semantic {
-        // Qdrant cleanup only matters when vectors were ever written; a dead
-        // Qdrant here must not wedge the tombstone forever.
+    if let Some(tier) = svc.semantic.tier() {
+        // Vector cleanup only matters when vectors were ever written; a failing
+        // store here must not wedge the tombstone forever.
         if let Err(e) = tier.store.delete_paper(paper_id).await {
             tracing::warn!(
-                "qdrant delete {paper_id}: {e} (index row removed anyway; \
+                "vector delete {paper_id}: {e} (index row removed anyway; \
                             orphan points are overwritten if the paper returns)"
             );
         }
@@ -295,7 +327,7 @@ async fn run(
 mod tests {
     use super::*;
     use crate::library::model::{Authors, Paper, PaperMeta, PaperStatus};
-    use crate::search::{embedder, fts, store, vector, SearchService};
+    use crate::search::{fts, store, vector, SearchService};
     use printpdf::*;
     use serde_json::json;
     use std::path::Path;
@@ -331,7 +363,8 @@ mod tests {
         _dirs: Vec<tempfile::TempDir>,
     }
 
-    /// Temp SQLite + temp Tantivy + wiremock Qdrant/embeddings (when given).
+    /// Temp SQLite + temp Tantivy, plus a temp vector store and wiremock
+    /// embeddings when given a server.
     async fn fixture(server: Option<&MockServer>) -> Fixture {
         let db_dir = tempfile::tempdir().unwrap();
         let url = format!("sqlite:{}", db_dir.path().join("t.db").display());
@@ -340,16 +373,44 @@ mod tests {
         let (fts_idx, _) = fts::FtsIndex::open(idx_dir.path()).unwrap();
         let lib_dir = tempfile::tempdir().unwrap();
         let library_root = lib_dir.path().to_path_buf();
-        let semantic = server.map(|s| crate::search::SemanticTier {
-            embedder: embedder::Embedder::for_tests(&format!("{}/v1", s.uri()), "m1", 4),
-            store: vector::QdrantStore::new(&s.uri(), "xuewen", 4).unwrap(),
-        });
+        let dirs = vec![db_dir, idx_dir, lib_dir];
+        let semantic = match server {
+            Some(s) => Some(crate::testutil::tier(&format!("{}/v1", s.uri()), Vec::new()).await),
+            None => None,
+        };
         let svc = SearchService::open_with(pool, fts_idx, semantic);
         Fixture {
             svc,
             library_root,
-            _dirs: vec![db_dir, idx_dir, lib_dir],
+            _dirs: dirs,
         }
+    }
+
+    async fn echo_embeddings() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(|req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let n = body["input"].as_array().map(|a| a.len()).unwrap_or(1);
+                let data: Vec<_> = (0..n)
+                    .map(|i| json!({"index": i, "embedding": [0.1, 0.2, 0.3, 0.4]}))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(json!({"data": data}))
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn vector_hits(store: &vector::VectorStore) -> Vec<(String, i64)> {
+        store
+            .search(&[0.1, 0.2, 0.3, 0.4], 100, vector::SeqFilter::All, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.paper_id, h.seq))
+            .collect()
     }
 
     async fn insert_paper_with_pdf(f: &Fixture, id: &str, title: &str, body_line: &str) {
@@ -393,31 +454,13 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_wipes_and_rederives_the_fts_index() {
-        let db_dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", db_dir.path().join("t.db").display());
-        let pool = crate::db::connect(&url).await.unwrap();
-        let lib_dir = tempfile::tempdir().unwrap();
-        insert_paper_with_pdf_at(
-            &pool,
-            lib_dir.path(),
-            "p1",
-            "Fuzzing Firmware",
-            "body words",
-        )
-        .await;
-
-        let search = crate::config::SearchConfig {
-            index_dir: db_dir.path().join("search-index"),
-            qdrant_url: "http://127.0.0.1:1".into(),
-            qdrant_collection: "xuewen".into(),
-        };
+        let f = rebuild_fixture().await;
         let ai = crate::config::AiConfig::default();
-
         let s = rebuild(
-            pool.clone(),
-            &search,
+            f.pool.clone(),
+            &f.search,
             &ai,
-            lib_dir.path(),
+            &f.library_root,
             RebuildScope::Both,
         )
         .await
@@ -429,10 +472,10 @@ mod tests {
         // and proves the writer-lock probe passes once the first service is
         // gone.
         let s = rebuild(
-            pool.clone(),
-            &search,
+            f.pool.clone(),
+            &f.search,
             &ai,
-            lib_dir.path(),
+            &f.library_root,
             RebuildScope::Both,
         )
         .await
@@ -549,41 +592,21 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_embeds_and_upserts_vectors_when_configured() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/embeddings"))
-            .respond_with(|req: &wiremock::Request| {
-                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-                let n = body["input"].as_array().map(|a| a.len()).unwrap_or(1);
-                let data: Vec<_> = (0..n)
-                    .map(|i| json!({"index": i, "embedding": [0.1, 0.2, 0.3, 0.4]}))
-                    .collect();
-                ResponseTemplate::new(200).set_body_json(json!({"data": data}))
-            })
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/collections/xuewen"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": {"config": {"params": {"vectors": {"size": 4, "distance": "Cosine"}}}}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/collections/xuewen/points"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": {}})))
-            .expect(1..)
-            .mount(&server)
-            .await;
-
+        let server = echo_embeddings().await;
         let f = fixture(Some(&server)).await;
         insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
 
         let s = sweep_in(&f).await.unwrap();
         assert_eq!(s.indexed, 1);
+        assert_eq!(s.vectors_touched, 1);
         let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
         assert!(rows[0].vectors_indexed_at.is_some());
         assert_eq!(rows[0].embed_model.as_deref(), Some("m1"));
+        let hits = vector_hits(f.svc.semantic.store().unwrap()).await;
+        assert!(hits.contains(&("p1".to_string(), 0)), "got: {hits:?}");
+
+        let s = sweep_in(&f).await.unwrap();
+        assert_eq!(s.vectors_touched, 0, "nothing stale, nothing to optimize");
     }
 
     #[tokio::test]
@@ -756,53 +779,43 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        // Qdrant delete for a no-embedder service is skipped, not an error.
+        // Vector delete for a no-embedder service is skipped, not an error.
     }
 
     #[tokio::test]
-    async fn qdrant_delete_failure_does_not_wedge_tombstone() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/embeddings"))
-            .respond_with(|req: &wiremock::Request| {
-                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-                let n = body["input"].as_array().map(|a| a.len()).unwrap_or(1);
-                let data: Vec<_> = (0..n)
-                    .map(|i| json!({"index": i, "embedding": [0.1, 0.2, 0.3, 0.4]}))
-                    .collect();
-                ResponseTemplate::new(200).set_body_json(json!({"data": data}))
-            })
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/collections/xuewen"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": {"config": {"params": {"vectors": {"size": 4, "distance": "Cosine"}}}}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/collections/xuewen/points"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": {}})))
-            .mount(&server)
-            .await;
-        // The delete endpoint is down: the tombstone must still clear.
-        Mock::given(method("POST"))
-            .and(path("/collections/xuewen/points/delete"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(1)
-            .mount(&server)
-            .await;
-
+    async fn trashed_paper_vectors_are_removed_from_the_store() {
+        let server = echo_embeddings().await;
         let f = fixture(Some(&server)).await;
         insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        insert_paper_with_pdf(&f, "p2", "Sorting Networks", "other words").await;
         sweep_in(&f).await.unwrap();
 
         crate::library::trash::soft_delete(&f.svc.pool, "p1")
             .await
             .unwrap();
         let s = sweep_in(&f).await.unwrap();
-        assert_eq!(s.deindexed, 1, "tombstone cleared despite qdrant failure");
+        assert_eq!(s.deindexed, 1);
+        let hits = vector_hits(f.svc.semantic.store().unwrap()).await;
+        assert!(hits.iter().all(|(id, _)| id == "p2"), "got: {hits:?}");
+        assert!(!hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vector_delete_failure_does_not_wedge_tombstone() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        sweep_in(&f).await.unwrap();
+
+        f.svc.semantic.store().unwrap().close().await.unwrap();
+        crate::library::trash::soft_delete(&f.svc.pool, "p1")
+            .await
+            .unwrap();
+        let s = sweep_in(&f).await.unwrap();
+        assert_eq!(
+            s.deindexed, 1,
+            "tombstone cleared despite the store failing"
+        );
         assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
         assert!(f
             .svc
@@ -810,6 +823,95 @@ mod tests {
             .search("fuzzing", &fts::FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
+    }
+
+    struct RebuildFixture {
+        pool: sqlx::SqlitePool,
+        search: crate::config::SearchConfig,
+        library_root: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn rebuild_fixture() -> RebuildFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}", dir.path().join("t.db").display());
+        let pool = crate::db::connect(&url).await.unwrap();
+        let library_root = dir.path().join("library");
+        std::fs::create_dir_all(&library_root).unwrap();
+        insert_paper_with_pdf_at(&pool, &library_root, "p1", "Fuzzing Firmware", "body words")
+            .await;
+        let search = crate::config::SearchConfig {
+            index_dir: dir.path().join("search-index"),
+            vector_dir: dir.path().join("search-vectors"),
+        };
+        RebuildFixture {
+            pool,
+            search,
+            library_root,
+            _dir: dir,
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_refuses_a_held_vector_store_before_wiping_the_fts_index() {
+        let server = echo_embeddings().await;
+        let ai = crate::testutil::embedding_ai(&format!("{}/v1", server.uri()), 4);
+        let f = rebuild_fixture().await;
+        rebuild(
+            f.pool.clone(),
+            &f.search,
+            &ai,
+            &f.library_root,
+            RebuildScope::Both,
+        )
+        .await
+        .unwrap();
+        let index_meta = f.search.index_dir.join("meta.json");
+        assert!(index_meta.exists());
+
+        let (_held, _) = vector::VectorStore::open(&f.search.vector_dir, 4, OpenMode::LoadOrCreate)
+            .await
+            .unwrap();
+        for scope in [RebuildScope::Fts, RebuildScope::Vectors, RebuildScope::Both] {
+            let err = rebuild(f.pool.clone(), &f.search, &ai, &f.library_root, scope)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("in use"), "got: {err}");
+            assert!(index_meta.exists(), "the Tantivy index must survive");
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_vectors_only_recreates_a_store_with_other_dims() {
+        let server = echo_embeddings().await;
+        let f = rebuild_fixture().await;
+        let (old, _) = vector::VectorStore::open(&f.search.vector_dir, 8, OpenMode::LoadOrCreate)
+            .await
+            .unwrap();
+        old.close().await.unwrap();
+
+        let ai = crate::testutil::embedding_ai(&format!("{}/v1", server.uri()), 4);
+        let s = rebuild(
+            f.pool.clone(),
+            &f.search,
+            &ai,
+            &f.library_root,
+            RebuildScope::Vectors,
+        )
+        .await
+        .unwrap();
+        assert_eq!((s.indexed, s.failed), (1, 0));
+
+        let (store, opened) =
+            vector::VectorStore::open(&f.search.vector_dir, 4, OpenMode::LoadOrCreate)
+                .await
+                .unwrap();
+        assert_eq!(
+            opened,
+            vector::Opened::Populated,
+            "rebuild released the store"
+        );
+        assert!(vector_hits(&store).await.contains(&("p1".to_string(), 0)));
     }
 
     // Helper used by every test: sweep against the fixture's library root.

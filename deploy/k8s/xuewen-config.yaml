@@ -12,9 +12,8 @@ data:
     cache_dir = "/data/preview-cache"
 
     [search]
-    index_dir         = "/data/search-index"
-    qdrant_url        = "http://xuewen-qdrant:6333"
-    qdrant_collection = "xuewen"
+    index_dir  = "/data/search-index"
+    vector_dir = "/data/search-vectors"
 
     [ai]
     api_key_env = "OPENAI_API_KEY"

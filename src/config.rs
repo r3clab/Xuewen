@@ -44,17 +44,31 @@ pub(crate) struct ProxyConfig {
 pub struct SearchConfig {
     /// Tantivy index directory (derived data; safe to delete).
     pub index_dir: PathBuf,
-    pub(crate) qdrant_url: String,
-    pub(crate) qdrant_collection: String,
+    /// Qdrant Edge vector store directory (derived data; safe to delete while
+    /// no xuewen process holds it).
+    pub vector_dir: PathBuf,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             index_dir: PathBuf::from("./search-index"),
-            qdrant_url: "http://localhost:6333".to_string(),
-            qdrant_collection: "xuewen".to_string(),
+            vector_dir: PathBuf::from("./search-vectors"),
         }
+    }
+}
+
+impl SearchConfig {
+    fn check_dirs(&self) -> Result<()> {
+        let (index, vectors) = (&self.index_dir, &self.vector_dir);
+        anyhow::ensure!(
+            !index.starts_with(vectors) && !vectors.starts_with(index),
+            "[search] index_dir ({}) and vector_dir ({}) must not contain each other: \
+             `index rebuild` wipes each of them",
+            index.display(),
+            vectors.display()
+        );
+        Ok(())
     }
 }
 
@@ -362,8 +376,10 @@ impl Config {
         cfg.inbox_dir = expand_tilde(cfg.inbox_dir, home.clone());
         cfg.library_root = expand_tilde(cfg.library_root, home.clone());
         cfg.search.index_dir = expand_tilde(cfg.search.index_dir, home.clone());
+        cfg.search.vector_dir = expand_tilde(cfg.search.vector_dir, home.clone());
         cfg.preview.cache_dir = expand_tilde(cfg.preview.cache_dir, home.clone());
         cfg.ai.agent.runner = cfg.ai.agent.runner.map(|p| expand_tilde(p, home));
+        cfg.search.check_dirs()?;
         Ok(cfg)
     }
 }
@@ -477,9 +493,50 @@ database_url = "sqlite:/data/library.db"
         let cfg = Config::load(f.path()).unwrap();
         assert_eq!(cfg.search.index_dir, PathBuf::from("./search-index"));
         assert_eq!(cfg.preview.cache_dir, PathBuf::from("./preview-cache"));
-        assert_eq!(cfg.search.qdrant_url, "http://localhost:6333");
-        assert_eq!(cfg.search.qdrant_collection, "xuewen");
+        assert_eq!(cfg.search.vector_dir, PathBuf::from("./search-vectors"));
         assert!(cfg.ai.embedding.is_none());
+    }
+
+    #[test]
+    fn legacy_qdrant_keys_are_ignored() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"
+inbox_dir = "/data/inbox"
+library_root = "/data/library"
+database_url = "sqlite:/data/library.db"
+
+[search]
+qdrant_url = "http://localhost:6333"
+qdrant_collection = "xuewen"
+"#
+        )
+        .unwrap();
+        let cfg = Config::load(f.path()).unwrap();
+        assert_eq!(cfg.search.vector_dir, PathBuf::from("./search-vectors"));
+    }
+
+    #[test]
+    fn nested_index_and_vector_dirs_are_rejected() {
+        for (index, vectors) in [("/d/idx", "/d/idx/vec"), ("/d/vec/idx", "/d/vec")] {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            write!(
+                f,
+                r#"
+inbox_dir = "/data/inbox"
+library_root = "/data/library"
+database_url = "sqlite:/data/library.db"
+
+[search]
+index_dir = "{index}"
+vector_dir = "{vectors}"
+"#
+            )
+            .unwrap();
+            let err = Config::load(f.path()).unwrap_err();
+            assert!(err.to_string().contains("vector_dir"), "got: {err}");
+        }
     }
 
     #[test]
@@ -494,6 +551,7 @@ database_url = "sqlite:/data/library.db"
 
 [search]
 index_dir = "~/idx"
+vector_dir = "~/vec"
 
 [ai.embedding]
 api_key = "sk-test"
@@ -503,6 +561,7 @@ api_key = "sk-test"
         let cfg = Config::load(f.path()).unwrap();
         // tilde expanded like inbox_dir/library_root
         assert!(!cfg.search.index_dir.starts_with("~"));
+        assert!(!cfg.search.vector_dir.starts_with("~"));
         let e = cfg.ai.embedding.as_ref().unwrap();
         assert_eq!(e.dims, 1536);
         assert_eq!(e.endpoint.api_key.as_deref(), Some("sk-test"));

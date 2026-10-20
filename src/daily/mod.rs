@@ -13,15 +13,17 @@ use crate::config::{Config, DailyConfig};
 use crate::http::{user_agent, HttpClient, RetryPolicy};
 use crate::llm::LlmClient;
 use crate::search::embedder::Embedder;
-use crate::search::vector::QdrantStore;
+use crate::search::vector::VectorStore;
+use crate::search::Semantic;
 use crate::tasks::Tasks;
 
 const ARXIV_FEED_BASE: &str = "https://rss.arxiv.org/atom";
 const ARXIV_PDF_BASE: &str = "https://arxiv.org/pdf";
 const ARXIV_ABS_BASE: &str = "https://arxiv.org/abs";
 
-/// Daily arXiv recommendations. Owns its own HTTP clients (all stateless)
-/// so it stays independent of `SearchService`.
+/// Daily arXiv recommendations. Owns its own HTTP clients (all stateless);
+/// only the vector store is shared with `SearchService`, since one process
+/// can hold it at a time.
 pub struct DailyService {
     cfg: DailyConfig,
     pool: SqlitePool,
@@ -30,7 +32,7 @@ pub struct DailyService {
     /// PDF downloads (bytes; single attempt — the TL;DR chain absorbs failures).
     pub(crate) plain_http: reqwest::Client,
     pub(crate) embedder: Embedder,
-    pub(crate) vectors: QdrantStore,
+    pub(crate) vectors: VectorStore,
     pub(crate) chat: LlmClient,
     pub(crate) feed_base: String,
     pub(crate) pdf_base: String,
@@ -39,9 +41,13 @@ pub struct DailyService {
 
 impl DailyService {
     /// `Ok(None)` when the feature is off: no `[daily]` section, no
-    /// `[ai.embedding]`/`[ai.daily]`, or a missing API key (each case warns).
-    /// `Err` only on invalid `[daily]` values.
-    pub(crate) fn from_config(cfg: &Config, pool: SqlitePool) -> anyhow::Result<Option<Arc<Self>>> {
+    /// `[ai.embedding]`/`[ai.daily]`, a missing API key, or no vector store
+    /// (each case warns). `Err` only on invalid `[daily]` values.
+    pub(crate) fn from_config(
+        cfg: &Config,
+        pool: SqlitePool,
+        semantic: &Semantic,
+    ) -> anyhow::Result<Option<Arc<Self>>> {
         let Some(daily) = &cfg.daily else {
             return Ok(None);
         };
@@ -66,11 +72,11 @@ impl DailyService {
             tracing::warn!("[ai.daily] has no model or API key — daily papers disabled");
             return Ok(None);
         };
-        let vectors = QdrantStore::new(
-            &cfg.search.qdrant_url,
-            &cfg.search.qdrant_collection,
-            embed.dims,
-        )?;
+        let Some(vectors) = semantic.store().cloned() else {
+            let reason = semantic.reason().unwrap_or_default();
+            tracing::warn!("[daily] set but the vector store is unavailable ({reason}) — daily papers disabled");
+            return Ok(None);
+        };
         let ua = user_agent(cfg.contact_email.as_deref());
         Ok(Some(Arc::new(Self {
             cfg: daily.clone(),
@@ -97,7 +103,7 @@ impl DailyService {
         cfg: DailyConfig,
         pool: SqlitePool,
         embedder: Embedder,
-        vectors: QdrantStore,
+        vectors: VectorStore,
         chat: LlmClient,
         feed_base: &str,
         pdf_base: &str,

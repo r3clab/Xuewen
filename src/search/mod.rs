@@ -5,10 +5,15 @@ mod fusion;
 pub mod indexer;
 mod planner;
 mod query;
+mod semantic;
 mod store;
 pub mod vector;
 
+pub(crate) use semantic::Semantic;
+pub use semantic::SemanticTier;
+
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,14 +143,16 @@ pub struct SearchOutcome {
     pub results: Vec<(Paper, MatchInfo)>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct TierCounts {
     pub(crate) indexed: i64,
     pub pending: i64,
     pub failed: i64,
 }
 
-#[derive(Debug, Clone)]
+/// The CLI deserializes `GET /api/search/status` into this, so field names
+/// must match that JSON.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IndexStatus {
     pub fts: TierCounts,
     pub(crate) vectors: TierCounts,
@@ -153,23 +160,14 @@ pub struct IndexStatus {
     pub(crate) reason: Option<String>,
 }
 
-/// The semantic tier's two halves. They live and die together — a Qdrant
-/// store is useless without an embedder to query it — so the pairing is one
-/// optional field instead of two separately-optional ones re-guarded at
-/// every call site.
-pub struct SemanticTier {
-    embedder: embedder::Embedder,
-    store: vector::QdrantStore,
-}
-
 /// Owns the three search backends. SQLite remains the source of truth;
-/// Tantivy and Qdrant are derived and rebuildable.
+/// Tantivy and the vector store are derived and rebuildable.
 pub struct SearchService {
     pool: SqlitePool,
     /// Arc so the spawn_blocking facades below can move a handle into their
     /// closures; the index itself stays synchronous.
     pub fts: Arc<fts::FtsIndex>,
-    semantic: Option<SemanticTier>,
+    semantic: Semantic,
     notify: tokio::sync::Notify,
 }
 
@@ -177,31 +175,12 @@ impl SearchService {
     pub(crate) async fn open(
         pool: SqlitePool,
         cfg: &SearchConfig,
-        ai: &crate::config::AiConfig,
+        semantic: Semantic,
     ) -> Result<Arc<Self>> {
         let (fts_idx, created) = fts::FtsIndex::open(&cfg.index_dir)?;
         if created {
             store::clear_stamps(&pool, true, false).await?;
         }
-        let semantic = match &ai.embedding {
-            Some(e) => {
-                let r = ai.resolve(&e.endpoint);
-                let model = e.model();
-                embedder::Embedder::from_resolved(&r, &model, e.dims)
-                    .map(|embedder| {
-                        anyhow::Ok(SemanticTier {
-                            embedder,
-                            store: vector::QdrantStore::new(
-                                &cfg.qdrant_url,
-                                &cfg.qdrant_collection,
-                                e.dims,
-                            )?,
-                        })
-                    })
-                    .transpose()?
-            }
-            None => None,
-        };
         Ok(Arc::new(Self {
             pool,
             fts: Arc::new(fts_idx),
@@ -219,7 +198,7 @@ impl SearchService {
         Arc::new(Self {
             pool,
             fts: Arc::new(fts),
-            semantic,
+            semantic: semantic.into(),
             notify: tokio::sync::Notify::new(),
         })
     }
@@ -268,17 +247,10 @@ impl SearchService {
     }
 
     fn semantic_config_state(&self) -> SemanticState {
-        match &self.semantic {
-            Some(_) => SemanticState {
-                available: true,
-                reason: None,
-            },
-            None => SemanticState {
-                available: false,
-                reason: Some(
-                    "embedding API not configured (set [ai.embedding] and an API key)".into(),
-                ),
-            },
+        let reason = self.semantic.reason();
+        SemanticState {
+            available: reason.is_none(),
+            reason,
         }
     }
 
@@ -338,10 +310,10 @@ impl SearchService {
             Vec::new()
         };
 
-        // Best chunk per paper, in Qdrant score order.
+        // Best chunk per paper, in vector score order.
         let mut semantic_best: Vec<vector::VecHit> = Vec::new();
         if req.semantic && semantic.available && !q.is_empty() {
-            if let Some(tier) = &self.semantic {
+            if let Some(tier) = self.semantic.tier() {
                 match Self::semantic_search(tier, q, &req.fields, scope.as_deref()).await {
                     Ok(hits) => {
                         let mut seen = std::collections::HashSet::new();
@@ -474,7 +446,7 @@ impl SearchService {
         let rows = store::all_index_rows(&self.pool).await?;
         let by_id: std::collections::HashMap<&str, &store::IndexRow> =
             rows.iter().map(|r| (r.paper_id.as_str(), r)).collect();
-        let model = self.semantic.as_ref().map(|t| t.embedder.model());
+        let model = self.semantic.tier().map(|t| t.embedder.model());
 
         // A tier is "indexed" exactly when the planner's staleness predicate
         // sees no work for it — one definition, so status and the sweep can
@@ -504,7 +476,7 @@ impl SearchService {
         }
         let sem = self.semantic_config_state();
         // Without an embedder the vectors tier is idle, not "all indexed".
-        let vectors = if self.semantic.is_some() {
+        let vectors = if self.semantic.tier().is_some() {
             TierCounts {
                 indexed: vec_indexed,
                 pending: live_n - vec_indexed,
@@ -656,13 +628,13 @@ mod tests {
         SearchService::open_with(pool, fts, None)
     }
 
-    /// Semantic tier pointed at a wiremock server standing in for both
-    /// Qdrant and the embedding API.
-    fn mock_tier(server: &MockServer) -> SemanticTier {
-        SemanticTier {
-            embedder: embedder::Embedder::for_tests(&format!("{}/v1", server.uri()), "m", 4),
-            store: vector::QdrantStore::new(&server.uri(), "xuewen", 4).unwrap(),
-        }
+    async fn tier(server: &MockServer, seeds: Vec<vector::ChunkPoint>) -> SemanticTier {
+        crate::testutil::tier(&format!("{}/v1", server.uri()), seeds).await
+    }
+
+    /// A chunk whose vector is what the mocked embedder returns for any query.
+    fn seed(paper: &str, seq: i64, page: Option<i64>) -> vector::ChunkPoint {
+        crate::testutil::chunk(paper, seq, page, vec![0.1, 0.2, 0.3, 0.4])
     }
 
     #[tokio::test]
@@ -833,7 +805,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Wiremock plays both Qdrant and the embedding API.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
@@ -842,11 +813,6 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("POST")).and(path("/collections/xuewen/points/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [{"id": "x", "score": 0.9, "payload": {"paper_id": "a", "seq": 1, "page": 7}}]
-            })))
-            .mount(&server).await;
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
@@ -862,7 +828,11 @@ mod tests {
                 notes: String::new(),
             })
             .unwrap();
-        let svc = SearchService::open_with(pool, fts_idx, Some(mock_tier(&server)));
+        let svc = SearchService::open_with(
+            pool,
+            fts_idx,
+            Some(tier(&server, vec![seed("a", 1, Some(7))]).await),
+        );
 
         let out = svc
             .search(&SearchRequest {
@@ -916,16 +886,15 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("POST")).and(path("/collections/xuewen/points/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [{"id": "x", "score": 0.9, "payload": {"paper_id": "a", "seq": 2, "page": 3}}]
-            })))
-            .mount(&server).await;
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
         std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(mock_tier(&server)));
+        let svc = SearchService::open_with(
+            pool,
+            fts_idx,
+            Some(tier(&server, vec![seed("a", 2, Some(3))]).await),
+        );
 
         let out = svc
             .search(&SearchRequest {
@@ -954,8 +923,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn semantic_failure_degrades_with_reason() {
+    async fn degraded_reason(tier: SemanticTier) -> String {
         let pool = pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Fuzzing Firmware"))
             .await
@@ -974,11 +942,6 @@ mod tests {
                 notes: String::new(),
             })
             .unwrap();
-        // Embedder points at a dead port -> semantic path errors.
-        let tier = SemanticTier {
-            embedder: embedder::Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-            store: vector::QdrantStore::new("http://127.0.0.1:1", "xuewen", 4).unwrap(),
-        };
         let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
@@ -997,8 +960,54 @@ mod tests {
             .unwrap();
 
         assert!(!out.semantic.available);
-        assert!(out.semantic.reason.is_some());
         assert_eq!(out.results.len(), 1, "keyword results still returned");
+        out.semantic.reason.expect("a degraded tier says why")
+    }
+
+    #[tokio::test]
+    async fn semantic_failure_degrades_with_reason() {
+        degraded_reason(crate::testutil::tier("http://127.0.0.1:1/v1", Vec::new()).await).await;
+    }
+
+    #[tokio::test]
+    async fn a_failing_vector_store_degrades_semantic_but_keeps_keyword_hits() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]
+            })))
+            .mount(&server)
+            .await;
+        let tier = tier(&server, Vec::new()).await;
+        tier.store.close().await.unwrap();
+
+        let reason = degraded_reason(tier).await;
+        assert!(reason.contains("closed"), "got: {reason}");
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_vector_store_is_the_reported_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SearchConfig {
+            index_dir: dir.path().join("index"),
+            vector_dir: dir.path().join("vectors"),
+        };
+        let semantic = Semantic::Unavailable(vector::OpenError::Locked {
+            dir: cfg.vector_dir.clone(),
+            holder: None,
+        });
+        let svc = SearchService::open(pool().await, &cfg, semantic)
+            .await
+            .unwrap();
+
+        let st = svc.status().await.unwrap();
+        assert!(!st.semantic_available);
+        let reason = st.reason.unwrap();
+        assert!(
+            reason.contains("in use by another xuewen process"),
+            "got: {reason}"
+        );
     }
 
     #[tokio::test]
@@ -1067,18 +1076,11 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("POST"))
-            .and(path("/collections/xuewen/points/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": []
-            })))
-            .mount(&server)
-            .await;
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
         std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(mock_tier(&server)));
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier(&server, Vec::new()).await));
 
         let out = svc
             .search(&SearchRequest {
@@ -1239,16 +1241,15 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        Mock::given(method("POST")).and(path("/collections/xuewen/points/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [{"id": "x", "score": 0.9, "payload": {"paper_id": "a", "seq": 2, "page": 3}}]
-            })))
-            .mount(&server).await;
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
         std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(mock_tier(&server)));
+        let svc = SearchService::open_with(
+            pool,
+            fts_idx,
+            Some(tier(&server, vec![seed("a", 2, Some(3))]).await),
+        );
 
         let out = svc
             .search(&SearchRequest {
@@ -1347,7 +1348,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
         std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(mock_tier(&server)));
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier(&server, Vec::new()).await));
 
         let out = svc
             .search(&SearchRequest {

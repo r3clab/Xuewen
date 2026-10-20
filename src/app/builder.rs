@@ -16,7 +16,8 @@ use crate::ingest::fetch::Fetcher;
 use crate::ingest::pipeline::IngestCtx;
 use crate::ingest::Ingest;
 use crate::preview::PreviewService;
-use crate::search::{indexer, SearchService};
+use crate::search::vector::{OpenMode, VectorStore};
+use crate::search::{indexer, SearchService, Semantic};
 use crate::summary::SummaryService;
 use crate::tasks::Tasks;
 use crate::translate::TranslateService;
@@ -44,6 +45,7 @@ impl AppBuilder {
                 library_root,
                 ingest: None,
                 search: None,
+                vectors: None,
                 daily: None,
                 agent: None,
                 citations,
@@ -74,6 +76,11 @@ impl AppBuilder {
 
     pub fn search(mut self, search: impl Into<Option<Arc<SearchService>>>) -> Self {
         self.inner.search = search.into();
+        self
+    }
+
+    pub(super) fn vectors(mut self, vectors: Option<VectorStore>) -> Self {
+        self.inner.vectors = vectors;
         self
     }
 
@@ -143,14 +150,18 @@ fn from_config(cfg: &Config, pool: SqlitePool) -> AppBuilder {
 /// synchronously, so keep resolver retries short.
 pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     let ingest = ingest(cfg, pool.clone(), RetryPolicy::interactive())?;
-    let search = match SearchService::open(pool.clone(), &cfg.search, &cfg.ai).await {
+    // One handle per process: the store's lock refuses a second opener, so
+    // search and daily share this one.
+    let semantic = Semantic::open(&pool, &cfg.search, &cfg.ai, OpenMode::LoadOrCreate).await?;
+    let vectors = semantic.store().cloned();
+    let daily = DailyService::from_config(cfg, pool.clone(), &semantic)?;
+    let search = match SearchService::open(pool.clone(), &cfg.search, semantic).await {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::warn!("search disabled: {e}");
             None
         }
     };
-    let daily = DailyService::from_config(cfg, pool.clone())?;
     let summary = SummaryService::from_config(pool.clone(), cfg);
     let agent = AgentService::from_config(&cfg.ai.agent);
     match &agent {
@@ -192,6 +203,7 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     Ok(builder
         .ingest(ingest)
         .search(search)
+        .vectors(vectors)
         .daily(daily)
         .summary(summary)
         .agent(agent)

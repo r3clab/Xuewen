@@ -56,7 +56,8 @@ pub fn default_config_toml(data: &Path) -> String {
          database_url = {db}\n\
          \n\
          [search]\n\
-         index_dir = {index}\n\
+         index_dir  = {index}\n\
+         vector_dir = {vectors}\n\
          \n\
          [preview]\n\
          cache_dir = {preview}\n",
@@ -64,8 +65,18 @@ pub fn default_config_toml(data: &Path) -> String {
         library = toml_quote(&data.join("library")),
         db = toml_quote_str(&format!("sqlite:{}", data.join("xuewen.db").display())),
         index = toml_quote(&data.join("search-index")),
+        vectors = toml_quote(&data.join("search-vectors")),
         preview = toml_quote(&data.join("preview-cache")),
     )
+}
+
+/// Configs bootstrapped before the vector store existed lack
+/// `[search] vector_dir`, and its relative default would land under `/` in a
+/// Finder launch. In-memory only — never written back to the user's config.
+pub fn default_vector_dir(cfg: &mut xuewen::config::Config, data: &Path) {
+    if cfg.search.vector_dir == xuewen::config::SearchConfig::default().vector_dir {
+        cfg.search.vector_dir = data.join("search-vectors");
+    }
 }
 
 /// Create the app directories and, only when absent, the default config.
@@ -137,7 +148,26 @@ mod tests {
             format!("sqlite:{}", data.join("xuewen.db").display())
         );
         assert_eq!(cfg.search.index_dir, data.join("search-index"));
+        assert_eq!(cfg.search.vector_dir, data.join("search-vectors"));
         assert_eq!(cfg.preview.cache_dir, data.join("preview-cache"));
+    }
+
+    #[test]
+    fn default_vector_dir_fills_only_a_missing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("Xuewen");
+        let f = tmp.path().join("xuewen.toml");
+        let base = "inbox_dir = \"/i\"\nlibrary_root = \"/l\"\ndatabase_url = \"sqlite:/d\"\n";
+
+        std::fs::write(&f, base).unwrap();
+        let mut cfg = xuewen::config::Config::load(&f).unwrap();
+        default_vector_dir(&mut cfg, &data);
+        assert_eq!(cfg.search.vector_dir, data.join("search-vectors"));
+
+        std::fs::write(&f, format!("{base}[search]\nvector_dir = \"/v\"\n")).unwrap();
+        let mut cfg = xuewen::config::Config::load(&f).unwrap();
+        default_vector_dir(&mut cfg, &data);
+        assert_eq!(cfg.search.vector_dir, PathBuf::from("/v"));
     }
 
     #[test]

@@ -54,7 +54,7 @@ The two characters double as the interface marks: **學** (xué, *learning*) is 
 
 | Layer | Tech |
 | --- | --- |
-| Backend | Rust — [Axum](https://github.com/tokio-rs/axum), [SQLx](https://github.com/launchbadge/sqlx)/SQLite, [Tantivy](https://github.com/quickwit-oss/tantivy) (keyword), [Qdrant](https://qdrant.tech/) (vectors), reqwest |
+| Backend | Rust — [Axum](https://github.com/tokio-rs/axum), [SQLx](https://github.com/launchbadge/sqlx)/SQLite, [Tantivy](https://github.com/quickwit-oss/tantivy) (keyword), [Qdrant Edge](https://crates.io/crates/qdrant-edge) (vectors, embedded in-process — no server), reqwest |
 | Frontend | [Svelte 5](https://svelte.dev/) + Vite + Tailwind, embedded via `rust-embed` |
 | Text extraction | `pdftotext` (poppler-utils) |
 
@@ -106,7 +106,7 @@ Either right-click the app → **Open** (once), or:
 xattr -d com.apple.quarantine /Applications/Xuewen.app
 ```
 
-**Where data lives:** `~/Library/Application Support/Xuewen/` — `xuewen.toml`, an `env` file for API keys, `xuewen.db`, `library/`, `inbox/`, `search-index/`, and `preview-cache/`.
+**Where data lives:** `~/Library/Application Support/Xuewen/` — `xuewen.toml`, an `env` file for API keys, `xuewen.db`, `library/`, `inbox/`, `search-index/`, `search-vectors/`, and `preview-cache/`.
 Logs go to `~/Library/Logs/Xuewen/`.
 First launch creates all of this; existing files are never overwritten.
 
@@ -115,7 +115,7 @@ server — see [Configuration](#configuration)) and put keys in the `env` file, 
 `KEY=value` per line (e.g. `OPENAI_API_KEY=sk-...`), then relaunch.
 
 **What's bundled:** `pdftotext` and Node.js ship inside the app, so PDF ingest and Agent Ask work out of the box.
-Semantic search still needs a Qdrant instance running locally, same as the server.
+Semantic search is built in as well: vectors are stored in `search-vectors/`, so it needs only `[ai.embedding]` and an API key, with nothing else to install.
 
 **Building locally:**
 
@@ -140,7 +140,9 @@ database_url = "sqlite:./library.db"
 
 Optional sections enable the richer features:
 
-- `[ai.embedding]` + `[search]` with `qdrant_url` — semantic search.
+- `[ai.embedding]` — semantic search; needs only an API key.
+  Vectors are stored in-process (no separate server) under `[search].vector_dir` (default `./search-vectors`, `~` expanded like `index_dir`); neither directory may contain the other.
+  After changing `[ai.embedding].dims`, recreate the store with `xuewen index rebuild --vectors-only`.
 - `[ai.agent.*]` — the reader's Ask thread / paper chat (a tool-using agent; see
   [Agent Ask setup](#agent-ask-setup)).
 - `[daily]` — daily arXiv recommendations.
@@ -149,6 +151,10 @@ Optional sections enable the richer features:
 
 API keys are read from environment variables via `api_key_env` (e.g. `OPENAI_API_KEY`), so they never need to live in the config file.
 `src/config.rs` defines the full set of options.
+
+**Upgrading from an external Qdrant server:** `qdrant_url` and `qdrant_collection` are now ignored.
+The embedded store starts empty, so the first start re-embeds the whole library through the embedding API, which costs API calls and takes a while.
+Once semantic search works again, the old Qdrant server and its data can be removed.
 
 ### Agent Ask setup
 
@@ -204,6 +210,10 @@ The same binary drives everything from the terminal:
 | `code` | Attach, inspect, or detach a paper's code repo for Agent Ask (`set` / `status` / `rm`) |
 | `delete` / `restore` / `purge` | Trash lifecycle |
 | `proxy-cookie` | Manage the stored EZproxy session cookie |
+
+Only one process can hold the vector store at a time.
+While `xuewen serve` (or the desktop app) is running, `xuewen search` and `xuewen index status` forward to it over HTTP, so they keep returning semantic results.
+`xuewen index rebuild` refuses to run until that server is stopped, and `xuewen watch` started beside it warns and skips indexing.
 
 Run `xuewen --help` (or `xuewen <command> --help`) for the full flags.
 

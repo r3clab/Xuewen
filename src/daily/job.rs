@@ -233,7 +233,7 @@ mod tests {
     use crate::config::DailyConfig;
     use crate::daily::{store, DailyService};
     use crate::llm::LlmClient;
-    use crate::search::{embedder::Embedder, vector::QdrantStore};
+    use crate::search::embedder::Embedder;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -321,26 +321,29 @@ Abstract: Very similar to the library.</summary>
         }
     }
 
-    fn service(server: &MockServer, pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
+    async fn service(server: &MockServer, pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
         DailyService::for_tests(
             cfg(),
             pool,
             Embedder::for_tests(&format!("{}/v1", server.uri()), "m", 4),
-            QdrantStore::new(&server.uri(), "xuewen", 4).unwrap(),
+            crate::testutil::temp_vectors(4).await,
             LlmClient::new(&format!("{}/v1", server.uri()), "m", None),
             &format!("{}/atom", server.uri()),
             &format!("{}/pdf", server.uri()),
         )
     }
 
-    async fn mount_scroll(server: &MockServer, points: serde_json::Value) {
-        Mock::given(method("POST"))
-            .and(path("/collections/xuewen/points/scroll"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": {"points": points, "next_page_offset": null}
-            })))
-            .mount(server)
-            .await;
+    /// lib1's summary vector: parallel to candidate B, orthogonal to A.
+    async fn seed_library_vector(svc: &DailyService) {
+        svc.vectors
+            .upsert(vec![crate::testutil::chunk(
+                "lib1",
+                0,
+                None,
+                vec![1.0, 0.0, 0.0, 0.0],
+            )])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -356,12 +359,6 @@ Abstract: Very similar to the library.</summary>
             .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
             .mount(&server)
             .await;
-        mount_scroll(
-            &server,
-            json!([{"id": "x", "payload": {"paper_id": "lib1", "seq": 0},
-                    "vector": [1.0, 0.0, 0.0, 0.0]}]),
-        )
-        .await;
         // Candidate order in the feed: A then B. A is orthogonal, B parallel.
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
@@ -388,7 +385,8 @@ Abstract: Very similar to the library.</summary>
             .mount(&server)
             .await;
 
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
+        seed_library_vector(&svc).await;
         let run = run_once(&svc, "2026-07-10").await;
 
         assert_eq!(run.status, "ok");
@@ -429,12 +427,6 @@ Abstract: Very similar to the library.</summary>
             .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
             .mount(&server)
             .await;
-        mount_scroll(
-            &server,
-            json!([{"id": "x", "payload": {"paper_id": "lib1", "seq": 0},
-                    "vector": [1.0, 0.0, 0.0, 0.0]}]),
-        )
-        .await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -457,7 +449,8 @@ Abstract: Very similar to the library.</summary>
             .mount(&server)
             .await;
 
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
+        seed_library_vector(&svc).await;
         let run = run_once(&svc, "2026-07-10").await;
 
         assert_eq!(run.status, "ok");
@@ -481,7 +474,7 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
         let run =
             run_once_with_deadline(&svc, "2026-07-10", std::time::Duration::from_millis(50)).await;
         assert_eq!(run.status, "failed");
@@ -499,7 +492,7 @@ Abstract: Very similar to the library.</summary>
             .respond_with(ResponseTemplate::new(200).set_body_string(EMPTY_FEED))
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
         assert_eq!(run.status, "empty");
         assert_eq!(run.papers_found, 0);
@@ -515,7 +508,7 @@ Abstract: Very similar to the library.</summary>
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
         assert_eq!(run.status, "failed");
         assert!(run.error.is_some());
@@ -530,8 +523,7 @@ Abstract: Very similar to the library.</summary>
             .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
             .mount(&server)
             .await;
-        mount_scroll(&server, json!([])).await;
-        let svc = service(&server, pool.clone());
+        let svc = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
         assert_eq!(run.status, "failed");
         assert!(
@@ -554,7 +546,7 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool);
+        let svc = service(&server, pool).await;
         assert!(svc.spawn_run("2026-07-10".into(), &crate::tasks::Tasks::new()));
         assert!(svc.is_running());
         assert!(svc.run_guarded("2026-07-10").await.is_none());
@@ -573,7 +565,7 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool);
+        let svc = service(&server, pool).await;
         {
             let fut = svc.run_guarded("2026-07-10");
             tokio::pin!(fut);

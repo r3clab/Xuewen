@@ -86,12 +86,25 @@ kubectl port-forward svc/xuewen 8080:8080
 curl -X POST localhost:8080/api/daily/run
 ```
 
+## Upgrading from the Qdrant pod
+
+Vectors now live inside the xuewen pod, in `/data/search-vectors` on the `xuewen-data` PVC; there is no separate Qdrant Deployment any more.
+The new store starts empty, so the first start re-embeds the whole library through the embedding API, which costs API calls and takes a while.
+Leftover `qdrant_url` / `qdrant_collection` keys in the ConfigMap are ignored.
+
+`kubectl apply` does not prune, so the old Qdrant resources keep running after the upgrade.
+Once semantic search works, delete them by hand:
+
+```sh
+kubectl delete deployment/xuewen-qdrant service/xuewen-qdrant pvc/xuewen-qdrant-storage
+```
+
 ## Notes
 
-- `replicas` must stay 1 (SQLite and Tantivy are single-writer); the
-  Recreate strategy makes rollouts safe on the shared PVC.
-- All state lives in the `xuewen-data` PVC (`/data`): the SQLite DB, PDFs, inbox, and the Tantivy index.
-  Qdrant state is separate and rebuildable (`kubectl exec deploy/xuewen -- xuewen --config /etc/xuewen/xuewen.toml index rebuild --vectors-only` — the explicit `--config` is required because the default looks for `./xuewen.toml`).
+- `replicas` must stay 1 (SQLite, Tantivy and the vector store are single-writer); the Recreate strategy makes rollouts safe on the shared PVC.
+- All state lives in the `xuewen-data` PVC (`/data`): the SQLite DB, PDFs, inbox, the Tantivy index, and the vector store (`/data/search-vectors`).
+- `kubectl exec deploy/xuewen -- xuewen --config /etc/xuewen/xuewen.toml search '…'` works while the server runs: the CLI forwards the query to it over HTTP.
+  The explicit `--config` is required because the default looks for `./xuewen.toml`.
 - Validate manifests offline: `kubectl apply --dry-run=client --validate=false -f deploy/k8s/`
 - Local smoke test without a cluster:
 
@@ -111,11 +124,43 @@ curl -X POST localhost:8080/api/daily/run
   ```
 
   `kubectl cp` does NOT work here — the image has no `tar`.
-- Vector rebuild in-pod:
+- Vector rebuild (e.g. after changing `[ai.embedding].dims`): `index rebuild` refuses to run while the server holds the vector store, so it cannot run in the live pod.
+  Scale the Deployment to 0, run the rebuild in a one-off Job that mounts the same PVC and ConfigMap, then scale back to 1:
 
   ```sh
-  kubectl exec deploy/xuewen -- xuewen --config /etc/xuewen/xuewen.toml index rebuild --vectors-only
+  kubectl scale deploy/xuewen --replicas=0
+  kubectl wait --for=delete pod -l app=xuewen --timeout=2m
+  kubectl apply -f - <<'EOF'
+  apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: xuewen-rebuild
+  spec:
+    backoffLimit: 0
+    template:
+      spec:
+        restartPolicy: Never
+        securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+        containers:
+          - name: rebuild
+            image: ghcr.io/r3clab/xuewen:latest
+            command: [xuewen, --config, /etc/xuewen/xuewen.toml, index, rebuild, --vectors-only]
+            envFrom:
+              - secretRef: { name: xuewen-secrets }
+            volumeMounts:
+              - { name: data, mountPath: /data }
+              - { name: config, mountPath: /etc/xuewen }
+        volumes:
+          - name: data
+            persistentVolumeClaim: { claimName: xuewen-data }
+          - name: config
+            configMap: { name: xuewen-config }
+  EOF
+  kubectl wait --for=condition=complete --timeout=1h job/xuewen-rebuild
+  kubectl logs job/xuewen-rebuild
+  kubectl delete job/xuewen-rebuild
+  kubectl scale deploy/xuewen --replicas=1
   ```
 
-  The explicit `--config` is required — without it, `xuewen` looks for
-  `./xuewen.toml` and won't find the mounted ConfigMap.
+  The same applies to every `index rebuild` scope (drop `--vectors-only` to rebuild both indexes).
+  The explicit `--config` is required — without it, `xuewen` looks for `./xuewen.toml` and won't find the mounted ConfigMap.

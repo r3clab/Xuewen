@@ -5,6 +5,7 @@ mod ingest;
 mod library;
 mod output;
 mod project;
+mod remote;
 mod search;
 mod serve;
 mod settings;
@@ -15,6 +16,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::app::App;
 use crate::config::Config;
@@ -114,8 +116,18 @@ fn in_trash(id: &str) -> anyhow::Error {
     anyhow::anyhow!("{id} is in the trash — run: xuewen restore {id}")
 }
 
-#[tokio::main]
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(main());
+    // An optimize the vector store's close gave up on still holds a blocking
+    // thread, and dropping the runtime would wait for it with SIGTERM already
+    // swallowed by our handler. Its updates are flushed, so abandoning it is
+    // safe.
+    rt.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();

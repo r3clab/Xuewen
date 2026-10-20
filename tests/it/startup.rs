@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use xuewen::app::App;
+use xuewen::search::vector::{OpenError, OpenMode, VectorStore};
 
 use crate::support;
 
@@ -99,4 +100,69 @@ async fn serve_on_serves_api_on_an_ephemeral_port() {
         .expect("server stops once cancelled")
         .unwrap()
         .unwrap();
+}
+
+/// Embedding and daily both on, against an endpoint nothing listens on: the
+/// app never calls it during these tests.
+const SEMANTIC_AND_DAILY: &str = r#"
+[daily]
+categories = ["cs.AI"]
+
+[ai]
+base_url = "http://127.0.0.1:1/v1"
+api_key = "k"
+model = "m"
+
+[ai.embedding]
+model = "m1"
+dims = 4
+
+[ai.daily]
+"#;
+
+#[tokio::test]
+async fn started_app_shares_one_vector_store_and_releases_it_on_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = support::test_cfg_with(tmp.path(), SEMANTIC_AND_DAILY);
+    let pool = xuewen::db::connect(&cfg.database_url).await.unwrap();
+    let app = App::start(&cfg, pool).await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(xuewen::web::serve_on(
+        listener,
+        app.clone(),
+        app.tasks().token(),
+    ));
+
+    assert!(app.daily().is_ok(), "daily got the store");
+    let status: serde_json::Value = reqwest::get(format!("http://{addr}/api/search/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        status["reason"],
+        serde_json::Value::Null,
+        "search got the store too"
+    );
+
+    let contender = VectorStore::open(&cfg.search.vector_dir, 4, OpenMode::LoadOrCreate).await;
+    match contender {
+        Err(OpenError::Locked { holder, .. }) => assert_eq!(holder, Some(addr)),
+        other => panic!("expected Locked, got {:?}", other.map(|(_, o)| o)),
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), app.shutdown())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    VectorStore::open(&cfg.search.vector_dir, 4, OpenMode::LoadOrCreate)
+        .await
+        .expect("shutdown released the store");
 }

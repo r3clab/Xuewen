@@ -89,3 +89,49 @@ pub async fn insert_test_paper(pool: &sqlx::SqlitePool) -> String {
     crate::library::papers::insert(pool, &p).await.unwrap();
     id
 }
+
+/// Leaks its temp dir, like `pool_with_paper`.
+pub async fn temp_vectors(dims: usize) -> crate::search::vector::VectorStore {
+    use crate::search::vector::{OpenMode, VectorStore};
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = VectorStore::open(&dir.path().join("vectors"), dims, OpenMode::LoadOrCreate)
+        .await
+        .unwrap();
+    std::mem::forget(dir);
+    store
+}
+
+#[cfg(test)]
+pub(crate) fn chunk(
+    paper: &str,
+    seq: i64,
+    page: Option<i64>,
+    vector: Vec<f32>,
+) -> crate::search::vector::ChunkPoint {
+    crate::search::vector::ChunkPoint {
+        paper_id: paper.into(),
+        seq,
+        page,
+        vector,
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn tier(
+    base_url: &str,
+    seeds: Vec<crate::search::vector::ChunkPoint>,
+) -> crate::search::SemanticTier {
+    let store = temp_vectors(4).await;
+    store.upsert(seeds).await.unwrap();
+    crate::search::SemanticTier {
+        embedder: crate::search::embedder::Embedder::for_tests(base_url, "m1", 4),
+        store,
+    }
+}
+
+pub fn embedding_ai(base_url: &str, dims: usize) -> crate::config::AiConfig {
+    toml::from_str(&format!(
+        "[embedding]\nbase_url = \"{base_url}\"\napi_key = \"k\"\nmodel = \"m1\"\ndims = {dims}\n"
+    ))
+    .unwrap()
+}

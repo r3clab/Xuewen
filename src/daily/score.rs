@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use crate::search::vector::QdrantStore;
+use crate::search::vector::VectorStore;
 
 /// zotero-arxiv-daily's recency weights for `n` corpus papers ranked
 /// newest-first: w_i = 1/(1+log10(i+1)), normalized to sum 1.
@@ -33,7 +33,7 @@ pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// `None` when no live paper has an indexed summary vector.
 pub(crate) async fn build_profile(
     pool: &SqlitePool,
-    vectors: &QdrantStore,
+    vectors: &VectorStore,
 ) -> Result<Option<Vec<f32>>> {
     let points = vectors.scroll_summaries().await?;
     let mut by_id: HashMap<String, Vec<f32>> = points.into_iter().collect();
@@ -68,9 +68,6 @@ pub(crate) async fn build_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn recency_weights_normalized_and_decreasing() {
@@ -132,12 +129,18 @@ mod tests {
         }
     }
 
-    fn scroll_mock(points: serde_json::Value) -> Mock {
-        Mock::given(method("POST"))
-            .and(path("/collections/xuewen/points/scroll"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": {"points": points, "next_page_offset": null}
-            })))
+    async fn summaries(points: &[(&str, [f32; 4])]) -> VectorStore {
+        let store = crate::testutil::temp_vectors(4).await;
+        store
+            .upsert(
+                points
+                    .iter()
+                    .map(|(id, v)| crate::testutil::chunk(id, 0, None, v.to_vec()))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        store
     }
 
     #[tokio::test]
@@ -150,14 +153,11 @@ mod tests {
             .await
             .unwrap();
 
-        let server = MockServer::start().await;
-        scroll_mock(json!([
-            {"id": "a", "payload": {"paper_id": "new1", "seq": 0}, "vector": [1.0, 0.0, 0.0, 0.0]},
-            {"id": "b", "payload": {"paper_id": "old1", "seq": 0}, "vector": [0.0, 1.0, 0.0, 0.0]}
-        ]))
-        .mount(&server)
+        let vectors = summaries(&[
+            ("new1", [1.0, 0.0, 0.0, 0.0]),
+            ("old1", [0.0, 1.0, 0.0, 0.0]),
+        ])
         .await;
-        let vectors = crate::search::vector::QdrantStore::new(&server.uri(), "xuewen", 4).unwrap();
 
         let profile = build_profile(&pool, &vectors).await.unwrap().unwrap();
         // Candidate matching the NEW paper must outrank one matching the OLD.
@@ -169,9 +169,7 @@ mod tests {
     #[tokio::test]
     async fn empty_library_gives_no_profile() {
         let pool = pool().await;
-        let server = MockServer::start().await;
-        scroll_mock(json!([])).mount(&server).await;
-        let vectors = crate::search::vector::QdrantStore::new(&server.uri(), "xuewen", 4).unwrap();
+        let vectors = summaries(&[]).await;
         assert!(build_profile(&pool, &vectors).await.unwrap().is_none());
     }
 
@@ -184,13 +182,7 @@ mod tests {
         crate::library::trash::soft_delete(&pool, "p1")
             .await
             .unwrap();
-        let server = MockServer::start().await;
-        scroll_mock(json!([
-            {"id": "a", "payload": {"paper_id": "p1", "seq": 0}, "vector": [1.0, 0.0, 0.0, 0.0]}
-        ]))
-        .mount(&server)
-        .await;
-        let vectors = crate::search::vector::QdrantStore::new(&server.uri(), "xuewen", 4).unwrap();
+        let vectors = summaries(&[("p1", [1.0, 0.0, 0.0, 0.0])]).await;
         assert!(build_profile(&pool, &vectors).await.unwrap().is_none());
     }
 }

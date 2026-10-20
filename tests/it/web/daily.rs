@@ -8,7 +8,7 @@ use xuewen::app::App;
 use xuewen::config::DailyConfig;
 use xuewen::daily::{store, DailyService};
 use xuewen::llm::LlmClient;
-use xuewen::search::{embedder::Embedder, vector::QdrantStore};
+use xuewen::search::embedder::Embedder;
 
 fn daily_cfg() -> DailyConfig {
     DailyConfig {
@@ -22,12 +22,12 @@ fn daily_cfg() -> DailyConfig {
 
 /// A DailyService whose remote endpoints are all dead — fine for GET tests,
 /// which never call out.
-fn dead_service(pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
+async fn dead_service(pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
     DailyService::for_tests(
         daily_cfg(),
         pool,
         Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-        QdrantStore::new("http://127.0.0.1:1", "xuewen", 4).unwrap(),
+        xuewen::testutil::temp_vectors(4).await,
         LlmClient::new("http://127.0.0.1:1/v1", "m", None),
         "http://127.0.0.1:1/atom",
         "http://127.0.0.1:1/pdf",
@@ -78,7 +78,7 @@ async fn get_daily_returns_latest_batch() {
     )
     .await
     .unwrap();
-    let daily = dead_service(pool.clone());
+    let daily = dead_service(pool.clone()).await;
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
@@ -106,7 +106,7 @@ async fn get_daily_returns_latest_batch() {
 #[tokio::test]
 async fn get_daily_empty_state_is_200_with_null_date() {
     let (dir, pool) = support::temp_pool().await;
-    let daily = dead_service(pool.clone());
+    let daily = dead_service(pool.clone()).await;
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
@@ -148,7 +148,7 @@ async fn post_run_starts_then_conflicts_while_running() {
         daily_cfg(),
         pool.clone(),
         Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-        QdrantStore::new("http://127.0.0.1:1", "xuewen", 4).unwrap(),
+        xuewen::testutil::temp_vectors(4).await,
         LlmClient::new("http://127.0.0.1:1/v1", "m", None),
         &format!("{}/atom", mock.uri()),
         "http://127.0.0.1:1/pdf",

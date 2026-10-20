@@ -7,6 +7,7 @@ library.db*
 # instead of frontend/ (a bare `npx vitest` here mis-resolves).
 /node_modules/
 /search-index/
+/search-vectors/
 /preview-cache/
 result
 result-*
@@ -15,9 +16,6 @@ deploy/k8s/secret.yaml
 
 # Local demo data (DB, PDFs, vectors, config)
 /demo/
-
-# Local Qdrant bootstrap marker
-/.qdrant-initialized
 
 # Upstream EmbedPDF checkout, cloned here for reading the viewer's sources
 # (the app depends on the published @embedpdf/* packages, not on this tree).

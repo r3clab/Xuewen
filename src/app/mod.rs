@@ -9,6 +9,7 @@ mod purge;
 pub(crate) mod settings;
 pub(crate) mod summarize;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use crate::daily::DailyService;
 use crate::ingest::Ingest;
 use crate::library::model::Paper;
 use crate::preview::PreviewService;
+use crate::search::vector::VectorStore;
 use crate::search::SearchService;
 use crate::summary::SummaryService;
 use crate::tasks::Tasks;
@@ -48,6 +50,10 @@ struct Inner {
     /// Present when a search index/service was opened (serve). `None` in
     /// read-only test routers -> /api/search answers 503.
     search: Option<Arc<SearchService>>,
+    /// Present when `serve` holds the vector store: its address is published
+    /// through it, and it is closed at shutdown so the lock goes even if a
+    /// task outlives the grace period.
+    vectors: Option<VectorStore>,
     /// Present when daily arXiv recommendations are configured (`serve`).
     /// `None` -> /api/daily answers 503.
     daily: Option<Arc<DailyService>>,
@@ -116,7 +122,18 @@ impl App {
 
     pub async fn shutdown(&self) {
         self.inner.tasks.shutdown(SHUTDOWN_GRACE).await;
+        if let Some(vectors) = &self.inner.vectors {
+            vectors.close_gracefully().await;
+        }
         self.inner.pool.close().await;
+    }
+
+    pub(crate) async fn publish_address(&self, addr: SocketAddr) {
+        if let Some(vectors) = &self.inner.vectors {
+            if let Err(e) = vectors.publish_addr(addr).await {
+                tracing::warn!("could not publish the server address for the CLI: {e:#}");
+            }
+        }
     }
 
     pub(crate) fn ui(&self) -> &UiConfig {

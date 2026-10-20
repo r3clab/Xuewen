@@ -4,7 +4,7 @@ metadata:
   name: xuewen
   labels: { app: xuewen }
 spec:
-  replicas: 1            # SQLite + Tantivy are single-writer: never scale this up
+  replicas: 1            # SQLite, Tantivy and the vector store are single-writer: never scale this up
   strategy:
     type: Recreate       # old pod must release /data before the new one mounts it
   selector:
@@ -48,7 +48,7 @@ spec:
             timeoutSeconds: 5
           resources:
             requests: { cpu: 100m, memory: 256Mi }
-            limits: { memory: 1Gi }
+            limits: { memory: 2Gi }   # vectors are held in this process
       volumes:
         - name: data
           persistentVolumeClaim:

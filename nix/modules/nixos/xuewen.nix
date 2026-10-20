@@ -33,8 +33,8 @@ in
       type = lib.types.path;
       default = "/var/lib/xuewen";
       description = ''
-        State directory holding the inbox, library, SQLite database and search
-        index. Created automatically with the right ownership.
+        State directory holding the inbox, library, SQLite database, search
+        index and vector store. Created automatically with the right ownership.
       '';
     };
 

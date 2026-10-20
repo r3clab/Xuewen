@@ -100,8 +100,8 @@ rec {
       '';
       description = ''
         `xuewen.toml` as a Nix attrset. `inbox_dir`, `library_root`,
-        `database_url` and `search.index_dir` default under
-        {option}`services.xuewen.dataDir`; set them here to override.
+        `database_url`, `search.index_dir` and `search.vector_dir` default
+        under {option}`services.xuewen.dataDir`; set them here to override.
 
         Do NOT put API keys here — the generated file lands in the
         world-readable Nix store. Use `api_key_env` together with
@@ -118,12 +118,13 @@ rec {
 
     # Paths the backend requires. They default under `dataDir`; anything the
     # user puts in `settings` wins (recursiveUpdate is deep, so setting
-    # `settings.search.qdrant_url` keeps the `index_dir` default below).
+    # `settings.search.index_dir` keeps the `vector_dir` default below).
     derivedSettings = {
       inbox_dir = "${cfg.dataDir}/inbox";
       library_root = "${cfg.dataDir}/library";
       database_url = "sqlite:${cfg.dataDir}/library.db";
       search.index_dir = "${cfg.dataDir}/search-index";
+      search.vector_dir = "${cfg.dataDir}/search-vectors";
       preview.cache_dir = "${cfg.dataDir}/preview-cache";
     }
     # The backend resolves `[ai.agent].runner` against its working directory,

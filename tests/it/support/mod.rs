@@ -69,10 +69,11 @@ pub fn test_cfg_with(dir: &Path, extra: &str) -> xuewen::config::Config {
     std::fs::write(
         &f,
         format!(
-            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = \"sqlite::memory:\"\n\n[search]\nindex_dir = {:?}\n{extra}",
+            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = \"sqlite::memory:\"\n\n[search]\nindex_dir = {:?}\nvector_dir = {:?}\n{extra}",
             dir.join("inbox"),
             dir.join("library"),
             dir.join("search-index"),
+            dir.join("search-vectors"),
         ),
     )
     .unwrap();

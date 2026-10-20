@@ -7,8 +7,8 @@
 let
   inherit (perSystem.nix2container) nix2container;
   inherit (perSystem.self) xuewen;
-  # Baked default config: single /data volume, in-cluster Qdrant,
-  # key from the environment. A mounted ConfigMap shadows this file.
+  # Baked default config: single /data volume, key from the environment.
+  # A mounted ConfigMap shadows this file.
   configFile = pkgs.writeTextFile {
     name = "xuewen-default-config";
     destination = "/etc/xuewen/xuewen.toml";
@@ -18,9 +18,8 @@ let
       database_url  = "sqlite:/data/library.db"
 
       [search]
-      index_dir         = "/data/search-index"
-      qdrant_url        = "http://xuewen-qdrant:6333"
-      qdrant_collection = "xuewen"
+      index_dir  = "/data/search-index"
+      vector_dir = "/data/search-vectors"
 
       [ai]
       api_key_env = "OPENAI_API_KEY"

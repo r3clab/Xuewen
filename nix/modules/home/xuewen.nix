@@ -32,8 +32,9 @@ in
       default = "${config.xdg.dataHome}/xuewen";
       defaultText = lib.literalExpression ''"''${config.xdg.dataHome}/xuewen"'';
       description = ''
-        State directory holding the inbox, library, SQLite database and search
-        index. Created automatically before the service starts.
+        State directory holding the inbox, library, SQLite database, search
+        index and vector store. Created automatically before the service
+        starts.
       '';
     };
   };

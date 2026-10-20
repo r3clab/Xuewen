@@ -6,7 +6,8 @@ use super::serve::cancel_on_signal;
 use super::Ctx;
 use crate::ingest::import::{ImportError, Imported};
 use crate::ingest::refresh::RefreshTarget;
-use crate::search::{indexer, SearchService};
+use crate::search::vector::{OpenError, OpenMode};
+use crate::search::{indexer, SearchService, Semantic};
 
 #[derive(clap::Args)]
 pub(super) struct IngestArgs {
@@ -60,13 +61,31 @@ pub(super) async fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
 
 pub(super) async fn watch(ctx: &Ctx) -> Result<()> {
     let app = ctx.app();
-    match SearchService::open(ctx.pool.clone(), &ctx.cfg.search, &ctx.cfg.ai).await {
-        Ok(s) => indexer::spawn(app.tasks(), s, ctx.cfg.library_root.clone()),
-        Err(e) => tracing::warn!("search indexing disabled: {e}"),
+    let semantic = Semantic::open(
+        &ctx.pool,
+        &ctx.cfg.search,
+        &ctx.cfg.ai,
+        OpenMode::LoadOrCreate,
+    )
+    .await?;
+    let vectors = semantic.store().cloned();
+    match semantic {
+        // The holder runs its own sweeps; a second Tantivy writer here would
+        // only fail every paper into backoff.
+        Semantic::Unavailable(e @ OpenError::Locked { .. }) => {
+            tracing::warn!("search indexing disabled: {e}")
+        }
+        semantic => match SearchService::open(ctx.pool.clone(), &ctx.cfg.search, semantic).await {
+            Ok(s) => indexer::spawn(app.tasks(), s, ctx.cfg.library_root.clone()),
+            Err(e) => tracing::warn!("search indexing disabled: {e}"),
+        },
     }
     tokio::spawn(cancel_on_signal(app.tasks().token()));
     let watched = app.watch(&ctx.cfg.inbox_dir).await;
     app.shutdown().await;
+    if let Some(vectors) = vectors {
+        vectors.close_gracefully().await;
+    }
     Ok(watched?)
 }
 

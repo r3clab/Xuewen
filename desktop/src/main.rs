@@ -60,6 +60,7 @@ fn run() -> Result<()> {
 
     let mut cfg = xuewen::config::Config::load(&cfg_path)
         .with_context(|| format!("config file: {}", cfg_path.display()))?;
+    bootstrap::default_vector_dir(&mut cfg, &dirs.data);
     if let Some((_, resources)) = &bundle {
         if cfg.ai.agent.runner.is_none() {
             // In-memory only — never written back to the user's config.

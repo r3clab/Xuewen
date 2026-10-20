@@ -49,7 +49,7 @@ export const ENGINE_OPTIONS = {
 /// PdfErrorCode.Security before doing anything else (plugin-selection 2.14.4
 /// index.js:1281). Xuewen does not honour it, on purpose. The same file's full
 /// text is already extracted by `pdftotext` at ingest, stored in SQLite,
-/// indexed into Tantivy and Qdrant, summarised by an LLM, and written out as
+/// indexed into both search indexes, summarised by an LLM, and written out as
 /// `<library_root>/agent/<paper_id>/paper.txt` for the Ask agent to read;
 /// refusing to let the reader copy one sentence out of a document the app has
 /// read cover to cover would be theatre. The bit is advisory metadata, not

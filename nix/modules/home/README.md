@@ -48,9 +48,7 @@ On a Mac, use the native desktop app (`cargo run -p xuewen-desktop`, or the bund
 The service auto-starts on login (`WantedBy = default.target`).
 Manage it with `systemctl --user {start,stop,status} xuewen` and read logs with `journalctl --user -u xuewen`.
 
-`inbox_dir`, `library_root`, `database_url`, `search.index_dir` and
-`preview.cache_dir` default under `services.xuewen.dataDir` (`$XDG_DATA_HOME/xuewen`, i.e.
-`~/.local/share/xuewen`); override them via `settings` if needed.
+`inbox_dir`, `library_root`, `database_url`, `search.index_dir`, `search.vector_dir` and `preview.cache_dir` default under `services.xuewen.dataDir` (`$XDG_DATA_HOME/xuewen`, i.e. `~/.local/share/xuewen`); override them via `settings` if needed.
 
 ## Secrets
 
@@ -65,14 +63,7 @@ OPENAI_API_KEY=sk-...
 ## Semantic search (optional)
 
 Keyword search works out of the box.
-Semantic search additionally needs a Qdrant server on `http://localhost:6333`; point Xuewen at it with:
-
-```nix
-services.xuewen.settings.search.qdrant_url = "http://127.0.0.1:6333";
-```
-
-Running Qdrant itself is a system concern (there is no Home Manager module for
-it); a NixOS host can enable `services.qdrant`, or run it via a container.
+Semantic search needs only `settings.ai.embedding` (as in the quick start) and its API key in `environmentFile`; vectors are stored in-process under `search.vector_dir`, with no separate server to run.
 
 ## Agent Ask (optional)
 

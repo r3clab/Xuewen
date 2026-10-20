@@ -9,10 +9,11 @@ fn write_config(dir: &Path) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = {db:?}\n\n[search]\nindex_dir = {:?}\n",
+            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = {db:?}\n\n[search]\nindex_dir = {:?}\nvector_dir = {:?}\n",
             dir.join("inbox"),
             dir.join("library"),
             dir.join("idx"),
+            dir.join("vectors"),
         ),
     )
     .unwrap();

@@ -24,8 +24,9 @@ pub fn serve_on(
     app: App,
     shutdown: CancellationToken,
 ) -> impl Future<Output = Result<()>> + Send + 'static {
-    let router = router(app);
+    let router = router(app.clone());
     async move {
+        app.publish_address(listener.local_addr()?).await;
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await?;

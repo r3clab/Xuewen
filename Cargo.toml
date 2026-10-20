@@ -53,6 +53,7 @@ mime_guess = "2"
 flate2 = "1"
 brotli = "8"
 tantivy = "0.26"
+qdrant-edge = "=0.8.0" # beta: API and on-disk format may change between releases
 hayro = "0.7" # pure-Rust PDF rasterizer for the picker previews (src/preview)
 async-trait = "0.1.89"
 tokio-util = { version = "0.7", features = ["rt"] }
