@@ -6,6 +6,7 @@
 mod annotations;
 pub mod citations;
 pub mod config;
+pub mod daily;
 pub mod db;
 mod hash;
 mod http;
@@ -14,6 +15,7 @@ pub mod llm;
 pub mod metadata;
 mod pdf;
 pub mod preview;
+pub mod search;
 pub mod summary;
 pub mod tasks;
 #[cfg(any(test, feature = "test-support"))]
