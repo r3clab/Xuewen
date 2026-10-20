@@ -4,5 +4,7 @@
 
 mod support;
 
+mod agent;
 mod grobid;
 mod resolve;
+mod schema;

@@ -1,0 +1,4 @@
+{"type":"delta","text":"Hel"}
+{"type":"tool","name":"Read","detail":"paper.txt"}
+{"type":"done"}
+{"type":"error","message":"boom"}

@@ -3,6 +3,7 @@
 // helpers whose callers are not written yet.
 #![allow(dead_code, unused_imports)]
 
+pub mod agent;
 mod annotations;
 pub mod citations;
 pub mod config;
