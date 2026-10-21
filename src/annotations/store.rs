@@ -125,6 +125,15 @@ pub(crate) async fn delete(pool: &SqlitePool, paper_id: &str, id: &str) -> Resul
     Ok(res.rows_affected() > 0)
 }
 
+pub(crate) async fn count_for_paper(pool: &SqlitePool, paper_id: &str) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM annotations WHERE paper_id = ?")
+            .bind(paper_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// Drop every annotation on a paper; returns how many rows went.
 pub(crate) async fn delete_all_for_paper(pool: &SqlitePool, paper_id: &str) -> Result<u64> {
     let res = sqlx::query("DELETE FROM annotations WHERE paper_id = ?")

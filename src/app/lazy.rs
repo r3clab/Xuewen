@@ -18,6 +18,13 @@ impl<T, E> Lazy<T, E> {
         }
     }
 
+    pub(super) fn unavailable(reason: E) -> Self
+    where
+        E: Clone + Send + Sync + 'static,
+    {
+        Lazy::deferred(move || Err(reason.clone()))
+    }
+
     pub(super) fn get(&self) -> Result<&T, E> {
         match self {
             Lazy::Ready(value) => Ok(value),

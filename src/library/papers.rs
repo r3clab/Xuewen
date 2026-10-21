@@ -271,11 +271,7 @@ pub struct PaperFilter {
 
 /// Append `filter`'s restrictions to a query already inside its WHERE clause.
 pub(crate) fn push_paper_filters(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, filter: &PaperFilter) {
-    if let Some(st) = filter
-        .status
-        .as_deref()
-        .filter(|s| matches!(*s, "resolved" | "needs_review"))
-    {
+    if let Some(st) = filter.status.as_deref().filter(|s| STATUS_KEYS.contains(s)) {
         qb.push(" AND status = ").push_bind(st.to_string());
     }
     if let Some(pid) = filter
@@ -331,8 +327,20 @@ pub async fn list(
             .push(" ESCAPE '\\')");
     }
     push_paper_filters(&mut qb, filter);
-    // Whitelisted ORDER BY (never interpolate raw user input).
-    let order = match sort {
+    qb.push(" ORDER BY ").push(order_by(sort));
+    let papers = qb.build_query_as::<Paper>().fetch_all(pool).await?;
+    Ok(papers)
+}
+
+/// The `status` values a filter understands; any other value filters nothing.
+pub(crate) const STATUS_KEYS: [&str; 2] = ["resolved", "needs_review"];
+
+/// The sort keys `list` understands, default first.
+pub(crate) const SORT_KEYS: [&str; 5] = ["year_desc", "year_asc", "added_desc", "title", "name"];
+
+/// Whitelisted ORDER BY (never interpolate raw user input).
+fn order_by(sort: Option<&str>) -> &'static str {
+    match sort {
         Some("year_asc") => "year ASC NULLS LAST",
         Some("added_desc") => "added_at DESC",
         Some("title") => "title COLLATE NOCASE ASC",
@@ -340,12 +348,8 @@ pub async fn list(
         // name sort that buried every named paper below the unnamed tail
         // would be useless. Title breaks ties so the tail stays stable.
         Some("name") => "name COLLATE NOCASE ASC NULLS LAST, title COLLATE NOCASE ASC",
-        Some("year_desc") => "year DESC",
         _ => "year DESC", // unknown values fall back to the default
-    };
-    qb.push(" ORDER BY ").push(order);
-    let papers = qb.build_query_as::<Paper>().fetch_all(pool).await?;
-    Ok(papers)
+    }
 }
 
 /// `(total, resolved, needs_review)` paper counts.
@@ -367,6 +371,15 @@ mod tests {
     use crate::library::model::{Authors, PaperStatus};
     use crate::library::trash;
     use crate::testutil::{insert_test_paper, sample_paper, temp_pool};
+
+    #[test]
+    fn every_advertised_sort_key_has_its_own_order() {
+        let (default, rest) = SORT_KEYS.split_first().unwrap();
+        assert_eq!(order_by(Some(default)), order_by(None));
+        for key in rest {
+            assert_ne!(order_by(Some(key)), order_by(None), "{key}");
+        }
+    }
 
     #[test]
     fn escape_like_escapes_backslash_percent_and_underscore() {

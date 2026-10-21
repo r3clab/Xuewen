@@ -26,6 +26,8 @@ pub struct ProjectSummary {
     pub paper_count: i64,
 }
 
+pub(crate) const NAME_TAKEN: &str = "a project with that name already exists";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectName(String);
 

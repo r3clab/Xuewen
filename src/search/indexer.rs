@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,12 @@ pub struct SweepSummary {
     pub(crate) vectors_touched: usize,
 }
 
+impl SweepSummary {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.indexed + self.deindexed + self.failed == 0
+    }
+}
+
 /// Which tiers `rebuild` drops and re-derives.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RebuildScope {
@@ -24,6 +31,42 @@ pub(crate) enum RebuildScope {
     Vectors,
     Both,
 }
+
+/// Which tiers a sweep may write. `FtsOnly` plans no vector work — so it
+/// never calls the embedding API — yet still deletes a tombstone's points,
+/// because it keeps the real vector store rather than pretending there is
+/// none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    Full,
+    FtsOnly,
+}
+
+/// Why a catch-up left the index to somebody else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Skipped {
+    VectorStoreHeld,
+    IndexWriterHeld,
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::VectorStoreHeld => "the vector store is held by another xuewen process",
+            Self::IndexWriterHeld => "the full-text index is held by another xuewen process",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CatchUp {
+    Swept(SweepSummary),
+    Skipped(Skipped),
+}
+
+/// How long an indexer owner waits for the writer at startup: long enough
+/// to outlast a CLI command's catch-up sweep that happens to overlap it.
+pub(crate) const CLAIM_WAIT: Duration = Duration::from_secs(10);
 
 /// Drop and re-derive the search indexes from SQLite + PDFs (`xuewen index
 /// rebuild`). Nothing is wiped until both indexes are known to be ours:
@@ -71,32 +114,89 @@ pub(crate) async fn rebuild(
         }
     }
     let svc = SearchService::open(pool.clone(), search, semantic).await?;
+    if svc.claim_writer(Duration::ZERO).await? == fts::WriterClaim::Busy {
+        svc.close_vectors().await;
+        anyhow::bail!("{} — stop it and retry", Skipped::IndexWriterHeld);
+    }
     store::clear_stamps(&pool, do_fts, do_vectors).await?;
     let summary = sweep(&svc, library_root).await;
-    if let Some(vectors) = svc.semantic.store() {
-        vectors.close_gracefully().await;
-    }
+    svc.close_vectors().await;
     summary
+}
+
+/// Bring the index up to date unless another process owns it. Nothing is
+/// planned until both locks are known to be ours, so a held index is skipped
+/// cleanly instead of failing every stale paper into the shared backoff.
+pub(crate) async fn catch_up(
+    svc: &SearchService,
+    library_root: &Path,
+    scope: Scope,
+) -> Result<CatchUp> {
+    if matches!(
+        svc.semantic,
+        Semantic::Unavailable(OpenError::Locked { .. })
+    ) {
+        return Ok(CatchUp::Skipped(Skipped::VectorStoreHeld));
+    }
+    if svc.claim_writer(Duration::ZERO).await? == fts::WriterClaim::Busy {
+        return Ok(CatchUp::Skipped(Skipped::IndexWriterHeld));
+    }
+    Ok(CatchUp::Swept(
+        sweep_scoped(svc, library_root, scope).await?,
+    ))
+}
+
+/// `catch_up` for a process that holds no search service of its own: open
+/// both indexes, sweep, and let go of the vector store again.
+pub(crate) async fn catch_up_fresh(
+    pool: sqlx::SqlitePool,
+    search: &crate::config::SearchConfig,
+    ai: &crate::config::AiConfig,
+    library_root: &Path,
+    scope: Scope,
+) -> Result<CatchUp> {
+    let semantic = Semantic::open(&pool, search, ai, OpenMode::LoadOrCreate).await?;
+    let svc = SearchService::open(pool, search, semantic).await?;
+    let caught_up = catch_up(&svc, library_root, scope).await;
+    svc.close_vectors().await;
+    caught_up
 }
 
 /// One full pass: remove tombstones, (re)index every stale paper.
 /// Individual paper failures are recorded (with backoff) and never abort
 /// the sweep.
 pub async fn sweep(svc: &SearchService, library_root: &Path) -> Result<SweepSummary> {
+    sweep_scoped(svc, library_root, Scope::Full).await
+}
+
+pub(crate) async fn sweep_scoped(
+    svc: &SearchService,
+    library_root: &Path,
+    scope: Scope,
+) -> Result<SweepSummary> {
     let papers = svc.paper_states().await?;
     let rows = store::all_index_rows(&svc.pool).await?;
+    let rows_by_id: HashMap<&str, &store::IndexRow> =
+        rows.iter().map(|r| (r.paper_id.as_str(), r)).collect();
     let tier = svc.semantic.tier();
     let plan = planner::plan(
         &papers,
         &rows,
-        tier.map(|t| t.embedder.model()),
+        tier.filter(|_| scope == Scope::Full)
+            .map(|t| t.embedder.model()),
         chrono::Utc::now(),
     );
     let mut summary = SweepSummary::default();
 
-    for paper_id in &plan.deindex {
-        match deindex_paper(svc, paper_id).await {
-            Ok(()) => {
+    for row in plan
+        .deindex
+        .iter()
+        .filter_map(|id| rows_by_id.get(id.as_str()))
+    {
+        let paper_id = &row.paper_id;
+        match deindex_paper(svc, row).await {
+            Ok(false) => {}
+            Ok(true) => {
                 summary.deindexed += 1;
                 if tier.is_some() {
                     summary.vectors_touched += 1;
@@ -109,7 +209,7 @@ pub async fn sweep(svc: &SearchService, library_root: &Path) -> Result<SweepSumm
         }
     }
     for work in &plan.index {
-        match index_paper(svc, library_root, work).await {
+        match index_paper(svc, library_root, work, scope).await {
             Ok(true) => {
                 summary.indexed += 1;
                 if work.vectors {
@@ -149,13 +249,15 @@ async fn index_paper(
     svc: &SearchService,
     library_root: &Path,
     work: &planner::Work,
+    scope: Scope,
 ) -> Result<bool, IndexFailure> {
     // Failures before the tiers split (lookup, extraction, chunking) charge
     // BOTH: the broken precursor serves both tiers, so neither may hot-loop
     // on it. Without an embedder there is no vector tier to hot-loop — and a
     // `vec_last_error` written then would never be cleared, since no vector
-    // pass ever runs to clear it — so the charge narrows to FTS alone.
-    let pre_tier = if svc.semantic.tier().is_some() {
+    // pass ever runs to clear it — so the charge narrows to FTS alone. An
+    // FTS-only pass narrows it too: it never ran the vector tier.
+    let pre_tier = if scope == Scope::Full && svc.semantic.tier().is_some() {
         store::ErrorTier::Both
     } else {
         store::ErrorTier::Fts
@@ -270,9 +372,24 @@ async fn index_vectors(
     Ok(())
 }
 
-async fn deindex_paper(svc: &SearchService, paper_id: &str) -> Result<()> {
+/// `false` when nothing was left for this process to do.
+async fn deindex_paper(svc: &SearchService, row: &store::IndexRow) -> Result<bool> {
+    let paper_id = row.paper_id.as_str();
+    let tier = svc.semantic.tier();
+    if tier.is_none() && row.embed_model.is_some() {
+        // Its points may sit in a store this process cannot open (no API key
+        // in this environment, or an unusable store). The row is the only
+        // record that they need deleting, so it stays for a process that can;
+        // only the Tantivy doc goes, once.
+        if row.fts_indexed_at.is_none() {
+            return Ok(false);
+        }
+        svc.fts_delete(paper_id.to_string()).await?;
+        store::clear_fts_stamp(&svc.pool, paper_id).await?;
+        return Ok(true);
+    }
     svc.fts_delete(paper_id.to_string()).await?;
-    if let Some(tier) = svc.semantic.tier() {
+    if let Some(tier) = tier {
         // Vector cleanup only matters when vectors were ever written; a failing
         // store here must not wedge the tombstone forever.
         if let Err(e) = tier.store.delete_paper(paper_id).await {
@@ -283,16 +400,40 @@ async fn deindex_paper(svc: &SearchService, paper_id: &str) -> Result<()> {
         }
     }
     store::remove_index_entry(&svc.pool, paper_id).await?;
-    Ok(())
+    Ok(true)
 }
 
-pub(crate) fn spawn(tasks: &Tasks, svc: Arc<SearchService>, library_root: PathBuf) {
-    tasks.spawn(run(
-        svc,
-        library_root,
-        Duration::from_secs(30),
-        tasks.token(),
-    ));
+/// Start the indexer loop, but only once this process holds the Tantivy
+/// writer: "an indexer loop runs" and "the writer lock is held" then mean the
+/// same thing, which is what lets a CLI command take the lock as proof that
+/// nobody else is indexing. On `Busy` no loop starts.
+pub(crate) async fn spawn(
+    tasks: &Tasks,
+    svc: Arc<SearchService>,
+    library_root: PathBuf,
+) -> Result<fts::WriterClaim> {
+    spawn_claiming(tasks, svc, library_root, CLAIM_WAIT).await
+}
+
+async fn spawn_claiming(
+    tasks: &Tasks,
+    svc: Arc<SearchService>,
+    library_root: PathBuf,
+    wait: Duration,
+) -> Result<fts::WriterClaim> {
+    let claim = svc.claim_writer(wait).await?;
+    match claim {
+        fts::WriterClaim::Claimed => tasks.spawn(run(
+            svc,
+            library_root,
+            Duration::from_secs(30),
+            tasks.token(),
+        )),
+        fts::WriterClaim::Busy => tracing::warn!(
+            "search indexing disabled: the full-text index is held by another xuewen process"
+        ),
+    }
+    Ok(claim)
 }
 
 /// Indexer loop: sweep, then sleep until woken or the tick elapses.
@@ -304,7 +445,7 @@ async fn run(
 ) {
     loop {
         match sweep(&svc, &library_root).await {
-            Ok(s) if s.indexed + s.deindexed + s.failed > 0 => {
+            Ok(s) if !s.is_empty() => {
                 tracing::info!(
                     "search index sweep: {} indexed, {} removed, {} failed",
                     s.indexed,
@@ -607,6 +748,164 @@ mod tests {
 
         let s = sweep_in(&f).await.unwrap();
         assert_eq!(s.vectors_touched, 0, "nothing stale, nothing to optimize");
+    }
+
+    #[tokio::test]
+    async fn an_fts_only_sweep_never_calls_the_embedder() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+
+        let s = sweep_scoped(&f.svc, &f.library_root, Scope::FtsOnly)
+            .await
+            .unwrap();
+        assert_eq!((s.indexed, s.vectors_touched), (1, 0));
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
+        assert!(rows[0].fts_indexed_at.is_some());
+        assert!(rows[0].vectors_indexed_at.is_none());
+
+        let s = sweep_in(&f).await.unwrap();
+        assert_eq!(s.vectors_touched, 1, "the full sweep embeds what was left");
+    }
+
+    #[tokio::test]
+    async fn an_fts_only_sweep_still_deletes_a_tombstones_vectors() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        sweep_in(&f).await.unwrap();
+        crate::library::trash::soft_delete(&f.svc.pool, "p1")
+            .await
+            .unwrap();
+
+        let s = sweep_scoped(&f.svc, &f.library_root, Scope::FtsOnly)
+            .await
+            .unwrap();
+        assert_eq!(s.deindexed, 1);
+        assert!(vector_hits(f.svc.semantic.store().unwrap())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_without_the_vector_store_keeps_the_tombstone_for_one_with_it() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        sweep_in(&f).await.unwrap();
+        crate::library::trash::soft_delete(&f.svc.pool, "p1")
+            .await
+            .unwrap();
+        f.svc.release_writer();
+
+        let (fts_idx, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
+        let keyless = SearchService::open_with(f.svc.pool.clone(), fts_idx, None);
+        assert_eq!(sweep(&keyless, &f.library_root).await.unwrap().deindexed, 1);
+        assert!(keyless
+            .fts
+            .search("Fuzzing", &fts::FieldSel::all(), 10, None)
+            .unwrap()
+            .is_empty());
+        let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
+        assert_eq!(rows.len(), 1, "the row outlives the Tantivy doc");
+        assert!(rows[0].fts_indexed_at.is_none());
+        assert!(sweep(&keyless, &f.library_root).await.unwrap().is_empty());
+        keyless.release_writer();
+
+        assert_eq!(sweep_in(&f).await.unwrap().deindexed, 1);
+        assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
+        assert!(vector_hits(f.svc.semantic.store().unwrap())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_fts_only_extraction_failure_leaves_the_vector_backoff_alone() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        std::fs::write(f.library_root.join("p1.pdf"), b"not a pdf").unwrap();
+
+        let s = sweep_scoped(&f.svc, &f.library_root, Scope::FtsOnly)
+            .await
+            .unwrap();
+        assert_eq!(s.failed, 1);
+        let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
+        assert_eq!((rows[0].fts_attempts, rows[0].vec_attempts), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn catch_up_skips_an_index_another_writer_holds() {
+        let f = fixture(None).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        let (holder, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
+        assert_eq!(holder.claim_writer().unwrap(), fts::WriterClaim::Claimed);
+
+        let out = catch_up(&f.svc, &f.library_root, Scope::Full)
+            .await
+            .unwrap();
+        assert!(matches!(out, CatchUp::Skipped(Skipped::IndexWriterHeld)));
+        assert!(
+            store::all_index_rows(&f.svc.pool).await.unwrap().is_empty(),
+            "a skipped sweep records no failures"
+        );
+
+        drop(holder);
+        let out = catch_up(&f.svc, &f.library_root, Scope::Full)
+            .await
+            .unwrap();
+        assert!(matches!(out, CatchUp::Swept(s) if s.indexed == 1));
+    }
+
+    #[tokio::test]
+    async fn catch_up_skips_a_vector_store_another_process_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dir_db, pool) = crate::testutil::temp_pool().await;
+        let cfg = crate::config::SearchConfig {
+            index_dir: dir.path().join("index"),
+            vector_dir: dir.path().join("vectors"),
+        };
+        let semantic = Semantic::Unavailable(OpenError::Locked {
+            dir: cfg.vector_dir.clone(),
+            holder: None,
+        });
+        let svc = SearchService::open(pool, &cfg, semantic).await.unwrap();
+
+        let out = catch_up(&svc, dir_db.path(), Scope::FtsOnly).await.unwrap();
+        assert!(matches!(out, CatchUp::Skipped(Skipped::VectorStoreHeld)));
+        let (other, _) = fts::FtsIndex::open(&cfg.index_dir).unwrap();
+        assert_eq!(
+            other.claim_writer().unwrap(),
+            fts::WriterClaim::Claimed,
+            "skipping must not take the writer either"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_holds_the_writer_and_refuses_to_start_beside_a_holder() {
+        let f = fixture(None).await;
+        let tasks = Tasks::new();
+        let claim = spawn(&tasks, f.svc.clone(), f.library_root.clone())
+            .await
+            .unwrap();
+        assert_eq!(claim, fts::WriterClaim::Claimed);
+        let (other, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
+        assert_eq!(other.claim_writer().unwrap(), fts::WriterClaim::Busy);
+        tasks.shutdown(Duration::from_secs(5)).await;
+
+        let g = fixture(None).await;
+        let (holder, _) = fts::FtsIndex::open(g._dirs[1].path()).unwrap();
+        holder.claim_writer().unwrap();
+        let claim = spawn_claiming(
+            &tasks,
+            g.svc.clone(),
+            g.library_root.clone(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claim, fts::WriterClaim::Busy);
     }
 
     #[tokio::test]

@@ -251,6 +251,15 @@ pub(crate) async fn remove_index_entry(pool: &SqlitePool, paper_id: &str) -> Res
     Ok(())
 }
 
+/// Record that a paper's Tantivy doc is gone while its row stays.
+pub(crate) async fn clear_fts_stamp(pool: &SqlitePool, paper_id: &str) -> Result<()> {
+    sqlx::query("UPDATE search_index SET fts_indexed_at = NULL WHERE paper_id = ?")
+        .bind(paper_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Force re-indexing of the given tier(s) for every paper (rebuild).
 pub(crate) async fn clear_stamps(pool: &SqlitePool, fts: bool, vectors: bool) -> Result<()> {
     if fts {

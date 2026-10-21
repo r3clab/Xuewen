@@ -149,7 +149,7 @@ pub(crate) fn validate_id(id: &str) -> Result<(), String> {
 }
 
 /// Validate a create-or-replace body. Returns the message for a 400, or
-/// `Ok(())`. Pure so the web handler and any future caller share one rule set.
+/// `Ok(())`.
 pub(crate) fn validate_new(a: &NewAnnotation) -> Result<(), String> {
     if a.page_index < 0 {
         return Err("page_index must not be negative".into());
@@ -182,9 +182,8 @@ fn check_payload(v: &serde_json::Value) -> Result<(), String> {
 /// Annotation persistence. Always available — annotations need no `[ai.*]`
 /// configuration, so unlike the LLM-backed services this is never `Option`al
 /// on `App`. The type exists to keep timestamp stamping and storage in
-/// one place, so the web API and the CLI cannot drift apart. Input validation
-/// is the handlers' job — the pure `validate_*` functions above are the one
-/// rule set they share.
+/// one place, so the web API and the CLI cannot drift apart. Input is
+/// validated before it gets here, by `App::put_annotation`.
 pub(crate) struct AnnotationsService {
     pool: SqlitePool,
 }
@@ -197,6 +196,10 @@ impl AnnotationsService {
     /// A paper's annotations in reading order (page, then creation).
     pub(crate) async fn list(&self, paper_id: &str) -> Result<Vec<Annotation>> {
         store::list_for_paper(&self.pool, paper_id).await
+    }
+
+    pub(crate) async fn count(&self, paper_id: &str) -> Result<i64> {
+        store::count_for_paper(&self.pool, paper_id).await
     }
 
     /// Create, or overwrite an existing mark with the same id. Idempotent so

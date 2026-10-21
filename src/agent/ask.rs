@@ -18,8 +18,8 @@ pub(crate) struct AskRequest {
 #[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub(crate) struct ToolCall {
-    detail: String,
-    name: String,
+    pub(crate) detail: String,
+    pub(crate) name: String,
 }
 
 pub(crate) enum TurnEvent {

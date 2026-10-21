@@ -81,7 +81,7 @@ async fn daily_papers(State(app): State<App>) -> Result<Response, ApiError> {
 /// POST /api/daily/run — manual trigger; 202 started, 409 already running.
 async fn run_daily(State(app): State<App>) -> Result<Response, ApiError> {
     let svc = app.daily()?;
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let today = crate::daily::scheduler::today();
     if !svc.spawn_run(today, app.tasks()) {
         return Err(ApiError::Conflict {
             message: "a daily run is already in flight".into(),

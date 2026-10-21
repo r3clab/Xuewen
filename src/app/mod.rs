@@ -1,3 +1,4 @@
+mod annotate;
 mod ask;
 mod builder;
 pub(crate) mod code;
@@ -8,9 +9,12 @@ mod lazy;
 mod purge;
 pub(crate) mod settings;
 pub(crate) mod summarize;
+mod translate;
+mod trash;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,8 +61,8 @@ struct Inner {
     /// Present when daily arXiv recommendations are configured (`serve`).
     /// `None` -> /api/daily answers 503.
     daily: Option<Arc<DailyService>>,
-    /// Present when Agent Ask is configured (`serve`). `None` -> chat
-    /// endpoints answer 503 / available:false.
+    /// Present when Agent Ask is configured (`serve` and the CLI). `None` ->
+    /// chat endpoints answer 503 / available:false.
     agent: Option<Arc<AgentService>>,
     /// Always present: heuristic parsing needs no config; [ai.citations]
     /// adds the LLM fallback for entries heuristics can't parse.
@@ -66,9 +70,9 @@ struct Inner {
     /// Always present: reader annotations are plain storage with no `[ai.*]`
     /// gate, so unlike the LLM-backed services this is never `Option`al.
     annotations: Arc<AnnotationsService>,
-    /// Present when translate-on-selection is configured (`serve`). `None`
+    /// Built at startup by `serve`, on first use by the CLI. Unconfigured
     /// -> /api/translate answers 503, /api/settings reports disabled.
-    translate: Option<Arc<TranslateService>>,
+    translate: Lazy<Arc<TranslateService>, String>,
     /// Always present: rasterizing a page needs no `[ai.*]` gate either, and
     /// unlike the other always-on services it holds no pool — only where its
     /// renders are cached.
@@ -81,11 +85,14 @@ struct Inner {
     clone_allowed_hosts: Vec<String>,
     max_repo_mb: u64,
     tasks: Tasks,
+    /// Set when a mutation would have woken the indexer but this process
+    /// runs none (the CLI), so the caller can catch the index up itself.
+    index_dirty: AtomicBool,
 }
 
-/// Whether an endpoint accepts a trashed paper. Named at every `fetch_paper`
-/// call site so each route's trash policy is a decision, not an accident of
-/// which query it happened to use.
+/// Whether an operation accepts a trashed paper. Named at every
+/// `fetch_paper` and `App::paper` call site so each one's trash policy is a
+/// decision, not an accident of which query it happened to use.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trash {
     /// Trashed papers 404: the UI no longer shows the paper (chat, code).
@@ -122,9 +129,15 @@ impl App {
 
     pub async fn shutdown(&self) {
         self.inner.tasks.shutdown(SHUTDOWN_GRACE).await;
+        if let Some(search) = &self.inner.search {
+            search.release_writer();
+        }
         if let Some(vectors) = &self.inner.vectors {
             vectors.close_gracefully().await;
         }
+        // With the pool closed there is nothing left to catch the index up
+        // from; whoever ran the indexer loop owned freshness until now.
+        self.inner.index_dirty.store(false, Ordering::SeqCst);
         self.inner.pool.close().await;
     }
 
@@ -164,17 +177,16 @@ impl App {
     }
 
     pub fn agent(&self) -> Result<&Arc<AgentService>, Error> {
-        self.inner
-            .agent
-            .as_ref()
-            .ok_or_else(|| Error::Unavailable("agent ask is not configured".into()))
+        self.inner.agent.as_ref().ok_or_else(|| {
+            Error::Unavailable(
+                "agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]"
+                    .into(),
+            )
+        })
     }
 
     pub fn translate(&self) -> Result<&Arc<TranslateService>, Error> {
-        self.inner
-            .translate
-            .as_ref()
-            .ok_or_else(|| Error::Unavailable("translate is not configured".into()))
+        self.inner.translate.get().map_err(Error::Unavailable)
     }
 
     pub(crate) fn citations(&self) -> &CitationsService {
@@ -190,9 +202,15 @@ impl App {
     }
 
     pub(crate) fn wake_search(&self) {
-        if let Some(s) = &self.inner.search {
-            s.wake();
+        match &self.inner.search {
+            Some(s) => s.wake(),
+            None => self.inner.index_dirty.store(true, Ordering::SeqCst),
         }
+    }
+
+    /// Whether a mutation left the search index stale since the last call.
+    pub(crate) fn take_index_dirty(&self) -> bool {
+        self.inner.index_dirty.swap(false, Ordering::SeqCst)
     }
 
     /// Look up a paper and apply the caller's trash policy. Doing this before a
@@ -200,7 +218,7 @@ impl App {
     pub(crate) async fn paper(&self, id: &str, trash: Trash) -> Result<Paper, Error> {
         match crate::library::papers::get(self.pool(), id).await? {
             Some(p) if trash == Trash::Allow || p.deleted_at.is_none() => Ok(p),
-            _ => Err(Error::NotFound("not found".into())),
+            _ => Err(Error::not_found()),
         }
     }
 }

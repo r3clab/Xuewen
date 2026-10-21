@@ -22,6 +22,7 @@ impl App {
             tokio::fs::remove_dir_all(crate::agent::workspace_dir(library_root, &paper.id)).await;
         self.preview().forget(&paper.content_hash).await;
         trash::hard_delete(pool, &paper.id).await?;
+        self.wake_search();
         Ok(())
     }
 }

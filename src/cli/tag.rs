@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::Ctx;
+use super::{output, Ctx};
 use crate::library::papers;
 use crate::library::tags::{self, TagName};
 
@@ -75,11 +75,7 @@ pub(super) async fn tag(ctx: &Ctx, cmd: TagCmd) -> Result<()> {
             let papers = papers::list(pool, None, None, &filter).await?;
             println!("{name} — {} paper(s)", papers.len());
             for p in papers {
-                println!(
-                    "  {}  {}",
-                    p.id,
-                    p.meta.title.as_deref().unwrap_or("(untitled)")
-                );
+                println!("  {}  {}", p.id, output::title(p.meta.title.as_deref()));
             }
         }
     }

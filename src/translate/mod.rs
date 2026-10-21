@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::config::{Config, TranslateConfig, TranslateProvider, TranslateTrigger};
 use crate::llm::LlmClient;
 
-mod deepl; // Task 3
+mod deepl;
 
 /// A finished translation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,24 @@ pub(crate) struct Translated {
     pub(crate) source_lang: Option<String>,
     pub(crate) target_lang: String,
 }
+
+#[derive(Debug)]
+pub(crate) enum TranslateError {
+    Empty,
+    /// The provider is unavailable, or its call failed.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for TranslateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("empty text"),
+            Self::Failed(e) => write!(f, "translation failed: {e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for TranslateError {}
 
 #[async_trait]
 trait Translator: Send + Sync {
@@ -56,21 +74,23 @@ impl TranslateService {
     pub fn from_config(cfg: &Config) -> Option<Self> {
         let tcfg = cfg.translate.clone();
 
-        // LLM provider: present iff [ai.translate] resolves to a client.
         let llm = match cfg.ai.translate.as_ref() {
             None => None,
-            Some(d) => match LlmClient::from_resolved(&cfg.ai.resolve(d)) {
-                Some(client) => Some(LlmTranslator { client }),
-                None => {
-                    tracing::warn!(
-                        "[ai.translate] has no model or API key — LLM translate disabled"
-                    );
-                    None
+            Some(d) => {
+                let r = cfg.ai.resolve(d);
+                match LlmClient::from_resolved(&r) {
+                    Some(client) => Some(LlmTranslator { client }),
+                    None => {
+                        tracing::warn!(
+                            "{} — LLM translate disabled",
+                            r.unusable_reason("ai.translate")
+                        );
+                        None
+                    }
                 }
-            },
+            }
         };
 
-        // DeepL provider: present iff [translate.deepl] is configured.
         let deepl = tcfg.deepl.as_ref().map(deepl::DeeplTranslator::new);
 
         if llm.is_none() && deepl.is_none() {
@@ -134,8 +154,23 @@ impl TranslateService {
         self.cfg.trigger
     }
 
-    /// Translate `text`. `target_lang`/`provider` default to config.
+    /// Translate `text`, trimmed. `target_lang`/`provider` default to config.
     pub(crate) async fn translate(
+        &self,
+        text: &str,
+        target_lang: Option<&str>,
+        provider: Option<TranslateProvider>,
+    ) -> Result<Translated, TranslateError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(TranslateError::Empty);
+        }
+        self.translate_with(text, target_lang, provider)
+            .await
+            .map_err(TranslateError::Failed)
+    }
+
+    async fn translate_with(
         &self,
         text: &str,
         target_lang: Option<&str>,

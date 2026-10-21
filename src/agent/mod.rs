@@ -116,6 +116,11 @@ impl AgentService {
         }))
     }
 
+    /// `from_config` never builds a service without one.
+    pub(crate) fn default_backend(&self) -> &AgentBackend {
+        &self.backends[0]
+    }
+
     pub fn backend(&self, id: &str) -> Option<&AgentBackend> {
         self.backends.iter().find(|b| b.id == id)
     }

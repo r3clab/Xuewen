@@ -17,11 +17,27 @@ pub(crate) fn parse_run_at(s: &str) -> anyhow::Result<(u32, u32)> {
     Ok((h, m))
 }
 
+/// The `daily_runs`/`daily_papers` key for the day containing `now`. UTC, so
+/// the scheduler, the web trigger and the CLI agree on what "today" is.
+pub(crate) fn batch_date(now: DateTime<Utc>) -> String {
+    now.format("%Y-%m-%d").to_string()
+}
+
+pub(crate) fn today() -> String {
+    batch_date(Utc::now())
+}
+
+/// Whether a day's run status means that day is done: "ok" and "empty" are,
+/// a missing or "failed" run is not.
+pub(crate) fn settled(status: Option<&str>) -> bool {
+    matches!(status, Some("ok") | Some("empty"))
+}
+
 /// A run is due when we are past today's `run_at` and today's run is
-/// missing (boot catch-up) or failed (hourly retry). "ok"/"empty" are done.
+/// missing (boot catch-up) or failed (hourly retry).
 fn run_due(now: DateTime<Utc>, run_at: (u32, u32), today_status: Option<&str>) -> bool {
     let past = (now.hour(), now.minute()) >= run_at;
-    past && !matches!(today_status, Some("ok") | Some("empty"))
+    past && !settled(today_status)
 }
 
 /// Seconds until the next occurrence of `run_at` (UTC), capped at 3600 so
@@ -47,7 +63,7 @@ pub(crate) async fn run(svc: Arc<DailyService>, cancel: CancellationToken) {
     let run_at = parse_run_at(&svc.cfg.run_at).expect("validated in from_config");
     loop {
         let now = Utc::now();
-        let today = now.format("%Y-%m-%d").to_string();
+        let today = batch_date(now);
         let status = match store::get_run(&svc.pool, &today).await {
             Ok(r) => r.map(|r| r.status),
             Err(e) => {
@@ -57,12 +73,7 @@ pub(crate) async fn run(svc: Arc<DailyService>, cancel: CancellationToken) {
         };
         if run_due(now, run_at, status.as_deref()) {
             if let Some(run) = svc.run_guarded(&today).await {
-                tracing::info!(
-                    "daily run {}: {} ({} candidates)",
-                    run.batch_date,
-                    run.status,
-                    run.papers_found
-                );
+                tracing::info!("daily run {run}");
             }
         }
         let secs = sleep_secs(Utc::now(), run_at);

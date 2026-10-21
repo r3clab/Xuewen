@@ -2,11 +2,21 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Mutex;
 use tantivy::collector::TopDocs;
+use tantivy::directory::error::LockError;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermSetQuery};
 use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, Term};
+use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, TantivyError, Term};
+
+const WRITER_HEAP_BYTES: usize = 50_000_000;
+
+/// Outcome of trying to take the index's single-writer lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriterClaim {
+    Claimed,
+    Busy,
+}
 
 /// Which paper fields a query runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +95,7 @@ impl FieldSel {
 }
 
 /// One paper as a Tantivy document (all fields stored for snippets).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PaperDoc {
     pub id: String,
     pub title: String,
@@ -267,10 +277,32 @@ impl FtsIndex {
         })
     }
 
+    /// Take tantivy's single-writer lock now rather than at the first write.
+    /// `Busy` when another `FtsIndex` — in this process or another — holds
+    /// it; idempotent once claimed.
+    pub(crate) fn claim_writer(&self) -> Result<WriterClaim> {
+        let mut guard = self.writer.lock().expect("fts writer lock poisoned");
+        if guard.is_none() {
+            match self.index.writer(WRITER_HEAP_BYTES) {
+                Ok(w) => *guard = Some(w),
+                Err(TantivyError::LockFailure(LockError::LockBusy, _)) => {
+                    return Ok(WriterClaim::Busy)
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(WriterClaim::Claimed)
+    }
+
+    /// Give the writer lock back so another process can index.
+    pub(crate) fn release_writer(&self) {
+        *self.writer.lock().expect("fts writer lock poisoned") = None;
+    }
+
     fn with_writer<T>(&self, op: impl FnOnce(&mut IndexWriter) -> Result<T>) -> Result<T> {
         let mut guard = self.writer.lock().expect("fts writer lock poisoned");
         if guard.is_none() {
-            *guard = Some(self.index.writer(50_000_000)?);
+            *guard = Some(self.index.writer(WRITER_HEAP_BYTES)?);
         }
         let out = op(guard.as_mut().expect("writer just created"))?;
         // Make the change visible to the next search immediately (personal
@@ -479,14 +511,29 @@ mod tests {
         FtsIndex::probe_writable(dir.path()).unwrap();
 
         let (idx, _) = FtsIndex::open(dir.path()).unwrap();
-        // The writer is created lazily; an upsert forces it into existence,
-        // which is exactly the state a running `xuewen serve` is in.
+        // An upsert forces the lazy writer into existence; a running
+        // `xuewen serve` claims it eagerly at startup instead.
         idx.upsert(&doc("p1", "T", "b")).unwrap();
         let err = FtsIndex::probe_writable(dir.path()).unwrap_err();
         assert!(err.to_string().contains("in use"), "got: {err}");
 
         drop(idx);
         FtsIndex::probe_writable(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn claim_writer_reports_a_held_lock_as_busy_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, _) = FtsIndex::open(dir.path()).unwrap();
+        let (second, _) = FtsIndex::open(dir.path()).unwrap();
+
+        assert_eq!(first.claim_writer().unwrap(), WriterClaim::Claimed);
+        assert_eq!(first.claim_writer().unwrap(), WriterClaim::Claimed);
+        assert_eq!(second.claim_writer().unwrap(), WriterClaim::Busy);
+        assert!(FtsIndex::probe_writable(dir.path()).is_err());
+
+        first.release_writer();
+        assert_eq!(second.claim_writer().unwrap(), WriterClaim::Claimed);
     }
 
     #[test]

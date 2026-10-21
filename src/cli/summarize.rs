@@ -21,7 +21,7 @@ pub(super) async fn summarize(ctx: &Ctx, args: SummarizeArgs) -> Result<()> {
         (false, None) => SummarizeScope::Pending,
     };
     let one = matches!(scope, SummarizeScope::Paper(_));
-    let generated = ctx.app().summarize(scope).await?;
+    let generated = ctx.app.summarize(scope).await?;
     if one {
         println!(
             "{}",

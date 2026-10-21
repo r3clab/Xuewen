@@ -16,7 +16,7 @@ pub(super) struct ProxyCookieArgs {
 }
 
 pub(super) async fn proxy_cookie(ctx: &Ctx, args: ProxyCookieArgs) -> Result<()> {
-    let app = ctx.app();
+    let app = &ctx.app;
     if args.clear {
         app.clear_proxy_cookie().await?;
         println!("proxy cookie cleared");

@@ -5,6 +5,7 @@ use axum::{Json, Router};
 
 use crate::app::App;
 use crate::config::TranslateProvider;
+use crate::translate::TranslateError;
 use crate::web::error::ApiError;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -51,22 +52,19 @@ async fn translate(
     Json(body): Json<TranslateBody>,
 ) -> Result<Response, ApiError> {
     let svc = app.translate()?;
-    let text = body.text.trim();
-    if text.is_empty() {
-        return Err(ApiError::BadRequest("empty text".into()));
-    }
-    let provider = match body.provider.as_deref() {
-        None => None,
-        Some("llm") => Some(crate::config::TranslateProvider::Llm),
-        Some("deepl") => Some(crate::config::TranslateProvider::Deepl),
-        Some(other) => return Err(ApiError::BadRequest(format!("unknown provider `{other}`"))),
-    };
+    let provider = body
+        .provider
+        .as_deref()
+        .map(str::parse::<TranslateProvider>)
+        .transpose()
+        .map_err(ApiError::BadRequest)?;
     match svc
-        .translate(text, body.target_lang.as_deref(), provider)
+        .translate(&body.text, body.target_lang.as_deref(), provider)
         .await
     {
         Ok(t) => Ok(Json(TranslationDto::from(t)).into_response()),
-        Err(e) => {
+        Err(TranslateError::Empty) => Err(ApiError::BadRequest("empty text".into())),
+        Err(TranslateError::Failed(e)) => {
             tracing::error!("translate: {e}");
             Err(ApiError::BadGateway("translation failed"))
         }

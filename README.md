@@ -36,9 +36,7 @@ The two characters double as the interface marks: **學** (xué, *learning*) is 
 - **Annotations** — highlight, underline, strike through or squiggle a passage, drop a sticky note, and attach a note to any mark, with undo/redo and a page-ordered list in the reader's sidebar.
   Marks live in SQLite beside the paper, never in the PDF: **the library's file stays byte-identical**, so its content hash (which drives dedupe and filing) keeps telling the truth.
   Note text is searchable (`in:notes`), and "Export annotated PDF" writes a separate copy with the marks burned in for sharing.
-- **Agent Ask** — optional tool-using agent (Claude Code / Codex SDKs) in the
-  reader's Ask thread, grounded in the paper's extracted text and, when
-  attached, its code repository, inside a read-only sandbox.
+- **Agent Ask** — optional tool-using agent (Claude Code / Codex SDKs) in the reader's Ask thread or `xuewen ask`, grounded in the paper's extracted text and, when attached, its code repository, inside a read-only sandbox.
 - **Daily arXiv recommendations** — a ranked, LLM-summarized feed of new papers
   scored against your library's interests (optional).
 - **Helix-style keymap** — `Space` is a leader key, as in [Helix](https://helix-editor.com): `Space f` opens a file picker that fuzzy-matches a paper's name and title as you type and previews its rendered pages beside the list. `?` lists every binding.
@@ -163,9 +161,10 @@ Code](https://github.com/anthropics/claude-code) or [Codex](https://github.com/o
 SDKs — that reads a paper's extracted text and, once attached, its GitHub
 repository, inside a read-only per-paper workspace.
 
-1. **Node ≥ 20** on the machine running `xuewen serve`.
+1. **Node ≥ 20** on the machine running `xuewen serve` or `xuewen ask`.
 2. Install the runner's own dependencies once: `npm --prefix agent-runner install` (separate from the frontend's `npm --prefix frontend install`).
    The NixOS and Home Manager modules do this for you — see [Deployment](#deployment).
+   The runner is looked up at `agent-runner/src/runner.mjs` relative to the working directory; run `xuewen ask` from the checkout or set `[ai.agent].runner` to its absolute path.
 3. Enable one or both backends in `xuewen.toml`:
 
    ```toml
@@ -174,18 +173,14 @@ repository, inside a read-only per-paper workspace.
    [ai.agent.codex]
    ```
 
-4. Authenticate whichever backend(s) you enabled — either your existing `claude` / `codex` CLI login, or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment `xuewen serve` runs in.
+4. Authenticate whichever backend(s) you enabled — either your existing `claude` / `codex` CLI login, or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment `xuewen serve` or `xuewen ask` runs in.
    Neither key is ever written to `xuewen.toml`.
 
-Attaching a repository (Details → Code, `PUT /api/papers/{id}/code`, or
-`xuewen code set`) does a **local, read-only shallow clone** into
-`<library_root>/agent/<paper_id>/repo/` for the agent to read from — it is
-never pushed, modified, or redistributed; it exists only on the machine
-running `xuewen serve`, for as long as it stays attached.
+Attaching a repository (Details → Code, `PUT /api/papers/{id}/code`, or `xuewen code set`) does a **local, read-only shallow clone** into `<library_root>/agent/<paper_id>/repo/` for the agent to read from — it is never pushed, modified, or redistributed; it exists only on the machine that holds the library, for as long as it stays attached.
 
 **Sandbox boundary, honestly.**
 "Read-only" describes what the agent can't do — it can't write files, run shell commands (Claude Code backend), or reach the network — not what it can read.
-The Claude Code backend's tool pre-approval (`allowedTools: ['Read', 'Grep', 'Glob']`) is not scoped to the paper's workspace, and Codex's read-only sandbox likewise blocks writes and network access but not reads; either backend can read any file on disk that the `xuewen serve` process's user can read, not just `<library_root>/agent/<paper_id>/`.
+The Claude Code backend's tool pre-approval (`allowedTools: ['Read', 'Grep', 'Glob']`) is not scoped to the paper's workspace, and Codex's read-only sandbox likewise blocks writes and network access but not reads; either backend can read any file on disk that the user running `xuewen serve` or `xuewen ask` can read, not just `<library_root>/agent/<paper_id>/`.
 Don't attach repositories you don't trust, and treat Agent Ask like the rest of the web UI: single-user and loopback-only unless you understand the exposure of `--allow-remote`.
 
 ## CLI
@@ -200,20 +195,33 @@ The same binary drives everything from the terminal:
 | `watch` | Auto-ingest new PDFs dropped in the inbox |
 | `identify <id>` | Manually match a paper (`--doi` / `--arxiv` / `--title`) |
 | `refresh` | Re-resolve failed records and re-file to cite-key paths |
+| `list` | List papers (`--project` / `--tag` / `--starred` / `--query` / `--status`, `--sort`) |
+| `show <id>` | One paper's metadata, abstract, AI summary, tags, projects, and code repo |
+| `stats` | Library counts |
 | `search <query>` | Search from the terminal (`--keyword-only` / `--semantic-only`); accepts the same `tag:`/`project:`/`is:starred`/`status:`/`in:`/`author:` qualifiers as the web UI |
-| `export` | Emit BibTeX / BibLaTeX (single, project, or whole library) |
-| `project` | Manage projects (named groups of papers) |
-| `tag` | Manage tags on papers (add/remove/rename/list) |
+| `ask <id> [question]` | Ask the paper agent (`--model`); with no question, read one per line from stdin until Ctrl-D |
+| `chat` | Saved Ask conversations (`history` / `clear` / `models`) |
+| `citations <id>` | The reference list the web reader parsed for a paper |
+| `translate [text]` | Translate text, or stdin, with the configured provider (`--to` / `--provider`) |
+| `daily` | Daily arXiv recommendations (`show` / `run [--force]`) |
+| `summarize` | Generate LLM summaries for library papers |
+| `export` | Emit BibTeX / BibLaTeX (single, filtered, or whole library) |
+| `project` | Manage projects (`list` / `new` / `rename` / `rm` / `add` / `remove` / `show`) |
+| `tag` | Manage tags (`list` / `add` / `remove` / `rename` / `rm` / `show`) |
 | `star` / `unstar` | Star or un-star a paper |
-| `annotation` | Inspect or clear a paper's reader annotations (`list` / `rm` / `clear`) |
+| `name <id> [name]` | Show, set, or `--clear` the name a paper is known by |
+| `annotation` | A paper's reader annotations (`list` / `add` / `rm` / `clear`); `add` attaches a page note |
 | `index` | Inspect or rebuild the search indexes |
 | `code` | Attach, inspect, or detach a paper's code repo for Agent Ask (`set` / `status` / `rm`) |
 | `delete` / `restore` / `purge` | Trash lifecycle |
 | `proxy-cookie` | Manage the stored EZproxy session cookie |
 
 Only one process can hold the vector store at a time.
-While `xuewen serve` (or the desktop app) is running, `xuewen search` and `xuewen index status` forward to it over HTTP, so they keep returning semantic results.
+While `xuewen serve` (or the desktop app) is running, `xuewen search`, `xuewen index status`, and `xuewen daily run` forward to it over HTTP, so search keeps returning semantic results and the day's run happens in the server.
 `xuewen index rebuild` refuses to run until that server is stopped, and `xuewen watch` started beside it warns and skips indexing.
+
+Commands that add, change, or remove papers or notes (`ingest`, `import`, `identify`, `refresh`, `delete`, `restore`, `purge`, and annotation edits) bring the full-text index up to date before they return, and `xuewen search` first indexes anything new.
+When another process holds the index, they leave it to that process and say so.
 
 Run `xuewen --help` (or `xuewen <command> --help`) for the full flags.
 

@@ -135,3 +135,15 @@ pub fn embedding_ai(base_url: &str, dims: usize) -> crate::config::AiConfig {
     ))
     .unwrap()
 }
+
+#[cfg(test)]
+pub(crate) async fn serve(app: crate::app::App) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::web::serve_on(
+        listener,
+        app,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    addr
+}

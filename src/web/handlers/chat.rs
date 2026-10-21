@@ -60,11 +60,7 @@ struct ChatTurn {
 
 impl From<crate::agent::history::ChatMessageRow> for ChatTurn {
     fn from(r: crate::agent::history::ChatMessageRow) -> Self {
-        let tools = r.tools_json.as_deref().and_then(|s| {
-            serde_json::from_str(s)
-                .map_err(|e| tracing::warn!("chat turn {}: unparseable tools_json: {e}", r.id))
-                .ok()
-        });
+        let tools = r.tools();
         Self {
             id: r.id,
             role: r.role,

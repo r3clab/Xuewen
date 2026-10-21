@@ -89,6 +89,16 @@ pub(crate) struct DailyRun {
     pub(crate) ran_at: String,
 }
 
+impl std::fmt::Display for DailyRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} ({} candidates)",
+            self.batch_date, self.status, self.papers_found
+        )
+    }
+}
+
 pub(crate) async fn record_run(pool: &SqlitePool, run: &DailyRun) -> Result<()> {
     sqlx::query(
         "INSERT INTO daily_runs (batch_date, status, papers_found, error, ran_at)
@@ -113,6 +123,16 @@ pub(crate) async fn get_run(pool: &SqlitePool, batch_date: &str) -> Result<Optio
          FROM daily_runs WHERE batch_date = ?",
     )
     .bind(batch_date)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// The most recent day's run, whatever its outcome.
+pub(crate) async fn latest_run(pool: &SqlitePool) -> Result<Option<DailyRun>> {
+    Ok(sqlx::query_as::<_, DailyRun>(
+        "SELECT batch_date, status, papers_found, error, ran_at
+         FROM daily_runs ORDER BY batch_date DESC LIMIT 1",
+    )
     .fetch_optional(pool)
     .await?)
 }
@@ -255,6 +275,24 @@ mod tests {
         assert_eq!(got.papers_found, 5);
         assert_eq!(got.error, None);
         assert!(get_run(&pool, "2026-07-09").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn latest_run_is_the_newest_day() {
+        let pool = pool().await;
+        assert!(latest_run(&pool).await.unwrap().is_none());
+        for date in ["2026-07-11", "2026-07-09"] {
+            let run = DailyRun {
+                batch_date: date.into(),
+                status: "empty".into(),
+                papers_found: 0,
+                error: None,
+                ran_at: format!("{date}T09:00:00Z"),
+            };
+            record_run(&pool, &run).await.unwrap();
+        }
+        let got = latest_run(&pool).await.unwrap().unwrap();
+        assert_eq!(got.batch_date, "2026-07-11");
     }
 
     #[tokio::test]

@@ -49,7 +49,7 @@ async fn create_project(
         Err(e) => Err(ApiError::conflict_or_internal(
             e,
             "create_project",
-            "a project with that name already exists",
+            projects::NAME_TAKEN,
         )),
     }
 }
@@ -73,7 +73,7 @@ async fn update_project(
         Err(e) => Err(ApiError::conflict_or_internal(
             e,
             "update_project",
-            "a project with that name already exists",
+            projects::NAME_TAKEN,
         )),
     }
 }

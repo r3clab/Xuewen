@@ -16,7 +16,7 @@ pub(super) enum CodeCmd {
 }
 
 pub(super) async fn code(ctx: &Ctx, cmd: CodeCmd) -> Result<()> {
-    let app = ctx.app();
+    let app = &ctx.app;
     let pool = &ctx.pool;
     match cmd {
         CodeCmd::Set { paper, url } => {

@@ -166,3 +166,25 @@ async fn started_app_shares_one_vector_store_and_releases_it_on_shutdown() {
         .await
         .expect("shutdown released the store");
 }
+
+#[tokio::test]
+async fn started_app_holds_the_index_writer_until_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = support::test_cfg(tmp.path());
+    let pool = xuewen::db::connect(&cfg.database_url).await.unwrap();
+    let app = App::start(&cfg, pool).await.unwrap();
+    let doc = xuewen::search::fts::PaperDoc {
+        id: "x".into(),
+        title: "t".into(),
+        ..Default::default()
+    };
+
+    let (other, _) = xuewen::search::fts::FtsIndex::open(&cfg.search.index_dir).unwrap();
+    assert!(
+        other.upsert(&doc).is_err(),
+        "a running server owns the writer before anything is stale"
+    );
+
+    app.shutdown().await;
+    other.upsert(&doc).unwrap();
+}

@@ -1,5 +1,11 @@
 mod annotation;
+mod ask;
+mod browse;
+mod chat;
+mod citations;
 mod code;
+mod daily;
+mod freshness;
 mod identify;
 mod ingest;
 mod library;
@@ -9,8 +15,10 @@ mod remote;
 mod search;
 mod serve;
 mod settings;
+mod signals;
 mod summarize;
 mod tag;
+mod translate;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -23,6 +31,8 @@ use crate::config::Config;
 use crate::db;
 use crate::library::model::Paper;
 use crate::library::papers;
+use crate::search::vector::OpenMode;
+use crate::search::Semantic;
 
 #[derive(Parser)]
 #[command(name = "xuewen", version)]
@@ -80,6 +90,30 @@ enum Command {
     Star(library::StarArgs),
     /// Un-star a paper.
     Unstar(library::StarArgs),
+    /// Show, set or clear the name a paper is known by.
+    Name(library::NameArgs),
+    /// List library papers (newest first by default).
+    List(browse::ListArgs),
+    /// Show one paper: metadata, abstract, AI summary, tags, projects.
+    Show(browse::ShowArgs),
+    /// Library counts.
+    Stats,
+    /// Show the parsed reference list the web reader cached for a paper.
+    Citations(citations::CitationsArgs),
+    /// Daily arXiv recommendations ranked against the library.
+    Daily {
+        #[command(subcommand)]
+        cmd: daily::DailyCmd,
+    },
+    /// Ask the paper agent about a paper: one question, or a session read from stdin.
+    Ask(ask::AskArgs),
+    /// Inspect or clear saved Ask conversations.
+    Chat {
+        #[command(subcommand)]
+        cmd: chat::ChatCmd,
+    },
+    /// Translate text with the configured provider (as the reader does a selection).
+    Translate(translate::TranslateArgs),
     /// Export papers as BibTeX or BibLaTeX.
     Export(library::ExportArgs),
     /// Search the library from the terminal.
@@ -96,11 +130,18 @@ enum Command {
 struct Ctx {
     cfg: Config,
     pool: SqlitePool,
+    app: App,
 }
 
 impl Ctx {
-    fn app(&self) -> App {
-        App::for_cli(&self.cfg, self.pool.clone())
+    async fn open_semantic(&self) -> Result<Semantic> {
+        Semantic::open(
+            &self.pool,
+            &self.cfg.search,
+            &self.cfg.ai,
+            OpenMode::LoadOrCreate,
+        )
+        .await
     }
 
     async fn active_paper(&self, selector: &str) -> Result<Paper> {
@@ -124,39 +165,70 @@ pub fn run() -> Result<()> {
     // swallowed by our handler. Its updates are flushed, so abandoning it is
     // safe.
     rt.shutdown_timeout(Duration::from_secs(1));
+    if let Some(signals::Interrupted(signal)) = result.as_ref().err().and_then(|e| e.downcast_ref())
+    {
+        std::process::exit(signal.exit_code());
+    }
     result
 }
 
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
     let pool = db::connect(&cfg.database_url).await?;
-    let ctx = Ctx { cfg, pool };
+    let app = App::for_cli(&cfg, pool.clone());
+    let ctx = Ctx { cfg, pool, app };
 
-    match cli.command {
-        Command::Ingest(args) => ingest::ingest(&ctx, args).await,
-        Command::Import(args) => ingest::import(&ctx, args).await,
-        Command::ProxyCookie(args) => settings::proxy_cookie(&ctx, args).await,
-        Command::Watch => ingest::watch(&ctx).await,
-        Command::Refresh(args) => ingest::refresh(&ctx, args).await,
-        Command::Identify(args) => identify::identify(&ctx, args).await,
-        Command::Serve(args) => serve::serve(&ctx, args).await,
-        Command::Delete(args) => library::delete(&ctx, args).await,
-        Command::Restore(args) => library::restore(&ctx, args).await,
-        Command::Purge(args) => library::purge(&ctx, args).await,
-        Command::Project { cmd } => project::project(&ctx, cmd).await,
-        Command::Tag { cmd } => tag::tag(&ctx, cmd).await,
-        Command::Code { cmd } => code::code(&ctx, cmd).await,
-        Command::Annotation { cmd } => annotation::annotation(&ctx, cmd).await,
-        Command::Star(args) => library::star(&ctx, args, true).await,
-        Command::Unstar(args) => library::star(&ctx, args, false).await,
-        Command::Export(args) => library::export(&ctx, args).await,
-        Command::Search(args) => search::search(&ctx, args).await,
-        Command::Summarize(args) => summarize::summarize(&ctx, args).await,
-        Command::Index { cmd } => search::index(&ctx, cmd).await,
+    let result = dispatch(&ctx, cli.command).await;
+    freshness::settle(&ctx).await;
+    result
+}
+
+async fn dispatch(ctx: &Ctx, command: Command) -> Result<()> {
+    match command {
+        Command::Ingest(args) => ingest::ingest(ctx, args).await,
+        Command::Import(args) => ingest::import(ctx, args).await,
+        Command::ProxyCookie(args) => settings::proxy_cookie(ctx, args).await,
+        Command::Watch => ingest::watch(ctx).await,
+        Command::Refresh(args) => ingest::refresh(ctx, args).await,
+        Command::Identify(args) => identify::identify(ctx, args).await,
+        Command::Serve(args) => serve::serve(ctx, args).await,
+        Command::Delete(args) => library::delete(ctx, args).await,
+        Command::Restore(args) => library::restore(ctx, args).await,
+        Command::Purge(args) => library::purge(ctx, args).await,
+        Command::Project { cmd } => project::project(ctx, cmd).await,
+        Command::Tag { cmd } => tag::tag(ctx, cmd).await,
+        Command::Code { cmd } => code::code(ctx, cmd).await,
+        Command::Annotation { cmd } => annotation::annotation(ctx, cmd).await,
+        Command::Star(args) => library::star(ctx, args, true).await,
+        Command::Unstar(args) => library::star(ctx, args, false).await,
+        Command::Name(args) => library::name(ctx, args).await,
+        Command::List(args) => browse::list(ctx, args).await,
+        Command::Show(args) => browse::show(ctx, args).await,
+        Command::Stats => browse::stats(ctx).await,
+        Command::Citations(args) => citations::citations(ctx, args).await,
+        Command::Daily { cmd } => daily::daily(ctx, cmd).await,
+        Command::Ask(args) => ask::ask(ctx, args).await,
+        Command::Chat { cmd } => chat::chat(ctx, cmd).await,
+        Command::Translate(args) => translate::translate(ctx, args).await,
+        Command::Export(args) => library::export(ctx, args).await,
+        Command::Search(args) => search::search(ctx, args).await,
+        Command::Summarize(args) => summarize::summarize(ctx, args).await,
+        Command::Index { cmd } => search::index(ctx, cmd).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_command_line_definition_is_consistent() {
+        super::Cli::command().debug_assert();
     }
 }

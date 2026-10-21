@@ -147,6 +147,24 @@ pub(crate) struct Resolved {
     pub(crate) reasoning_effort: Option<String>,
 }
 
+impl Resolved {
+    /// Why `LlmClient::from_resolved` refuses this endpoint, worded for the
+    /// `[section]` it was resolved for.
+    pub(crate) fn unusable_reason(&self, section: &str) -> String {
+        if self.model.is_none() {
+            return format!("[{section}] has no model — set `model` under [ai] or [{section}]");
+        }
+        self.missing_key_reason(section)
+    }
+
+    pub(crate) fn missing_key_reason(&self, section: &str) -> String {
+        format!(
+            "[{section}] has no API key — set ${} or `api_key_env`",
+            self.api_key_env
+        )
+    }
+}
+
 /// All AI/LLM config (`[ai]`): shared defaults plus each use.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -330,6 +348,18 @@ fn default_target_lang() -> String {
 pub(crate) enum TranslateProvider {
     Llm,
     Deepl,
+}
+
+impl std::str::FromStr for TranslateProvider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "llm" => Ok(Self::Llm),
+            "deepl" => Ok(Self::Deepl),
+            other => Err(format!("unknown provider `{other}`")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

@@ -17,6 +17,10 @@ pub(super) fn confirm(prompt: &str) -> anyhow::Result<bool> {
     ))
 }
 
+pub(super) fn title(title: Option<&str>) -> &str {
+    title.unwrap_or("(untitled)")
+}
+
 /// One-line preview of quoted text, cut on a character boundary. A PDF
 /// selection routinely spans line breaks, which would otherwise split one
 /// annotation across several rows of the listing.

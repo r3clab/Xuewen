@@ -12,7 +12,7 @@ use crate::app::{App, Trash};
 use crate::library::export;
 use crate::library::model::{Paper, PaperStatus};
 use crate::library::papers::{self, PaperName};
-use crate::library::{projects, tags, trash};
+use crate::library::{projects, tags};
 use crate::web::error::ApiError;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -221,21 +221,11 @@ pub(super) async fn paper_refs(
     pool: &sqlx::SqlitePool,
     paper_id: &str,
 ) -> anyhow::Result<(Vec<TagRef>, Vec<ProjectRef>)> {
-    let ids = [paper_id.to_string()];
-    let mut tags = tags::for_papers(pool, &ids).await?;
-    let mut projects = projects::for_papers(pool, &ids).await?;
+    let tags = tags::for_paper(pool, paper_id).await?;
+    let projects = projects::for_paper(pool, paper_id).await?;
     Ok((
-        tags.remove(paper_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(TagRef::from)
-            .collect(),
-        projects
-            .remove(paper_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(ProjectRef::from)
-            .collect(),
+        tags.into_iter().map(TagRef::from).collect(),
+        projects.into_iter().map(ProjectRef::from).collect(),
     ))
 }
 
@@ -275,11 +265,9 @@ async fn delete_paper(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    fetch_paper(&app, &id, Trash::Allow, "delete_paper").await?;
-    trash::soft_delete(app.pool(), &id)
+    app.trash_paper(&id)
         .await
-        .context("delete_paper")?;
-    app.wake_search();
+        .map_err(ApiError::context("delete_paper"))?;
     Ok(Json(serde_json::json!({ "deleted": true })).into_response())
 }
 
@@ -289,13 +277,9 @@ async fn restore_paper(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    if !trash::restore(app.pool(), &id)
+    app.restore_paper(&id)
         .await
-        .context("restore_paper")?
-    {
-        return Err(ApiError::NotFound);
-    }
-    app.wake_search();
+        .map_err(ApiError::context("restore_paper"))?;
     Ok(Json(serde_json::json!({ "restored": true })).into_response())
 }
 

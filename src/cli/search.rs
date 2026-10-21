@@ -1,10 +1,10 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::output::strip_snippet_html;
-use super::{remote, Ctx};
-use crate::search::vector::OpenMode;
-use crate::search::{indexer, IndexStatus, SearchOutcome, SearchService, Semantic, TierCounts};
+use super::output::{self, strip_snippet_html};
+use super::{freshness, remote, Ctx};
+use crate::search::indexer::{self, Scope};
+use crate::search::{IndexStatus, SearchOutcome, SearchService, TierCounts};
 
 #[derive(clap::Args)]
 pub(super) struct SearchArgs {
@@ -100,13 +100,13 @@ pub(super) async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         semantic_only,
     } = args;
     let (cfg, pool) = (&ctx.cfg, &ctx.pool);
-    let semantic = if keyword_only {
-        Semantic::NotConfigured
-    } else {
-        Semantic::open(pool, &cfg.search, &cfg.ai, OpenMode::LoadOrCreate).await?
-    };
+    // Opened even for --keyword-only: the catch-up below must see the real
+    // store, or deindexing a trashed paper would orphan its vectors.
+    let semantic = ctx.open_semantic().await?;
     if let Some(addr) = semantic.holder() {
-        let engines = semantic_only.then_some("semantic");
+        let engines = semantic_only
+            .then_some("semantic")
+            .or(keyword_only.then_some("keyword"));
         match remote::search(addr, &query, fields.as_deref(), engines).await {
             Ok(reply) => {
                 print_search(&SearchReport::from(reply), keyword_only);
@@ -115,10 +115,33 @@ pub(super) async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             Err(e) => eprintln!("note: could not reach xuewen at {addr} ({e:#}); searching here"),
         }
     }
+    let vectors = semantic.store().cloned();
     let svc = SearchService::open(pool.clone(), &cfg.search, semantic).await?;
+    let scope = if keyword_only {
+        Scope::FtsOnly
+    } else {
+        Scope::Full
+    };
+    freshness::report(indexer::catch_up(&svc, &cfg.library_root, scope).await);
+    let out = search_here(&svc, pool, &query, fields, keyword_only, semantic_only).await;
+    if let Some(vectors) = vectors {
+        vectors.close_gracefully().await;
+    }
+    print_search(&SearchReport::from(&out?), keyword_only);
+    Ok(())
+}
+
+async fn search_here(
+    svc: &SearchService,
+    pool: &sqlx::SqlitePool,
+    query: &str,
+    fields: Option<String>,
+    keyword_only: bool,
+    semantic_only: bool,
+) -> Result<SearchOutcome> {
     let req = crate::search::SearchRequest::assemble(
         pool,
-        &query,
+        query,
         crate::search::RequestOverrides {
             keyword: !semantic_only,
             semantic: !keyword_only,
@@ -130,9 +153,7 @@ pub(super) async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         },
     )
     .await?;
-    let out = svc.search(&req).await?;
-    print_search(&SearchReport::from(&out), keyword_only);
-    Ok(())
+    svc.search(&req).await
 }
 
 fn print_search(report: &SearchReport, keyword_only: bool) {
@@ -149,7 +170,7 @@ fn print_search(report: &SearchReport, keyword_only: bool) {
             "{:2}. {}  {}",
             i + 1,
             row.label,
-            row.title.as_deref().unwrap_or("(untitled)")
+            output::title(row.title.as_deref())
         );
         let loc = match row.page {
             Some(pg) => format!("{} p.{pg}", row.field),
@@ -161,7 +182,7 @@ fn print_search(report: &SearchReport, keyword_only: bool) {
 
 async fn status_report(ctx: &Ctx) -> Result<IndexStatus> {
     let (cfg, pool) = (&ctx.cfg, &ctx.pool);
-    let semantic = Semantic::open(pool, &cfg.search, &cfg.ai, OpenMode::LoadOrCreate).await?;
+    let semantic = ctx.open_semantic().await?;
     if let Some(addr) = semantic.holder() {
         match remote::status(addr).await {
             Ok(status) => return Ok(status),
@@ -227,7 +248,7 @@ mod tests {
     use super::*;
     use crate::library::model::PaperStatus;
     use crate::search::{fts, RequestOverrides, SearchRequest};
-    use crate::testutil::{paper, temp_pool};
+    use crate::testutil::{paper, serve, temp_pool};
 
     struct Served {
         _dir: tempfile::TempDir,
@@ -249,11 +270,8 @@ mod tests {
             .upsert(&fts::PaperDoc {
                 id: "a".into(),
                 title: "Fuzzing Firmware".into(),
-                authors: String::new(),
-                venue: String::new(),
-                abstract_text: String::new(),
                 body: "we fuzz routers".into(),
-                notes: String::new(),
+                ..Default::default()
             })
             .unwrap();
         let svc = SearchService::open_with(pool.clone(), fts_idx, None);
@@ -261,13 +279,7 @@ mod tests {
         if with_search {
             app = app.search(svc.clone());
         }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(crate::web::serve_on(
-            listener,
-            app.build(),
-            tokio_util::sync::CancellationToken::new(),
-        ));
+        let addr = serve(app.build()).await;
         Served {
             _dir: dir,
             pool,

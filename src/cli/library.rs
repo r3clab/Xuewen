@@ -1,9 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use super::output::confirm;
+use super::browse::FilterArgs;
+use super::output::{self, confirm};
 use super::Ctx;
-use crate::library::{papers, projects, trash};
+use crate::library::papers::{self, PaperName};
+use crate::library::trash;
 
 #[derive(clap::Args)]
 pub(super) struct DeleteArgs {
@@ -39,6 +41,19 @@ pub(super) struct StarArgs {
 }
 
 #[derive(clap::Args)]
+pub(super) struct NameArgs {
+    /// Paper id (exact or unique prefix).
+    paper: String,
+    /// What the paper is known as (e.g. the system it proposes); omit it to
+    /// print the current name.
+    #[arg(conflicts_with = "clear")]
+    name: Option<String>,
+    /// Remove the name.
+    #[arg(long)]
+    clear: bool,
+}
+
+#[derive(clap::Args)]
 pub(super) struct ExportArgs {
     /// Paper id (exact or unique prefix) for a single entry.
     #[arg(conflicts_with_all = ["all", "project", "tag", "starred"])]
@@ -46,21 +61,8 @@ pub(super) struct ExportArgs {
     /// Export the whole (non-trashed) library.
     #[arg(long, conflicts_with = "project")]
     all: bool,
-    /// Export all papers in this project (name or id).
-    #[arg(long)]
-    project: Option<String>,
-    /// Filter batch exports to papers carrying this tag (or its prefix).
-    #[arg(long)]
-    tag: Option<String>,
-    /// Filter batch exports to starred papers only.
-    #[arg(long)]
-    starred: bool,
-    /// Filter batch exports by a search term (title/author).
-    #[arg(long)]
-    query: Option<String>,
-    /// Filter batch exports by status (resolved|needs_review).
-    #[arg(long)]
-    status: Option<String>,
+    #[command(flatten)]
+    filters: FilterArgs,
     /// Output format.
     #[arg(long, value_enum, default_value_t = BibFormatArg::Bibtex)]
     format: BibFormatArg,
@@ -89,9 +91,9 @@ pub(super) async fn delete(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
     if paper.deleted_at.is_some() {
         println!("already deleted: {}", paper.id);
     } else {
-        let title = paper.meta.title.as_deref().unwrap_or("(untitled)");
+        let title = output::title(paper.meta.title.as_deref());
         if args.yes || confirm(&format!("Delete {title:?}?"))? {
-            trash::soft_delete(&ctx.pool, &paper.id).await?;
+            ctx.app.trash_paper(&paper.id).await?;
             println!("deleted {}", paper.id);
         } else {
             println!("cancelled");
@@ -108,7 +110,7 @@ pub(super) async fn restore(ctx: &Ctx, args: RestoreArgs) -> Result<()> {
     if paper.deleted_at.is_none() {
         anyhow::bail!("{} is not in the trash", paper.id);
     }
-    trash::restore(&ctx.pool, &paper.id).await?;
+    ctx.app.restore_paper(&paper.id).await?;
     println!("restored {}", paper.id);
     Ok(())
 }
@@ -136,7 +138,7 @@ pub(super) async fn purge(ctx: &Ctx, args: PurgeArgs) -> Result<()> {
         // One paper's failure must not strand the rest half-purged:
         // keep going and report the stragglers at the end.
         let mut failures = 0usize;
-        let app = ctx.app();
+        let app = &ctx.app;
         for p in &targets {
             if let Err(e) = app.purge(p).await {
                 eprintln!("could not purge {}: {e:#}", p.id);
@@ -164,15 +166,29 @@ pub(super) async fn star(ctx: &Ctx, args: StarArgs, on: bool) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn name(ctx: &Ctx, args: NameArgs) -> Result<()> {
+    let paper = papers::find_one(&ctx.pool, &args.paper).await?;
+    if args.name.is_none() && !args.clear {
+        match &paper.name {
+            Some(name) => println!("{name}"),
+            None => println!("{} has no name", paper.id),
+        }
+        return Ok(());
+    }
+    let name = PaperName::parse(args.name.as_deref().unwrap_or_default())?;
+    papers::set_name(&ctx.pool, &paper.id, name.as_ref()).await?;
+    match name {
+        Some(name) => println!("named {} {}", paper.id, name.as_str()),
+        None => println!("cleared the name of {}", paper.id),
+    }
+    Ok(())
+}
+
 pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     let ExportArgs {
         id,
         all,
-        project,
-        tag,
-        starred,
-        query,
-        status,
+        filters,
         format,
         output,
     } = args;
@@ -181,22 +197,13 @@ pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
         let paper = papers::find_one(&ctx.pool, &id).await?;
         crate::library::export::format_entry(&paper, fmt)
     } else {
-        if !all && project.is_none() && tag.is_none() && !starred {
+        if !all && filters.project.is_none() && filters.tag.is_none() && !filters.starred {
             anyhow::bail!(
                 "specify a paper id, --all, --project <name>, --tag <name>, or --starred"
             );
         }
-        let project_id = match &project {
-            Some(sel) => Some(projects::find_one(&ctx.pool, sel).await?.id),
-            None => None,
-        };
-        let filter = papers::PaperFilter {
-            status,
-            project: project_id,
-            tag,
-            starred: starred.then_some(true),
-        };
-        let papers = papers::list(&ctx.pool, query.as_deref(), None, &filter).await?;
+        let filter = filters.resolve(&ctx.pool).await?;
+        let papers = papers::list(&ctx.pool, filters.query.as_deref(), None, &filter).await?;
         crate::library::export::format_entries(&papers, fmt)
     };
     // Normalize to exactly one trailing newline so single-entry output

@@ -49,17 +49,12 @@ async fn put_annotation(
     Path((paper_id, annotation_id)): Path<(String, String)>,
     Json(body): Json<NewAnnotation>,
 ) -> Result<Response, ApiError> {
-    crate::annotations::validate_id(&annotation_id).map_err(ApiError::BadRequest)?;
-    crate::annotations::validate_new(&body).map_err(ApiError::BadRequest)?;
-    fetch_paper(&app, &paper_id, Trash::Allow, "put_annotation").await?;
     let a = app
-        .annotations()
-        .put(&paper_id, &annotation_id, body)
+        .put_annotation(&paper_id, &annotation_id, body)
         .await
-        .with_context(|| format!("put_annotation {paper_id}/{annotation_id}"))?;
-    // The note feeds the `notes` search field; nudge the sweep so the
-    // index catches up without waiting for its next poll.
-    app.wake_search();
+        .map_err(ApiError::context(format!(
+            "put_annotation {paper_id}/{annotation_id}"
+        )))?;
     Ok(Json(a).into_response())
 }
 
@@ -68,15 +63,11 @@ async fn delete_annotation(
     State(app): State<App>,
     Path((paper_id, annotation_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if !app
-        .annotations()
-        .delete(&paper_id, &annotation_id)
+    app.delete_annotation(&paper_id, &annotation_id)
         .await
-        .with_context(|| format!("delete_annotation {paper_id}/{annotation_id}"))?
-    {
-        return Err(ApiError::NotFound);
-    }
-    app.wake_search();
+        .map_err(ApiError::context(format!(
+            "delete_annotation {paper_id}/{annotation_id}"
+        )))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -86,12 +77,9 @@ async fn clear_annotations(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    fetch_paper(&app, &id, Trash::Allow, "clear_annotations").await?;
     let n = app
-        .annotations()
-        .delete_all(&id)
+        .clear_annotations(&id)
         .await
-        .with_context(|| format!("clear_annotations {id}"))?;
-    app.wake_search();
+        .map_err(ApiError::context(format!("clear_annotations {id}")))?;
     Ok(Json(serde_json::json!({ "deleted": n })).into_response())
 }

@@ -11,6 +11,12 @@ pub enum Error {
     Internal(anyhow::Error),
 }
 
+impl Error {
+    pub(crate) fn not_found() -> Self {
+        Error::NotFound("not found".into())
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

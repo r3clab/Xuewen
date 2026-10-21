@@ -22,6 +22,25 @@ pub(crate) async fn get(
     Ok(row)
 }
 
+/// A paper's cached row whatever input produced it. For showing what the
+/// reader last parsed; a cache lookup must go through `get`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct CachedRow {
+    pub(crate) refs: String,
+    pub(crate) parsed: String,
+    pub(crate) model: String,
+    pub(crate) created_at: String,
+}
+
+pub(crate) async fn latest(pool: &SqlitePool, paper_id: &str) -> Result<Option<CachedRow>> {
+    Ok(sqlx::query_as(
+        "SELECT refs, parsed, model, created_at FROM citation_parses WHERE paper_id = ?",
+    )
+    .bind(paper_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// Insert or replace a paper's cached parse.
 pub(crate) async fn upsert(
     pool: &SqlitePool,
@@ -72,6 +91,12 @@ mod tests {
             get(&pool, "p1", r#"["a","c"]"#).await.unwrap(),
             Some((r#"[null]"#.to_string(), "m".to_string()))
         );
+        let row = latest(&pool, "p1").await.unwrap().unwrap();
+        assert_eq!(
+            (row.refs.as_str(), row.parsed.as_str()),
+            (r#"["a","c"]"#, "[null]")
+        );
+        assert!(latest(&pool, "p2").await.unwrap().is_none());
     }
 
     #[tokio::test]

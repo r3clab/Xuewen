@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -32,6 +33,20 @@ impl Semantic {
         ai: &AiConfig,
         mode: OpenMode,
     ) -> Result<Self> {
+        Self::open_waiting(pool, cfg, ai, mode, Duration::ZERO).await
+    }
+
+    /// `open`, but a lock whose holder publishes no server address is waited
+    /// out for up to `wait`: a CLI command's catch-up that overlaps a server
+    /// start would otherwise leave that server without semantic search until
+    /// it restarts.
+    pub(crate) async fn open_waiting(
+        pool: &SqlitePool,
+        cfg: &SearchConfig,
+        ai: &AiConfig,
+        mode: OpenMode,
+        wait: Duration,
+    ) -> Result<Self> {
         let Some(e) = &ai.embedding else {
             return Ok(Self::NotConfigured);
         };
@@ -39,7 +54,18 @@ impl Semantic {
         let Some(embedder) = Embedder::from_resolved(&resolved, &e.model(), e.dims) else {
             return Ok(Self::NotConfigured);
         };
-        match VectorStore::open(&cfg.vector_dir, e.dims, mode).await {
+        let deadline = tokio::time::Instant::now() + wait;
+        let opened = loop {
+            match VectorStore::open(&cfg.vector_dir, e.dims, mode).await {
+                Err(OpenError::Locked { holder: None, .. })
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                opened => break opened,
+            }
+        };
+        match opened {
             Ok((store, opened)) => {
                 if opened == Opened::Empty {
                     tracing::info!(
@@ -121,6 +147,32 @@ mod tests {
             index_dir: dir.join("index"),
             vector_dir: dir.join("vectors"),
         }
+    }
+
+    #[tokio::test]
+    async fn open_waiting_outlasts_a_short_lived_holder() {
+        let (_db, pool) = temp_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, ai) = (
+            search_cfg(dir.path()),
+            embedding_ai("http://127.0.0.1:1/v1", 4),
+        );
+        let (holder, _) = VectorStore::open(&cfg.vector_dir, 4, OpenMode::LoadOrCreate)
+            .await
+            .unwrap();
+        let open = |wait| Semantic::open_waiting(&pool, &cfg, &ai, OpenMode::LoadOrCreate, wait);
+        assert!(open(Duration::ZERO).await.unwrap().tier().is_none());
+
+        let released = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            holder.close().await.unwrap();
+        });
+        assert!(open(Duration::from_secs(10))
+            .await
+            .unwrap()
+            .tier()
+            .is_some());
+        released.await.unwrap();
     }
 
     #[tokio::test]

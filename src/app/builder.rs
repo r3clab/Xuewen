@@ -5,7 +5,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use super::lazy::Lazy;
-use super::{summarize, App, Inner};
+use super::{summarize, translate, App, Inner};
 use crate::agent::AgentService;
 use crate::annotations::AnnotationsService;
 use crate::citations::CitationsService;
@@ -50,13 +50,14 @@ impl AppBuilder {
                 agent: None,
                 citations,
                 annotations,
-                translate: None,
+                translate: Lazy::unavailable(translate::NOT_CONFIGURED.to_string()),
                 preview,
                 ui: UiConfig::default(),
-                summary: Lazy::deferred(|| Err(summarize::NOT_CONFIGURED.to_string())),
+                summary: Lazy::unavailable(summarize::NOT_CONFIGURED.to_string()),
                 clone_allowed_hosts: agent.clone_allowed_hosts,
                 max_repo_mb: agent.max_repo_mb,
                 tasks: Tasks::new(),
+                index_dirty: Default::default(),
             },
         }
     }
@@ -100,7 +101,18 @@ impl AppBuilder {
     }
 
     pub fn translate(mut self, translate: impl Into<Option<Arc<TranslateService>>>) -> Self {
-        self.inner.translate = translate.into();
+        self.inner.translate = match translate.into() {
+            Some(svc) => Lazy::Ready(svc),
+            None => Lazy::unavailable(translate::NOT_CONFIGURED.to_string()),
+        };
+        self
+    }
+
+    pub(super) fn lazy_translate(
+        mut self,
+        make: impl Fn() -> Result<Arc<TranslateService>, String> + Send + Sync + 'static,
+    ) -> Self {
+        self.inner.translate = Lazy::deferred(make);
         self
     }
 
@@ -152,7 +164,14 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     let ingest = ingest(cfg, pool.clone(), RetryPolicy::interactive())?;
     // One handle per process: the store's lock refuses a second opener, so
     // search and daily share this one.
-    let semantic = Semantic::open(&pool, &cfg.search, &cfg.ai, OpenMode::LoadOrCreate).await?;
+    let semantic = Semantic::open_waiting(
+        &pool,
+        &cfg.search,
+        &cfg.ai,
+        OpenMode::LoadOrCreate,
+        indexer::CLAIM_WAIT,
+    )
+    .await?;
     let vectors = semantic.store().cloned();
     let daily = DailyService::from_config(cfg, pool.clone(), &semantic)?;
     let search = match SearchService::open(pool.clone(), &cfg.search, semantic).await {
@@ -181,7 +200,9 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     let builder = from_config(cfg, pool.clone());
     let tasks = &builder.inner.tasks;
     if let Some(s) = &search {
-        indexer::spawn(tasks, s.clone(), cfg.library_root.clone());
+        if let Err(e) = indexer::spawn(tasks, s.clone(), cfg.library_root.clone()).await {
+            tracing::warn!("search indexing disabled: {e:#}");
+        }
     }
     if let Some(d) = &daily {
         tasks.spawn(daily::scheduler::run(d.clone(), tasks.token()));
@@ -195,10 +216,7 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     }
     let summary = match summary {
         Some(s) => Lazy::Ready(s),
-        None => {
-            let reason = summarize::disabled_reason(cfg);
-            Lazy::deferred(move || Err(reason.clone()))
-        }
+        None => Lazy::unavailable(summarize::disabled_reason(cfg)),
     };
     Ok(builder
         .ingest(ingest)
@@ -208,7 +226,10 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
         .summary(summary)
         .agent(agent)
         .citations(CitationsService::from_config(pool, cfg))
-        .translate(TranslateService::from_config(cfg).map(Arc::new))
+        .lazy_translate({
+            let translate = translate_service(cfg);
+            move || translate.clone()
+        })
         .build())
 }
 
@@ -222,7 +243,7 @@ pub(super) fn cli(cfg: &Config, pool: SqlitePool) -> App {
         move || ingest(&cfg, pool.clone(), RetryPolicy::production())
     };
     let summary = {
-        let (cfg, pool) = (shared, pool.clone());
+        let (cfg, pool) = (shared.clone(), pool.clone());
         move || {
             SummaryService::from_config(pool.clone(), &cfg)
                 .ok_or_else(|| summarize::disabled_reason(&cfg))
@@ -231,8 +252,15 @@ pub(super) fn cli(cfg: &Config, pool: SqlitePool) -> App {
     from_config(cfg, pool)
         .lazy_ingest(make_ingest)
         .summary(Lazy::deferred(summary))
+        .lazy_translate(move || translate_service(&shared))
         .agent(AgentService::from_config(&cfg.ai.agent))
         .build()
+}
+
+fn translate_service(cfg: &Config) -> Result<Arc<TranslateService>, String> {
+    TranslateService::from_config(cfg)
+        .map(Arc::new)
+        .ok_or_else(|| translate::disabled_reason(cfg))
 }
 
 fn ingest(cfg: &Config, pool: SqlitePool, retry: RetryPolicy) -> Result<Ingest> {

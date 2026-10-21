@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use super::output::print_outcome;
-use super::serve::cancel_on_signal;
+use super::signals::cancel_on_signal;
 use super::Ctx;
 use crate::ingest::import::{ImportError, Imported};
 use crate::ingest::refresh::RefreshTarget;
-use crate::search::vector::{OpenError, OpenMode};
+use crate::search::vector::OpenError;
 use crate::search::{indexer, SearchService, Semantic};
 
 #[derive(clap::Args)]
@@ -30,13 +30,13 @@ pub(super) struct RefreshArgs {
 }
 
 pub(super) async fn ingest(ctx: &Ctx, args: IngestArgs) -> Result<()> {
-    let outcome = ctx.app().ingest_path(&args.path).await?;
+    let outcome = ctx.app.ingest_path(&args.path).await?;
     print_outcome(&ctx.pool, outcome).await
 }
 
 pub(super) async fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
     let input = args.input;
-    match ctx.app().import(&input).await {
+    match ctx.app.import(&input).await {
         Ok(Imported::Ingested(outcome)) => print_outcome(&ctx.pool, outcome).await,
         Ok(Imported::Unfetched { title, .. }) => {
             let title = title.as_deref().unwrap_or("(unknown title)");
@@ -60,14 +60,8 @@ pub(super) async fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
 }
 
 pub(super) async fn watch(ctx: &Ctx) -> Result<()> {
-    let app = ctx.app();
-    let semantic = Semantic::open(
-        &ctx.pool,
-        &ctx.cfg.search,
-        &ctx.cfg.ai,
-        OpenMode::LoadOrCreate,
-    )
-    .await?;
+    let app = &ctx.app;
+    let semantic = ctx.open_semantic().await?;
     let vectors = semantic.store().cloned();
     match semantic {
         // The holder runs its own sweeps; a second Tantivy writer here would
@@ -76,7 +70,11 @@ pub(super) async fn watch(ctx: &Ctx) -> Result<()> {
             tracing::warn!("search indexing disabled: {e}")
         }
         semantic => match SearchService::open(ctx.pool.clone(), &ctx.cfg.search, semantic).await {
-            Ok(s) => indexer::spawn(app.tasks(), s, ctx.cfg.library_root.clone()),
+            Ok(s) => {
+                if let Err(e) = indexer::spawn(app.tasks(), s, ctx.cfg.library_root.clone()).await {
+                    tracing::warn!("search indexing disabled: {e:#}");
+                }
+            }
             Err(e) => tracing::warn!("search indexing disabled: {e}"),
         },
     }
@@ -95,7 +93,7 @@ pub(super) async fn refresh(ctx: &Ctx, args: RefreshArgs) -> Result<()> {
         (None, true) => RefreshTarget::All,
         (None, false) => RefreshTarget::NeedsReview,
     };
-    let summary = ctx.app().refresh(target).await?;
+    let summary = ctx.app.refresh(target).await?;
     println!(
         "refresh: {} processed, {} re-resolved, {} re-filed",
         summary.processed, summary.reresolved, summary.refiled

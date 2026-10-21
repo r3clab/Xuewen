@@ -122,7 +122,7 @@ async fn send_validates_model_message_paper_and_config() {
     resp.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         resp.json::<serde_json::Value>()["error"],
-        "agent ask is not configured"
+        "agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]"
     );
 
     let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent())).unwrap();

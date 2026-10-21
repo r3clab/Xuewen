@@ -233,6 +233,32 @@ impl SearchService {
             .context("fts delete task panicked")?
     }
 
+    /// Take the Tantivy writer lock, retrying every 250ms until `wait` has
+    /// passed (`Duration::ZERO` tries once).
+    pub(crate) async fn claim_writer(&self, wait: Duration) -> Result<fts::WriterClaim> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let fts = Arc::clone(&self.fts);
+            let claim = tokio::task::spawn_blocking(move || fts.claim_writer())
+                .await
+                .context("fts writer claim task panicked")??;
+            if claim == fts::WriterClaim::Claimed || tokio::time::Instant::now() >= deadline {
+                return Ok(claim);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub(crate) fn release_writer(&self) {
+        self.fts.release_writer();
+    }
+
+    pub(crate) async fn close_vectors(&self) {
+        if let Some(vectors) = self.semantic.store() {
+            vectors.close_gracefully().await;
+        }
+    }
+
     /// Nudge the indexer to sweep now (harmless if nothing is stale).
     pub(crate) fn wake(&self) {
         self.notify.notify_one();

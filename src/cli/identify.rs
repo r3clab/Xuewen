@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::output::{author_line, confirm};
+use super::output::{self, author_line, confirm};
 use super::{in_trash, Ctx};
 use crate::ingest::pipeline::IdentifyOutcome;
 use crate::library::model::Identifier;
@@ -35,7 +35,7 @@ pub(super) async fn identify(ctx: &Ctx, args: IdentifyArgs) -> Result<()> {
         pick,
         yes,
     } = args;
-    let app = ctx.app();
+    let app = &ctx.app;
     let identify = app.identify()?;
     // Early UX check; the enforced guard lives in apply_match. This lets us
     // bail before the interactive search/confirm flow rather than after.
@@ -63,7 +63,7 @@ pub(super) async fn identify(ctx: &Ctx, args: IdentifyArgs) -> Result<()> {
                     println!(
                         "{:2}. {} — {} ({}, {}) [{}]",
                         i + 1,
-                        c.title.as_deref().unwrap_or("(untitled)"),
+                        output::title(c.title.as_deref()),
                         author_line(&c.authors),
                         c.venue.as_deref().unwrap_or("?"),
                         c.year.map_or("?".to_string(), |y| y.to_string()),
@@ -80,7 +80,7 @@ pub(super) async fn identify(ctx: &Ctx, args: IdentifyArgs) -> Result<()> {
 
     println!(
         "match: {} — {} ({}, {})",
-        md.title.as_deref().unwrap_or("(untitled)"),
+        output::title(md.title.as_deref()),
         author_line(&md.authors),
         md.venue.as_deref().unwrap_or("?"),
         md.year.map_or("?".to_string(), |y| y.to_string()),

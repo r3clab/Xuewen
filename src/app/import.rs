@@ -47,7 +47,9 @@ impl App {
     }
 
     pub(crate) async fn refresh(&self, target: RefreshTarget) -> Result<RefreshSummary, Error> {
-        Ok(refresh::run(self.ingest()?.ctx(), target).await?)
+        let summary = refresh::run(self.ingest()?.ctx(), target).await;
+        self.wake_search();
+        Ok(summary?)
     }
 
     pub(crate) async fn watch(&self, inbox: &Path) -> Result<(), Error> {

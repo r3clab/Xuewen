@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tokio_util::sync::CancellationToken;
 
+use super::signals::cancel_on_signal;
 use super::Ctx;
 use crate::app::App;
 
@@ -15,60 +15,6 @@ pub(super) struct ServeArgs {
     /// Allow binding a non-loopback address (mutating endpoints have no auth).
     #[arg(long)]
     allow_remote: bool,
-}
-
-/// Cancel `token` on SIGINT or SIGTERM. The container runs the server as
-/// PID 1, which gets no default signal disposition — without an explicit
-/// handler `docker stop` and Kubernetes rollouts hang the full grace period
-/// and end in SIGKILL.
-pub(super) async fn cancel_on_signal(token: CancellationToken) {
-    let mut signals = Signals::install();
-    signals.recv().await;
-    token.cancel();
-    std::process::exit(signals.recv().await);
-}
-
-#[cfg(unix)]
-struct Signals {
-    interrupt: tokio::signal::unix::Signal,
-    terminate: tokio::signal::unix::Signal,
-}
-
-#[cfg(unix)]
-impl Signals {
-    fn install() -> Self {
-        use tokio::signal::unix::{signal, SignalKind};
-        Self {
-            interrupt: signal(SignalKind::interrupt())
-                .expect("failed to install the Ctrl-C handler"),
-            terminate: signal(SignalKind::terminate())
-                .expect("failed to install the SIGTERM handler"),
-        }
-    }
-
-    async fn recv(&mut self) -> i32 {
-        tokio::select! {
-            _ = self.interrupt.recv() => 128 + libc::SIGINT,
-            _ = self.terminate.recv() => 128 + libc::SIGTERM,
-        }
-    }
-}
-
-#[cfg(not(unix))]
-struct Signals;
-
-#[cfg(not(unix))]
-impl Signals {
-    fn install() -> Self {
-        Self
-    }
-
-    async fn recv(&mut self) -> i32 {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install the Ctrl-C handler");
-        130
-    }
 }
 
 pub(super) async fn serve(ctx: &Ctx, args: ServeArgs) -> Result<()> {

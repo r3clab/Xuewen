@@ -32,12 +32,13 @@ impl SummaryService {
     /// a model/API key (warns).
     pub(crate) fn from_config(pool: SqlitePool, cfg: &Config) -> Option<Arc<Self>> {
         let use_ = cfg.ai.summary.as_ref()?;
-        let client = match LlmClient::from_resolved(&cfg.ai.resolve(use_)) {
-            Some(c) => c,
-            None => {
-                tracing::warn!("[ai.summary] has no model or API key — library summaries disabled");
-                return None;
-            }
+        let r = cfg.ai.resolve(use_);
+        let Some(client) = LlmClient::from_resolved(&r) else {
+            tracing::warn!(
+                "{} — library summaries disabled",
+                r.unusable_reason("ai.summary")
+            );
+            return None;
         };
         Some(Arc::new(Self {
             pool,

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::Ctx;
+use super::{output, Ctx};
 use crate::library::papers;
 use crate::library::projects::{self, ProjectName};
 
@@ -11,6 +11,8 @@ pub(super) enum ProjectCmd {
     List,
     /// Create a new project.
     New { name: String },
+    /// Rename a project.
+    Rename { project: String, name: String },
     /// Delete a project (papers are kept).
     Rm { project: String },
     /// Add one or more papers to a project.
@@ -38,10 +40,18 @@ pub(super) async fn project(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
             }
         }
         ProjectCmd::New { name } => {
-            let name = ProjectName::parse(&name)
-                .map_err(|_| anyhow::anyhow!("project name cannot be empty"))?;
-            let p = projects::create(pool, &name).await?;
+            let name = project_name(&name)?;
+            let p = projects::create(pool, &name).await.map_err(name_taken)?;
             println!("created project {} ({})", p.name, p.id);
+        }
+        ProjectCmd::Rename { project, name } => {
+            let p = projects::find_one(pool, &project).await?;
+            let name = project_name(&name)?;
+            let renamed = projects::update(pool, &p.id, Some(&name))
+                .await
+                .map_err(name_taken)?
+                .ok_or_else(|| anyhow::anyhow!("project {} was deleted meanwhile", p.name))?;
+            println!("renamed project {} to {}", p.name, renamed.name);
         }
         ProjectCmd::Rm { project } => {
             let p = projects::find_one(pool, &project).await?;
@@ -76,13 +86,21 @@ pub(super) async fn project(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
             let papers = papers::list(pool, None, None, &filter).await?;
             println!("{} — {} paper(s)", proj.name, papers.len());
             for p in papers {
-                println!(
-                    "  {}  {}",
-                    p.id,
-                    p.meta.title.as_deref().unwrap_or("(untitled)")
-                );
+                println!("  {}  {}", p.id, output::title(p.meta.title.as_deref()));
             }
         }
     }
     Ok(())
+}
+
+fn project_name(raw: &str) -> Result<ProjectName> {
+    ProjectName::parse(raw).map_err(|_| anyhow::anyhow!("project name cannot be empty"))
+}
+
+fn name_taken(e: anyhow::Error) -> anyhow::Error {
+    if crate::db::is_unique_violation(&e) {
+        anyhow::anyhow!(projects::NAME_TAKEN)
+    } else {
+        e
+    }
 }

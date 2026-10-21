@@ -5,9 +5,10 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-// Storage row, not a wire type: the history endpoint maps this to
-// `web::handlers::chat::ChatTurn`, which parses `tools_json` into structured
-// `tools`.
+use super::ask::ToolCall;
+
+// Storage row, not a wire type: the history endpoint maps it to
+// `web::handlers::chat::ChatTurn`, and `xuewen chat history` prints it.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChatMessageRow {
     pub(crate) id: i64,
@@ -16,6 +17,18 @@ pub struct ChatMessageRow {
     pub model: Option<String>,
     pub(crate) created_at: String,
     pub tools_json: Option<String>,
+}
+
+impl ChatMessageRow {
+    /// The turn's tool log. A row whose `tools_json` no longer parses
+    /// degrades to no tools rather than failing the whole thread.
+    pub(crate) fn tools(&self) -> Option<Vec<ToolCall>> {
+        self.tools_json.as_deref().and_then(|s| {
+            serde_json::from_str(s)
+                .map_err(|e| tracing::warn!("chat turn {}: unparseable tools_json: {e}", self.id))
+                .ok()
+        })
+    }
 }
 
 pub async fn list(pool: &SqlitePool, paper_id: &str) -> Result<Vec<ChatMessageRow>> {
@@ -62,6 +75,15 @@ pub async fn insert_exchange(
     .await?;
     tx.commit().await?;
     Ok(res.last_insert_rowid())
+}
+
+pub(crate) async fn count(pool: &SqlitePool, paper_id: &str) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_messages WHERE paper_id = ?")
+            .bind(paper_id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 pub(crate) async fn clear(pool: &SqlitePool, paper_id: &str) -> Result<()> {

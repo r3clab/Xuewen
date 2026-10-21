@@ -32,17 +32,8 @@ impl App {
 }
 
 pub(super) fn disabled_reason(cfg: &Config) -> String {
-    // Say precisely why the service is off: an absent section, a
-    // missing model, or a key whose env var came up empty.
-    let Some(use_) = cfg.ai.summary.as_ref() else {
-        return NOT_CONFIGURED.to_string();
-    };
-    let r = cfg.ai.resolve(use_);
-    if r.model.is_none() {
-        return "[ai.summary] has no model — set `model` under [ai] or [ai.summary]".to_string();
+    match cfg.ai.summary.as_ref() {
+        None => NOT_CONFIGURED.to_string(),
+        Some(use_) => cfg.ai.resolve(use_).unusable_reason("ai.summary"),
     }
-    format!(
-        "[ai.summary] has no API key — set ${} or `api_key_env`",
-        r.api_key_env
-    )
 }

@@ -17,19 +17,19 @@ pub(crate) struct StructuredReference {
     // `null_as_empty`: the model sometimes emits `"authors": null` for an
     // entry it half-parsed; that must not fail the whole batch.
     #[serde(default, deserialize_with = "null_as_empty")]
-    authors: Vec<String>,
+    pub(crate) authors: Vec<String>,
     #[serde(default)]
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(default)]
-    venue: Option<String>,
+    pub(crate) venue: Option<String>,
     #[serde(default)]
-    year: Option<i64>,
+    pub(crate) year: Option<i64>,
     #[serde(default)]
-    doi: Option<String>,
+    pub(crate) doi: Option<String>,
     #[serde(default)]
-    arxiv_id: Option<String>,
+    pub(crate) arxiv_id: Option<String>,
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 fn null_as_empty<'de, D>(d: D) -> Result<Vec<String>, D::Error>
@@ -99,15 +99,28 @@ fn stale_heuristic(src: Option<&str>) -> bool {
     src.is_some_and(|s| s.starts_with('h') && s != HEURISTIC_SRC)
 }
 
+/// The parse the reader last cached for a paper, each raw reference string
+/// beside its fields (`None` where nothing could parse it).
+pub(crate) struct CachedParse {
+    /// The cache's `model` column: `heuristic-v1` or `heuristic-v1+<model>`.
+    pub(crate) provenance: String,
+    pub(crate) created_at: String,
+    pub(crate) entries: Vec<(String, Option<StructuredReference>)>,
+}
+
 impl CitationsService {
     /// Always available — the heuristic needs no config. `[ai.citations]`
     /// adds the LLM fallback; absent (silently) or present but missing a
     /// model/API key (warns) → heuristics only.
     pub fn from_config(pool: SqlitePool, cfg: &Config) -> Arc<Self> {
         let llm = cfg.ai.citations.as_ref().and_then(|use_| {
-            let client = crate::llm::LlmClient::from_resolved(&cfg.ai.resolve(use_));
+            let r = cfg.ai.resolve(use_);
+            let client = crate::llm::LlmClient::from_resolved(&r);
             if client.is_none() {
-                tracing::warn!("[ai.citations] has no model or API key — LLM fallback disabled");
+                tracing::warn!(
+                    "{} — LLM fallback disabled",
+                    r.unusable_reason("ai.citations")
+                );
             }
             client
         });
@@ -137,6 +150,24 @@ impl CitationsService {
             llm,
             in_flight: Default::default(),
         }
+    }
+
+    /// Reference strings are extracted from the PDF's layout in the reader,
+    /// so a parse exists only once the paper has been opened there.
+    pub(crate) async fn cached(&self, paper_id: &str) -> Result<Option<CachedParse>> {
+        let Some(row) = store::latest(&self.pool, paper_id).await? else {
+            return Ok(None);
+        };
+        let refs: Vec<String> = serde_json::from_str(&row.refs)?;
+        let parsed: Vec<Option<CachedReference>> = serde_json::from_str(&row.parsed)?;
+        Ok(Some(CachedParse {
+            provenance: row.model,
+            created_at: row.created_at,
+            entries: refs
+                .into_iter()
+                .zip(parsed.into_iter().map(|p| p.map(|c| c.reference)))
+                .collect(),
+        }))
     }
 
     /// Parse `refs` for `paper_id`: exact-input cache hit, else heuristics
@@ -500,6 +531,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(provenance, "heuristic-v1");
+    }
+
+    #[tokio::test]
+    async fn cached_pairs_each_raw_reference_with_its_parse() {
+        let (pool, _dir) = crate::testutil::pool_with_paper("p1").await;
+        let svc = CitationsService::heuristic_only(pool.clone());
+        assert!(svc.cached("p1").await.unwrap().is_none());
+
+        let refs = vec![IEEE_REF.to_string(), "garbled".to_string()];
+        let parsed = svc.parse("p1", &refs, None).await.unwrap();
+        let cached = svc.cached("p1").await.unwrap().unwrap();
+        assert_eq!(cached.provenance, "heuristic-v1");
+        assert_eq!(
+            cached.entries,
+            refs.into_iter().zip(parsed).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
