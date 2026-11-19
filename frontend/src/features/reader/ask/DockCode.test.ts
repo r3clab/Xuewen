@@ -53,4 +53,30 @@ describe('DockCode', () => {
     render(DockCode, { props: { id: 'p1' } });
     expect(await screen.findByText(/git clone failed/)).toBeInTheDocument();
   });
+
+  it('drops a status poll that a detach overtook', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const cloning = { paper_id: 'p1', repo_url: 'https://github.com/x/y', commit_sha: null, status: 'cloning', error: null, cloned_at: null, size_bytes: null };
+    let answerPoll!: (r: Response) => void;
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(codeResponse({ attached: true, code: cloning }))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => (answerPoll = resolve)))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    try {
+      render(DockCode, { props: { id: 'p1' } });
+      await userEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+      vi.advanceTimersByTime(2000);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      await userEvent.click(screen.getByRole('button', { name: 'Remove repo' }));
+      expect(await screen.findByPlaceholderText('https://github.com/…')).toBeInTheDocument();
+      answerPoll(codeResponse({ attached: true, code: cloning }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.getByPlaceholderText('https://github.com/…')).toBeInTheDocument();
+      expect(screen.queryByText('cloning…')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

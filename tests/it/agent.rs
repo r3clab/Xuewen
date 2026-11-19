@@ -3,6 +3,7 @@ use crate::support;
 use futures_util::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use xuewen::agent::history::ChatRole;
 use xuewen::agent::{AgentEvent, AgentService, TurnMessage, TurnPaper, TurnRequest};
 use xuewen::config::{AgentBackendConfig, AgentConfig};
 
@@ -31,7 +32,7 @@ fn turn(question: &str) -> TurnRequest {
             year: None,
         },
         transcript: vec![TurnMessage {
-            role: "user".into(),
+            role: ChatRole::User,
             content: "hi".into(),
         }],
         question: question.into(),

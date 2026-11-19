@@ -58,7 +58,7 @@ impl TurnPaper {
 
 #[derive(Debug, serde::Serialize)]
 pub struct TurnMessage {
-    pub role: String,
+    pub role: history::ChatRole,
     pub content: String,
 }
 
@@ -78,6 +78,12 @@ pub struct TurnRequest {
 pub fn workspace_dir(library_root: &Path, paper_id: &str) -> PathBuf {
     library_root.join("agent").join(paper_id)
 }
+
+/// The runner in the source checkout this binary was built from: what a dev
+/// build runs, wherever it is started. Packaged installs (the NixOS and Home
+/// Manager modules, the desktop bundle) set `[ai.agent].runner` to their own
+/// copy.
+const CHECKOUT_RUNNER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/agent-runner/src/runner.mjs");
 
 pub struct AgentService {
     pub backends: Vec<AgentBackend>,
@@ -111,7 +117,7 @@ impl AgentService {
             runner: cfg
                 .runner
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("agent-runner/src/runner.mjs")),
+                .unwrap_or_else(|| PathBuf::from(CHECKOUT_RUNNER)),
             timeout: Duration::from_secs(cfg.timeout_secs),
         }))
     }
@@ -156,7 +162,7 @@ impl AgentService {
                     detail
                 }]
             }
-            Err(_) => vec!["`node` not found on PATH — the agent needs Node ≥ 20".to_string()],
+            Err(_) => vec!["`node` not found on PATH — the agent needs Node.js".to_string()],
         }
     }
 
@@ -173,7 +179,12 @@ impl AgentService {
         let failed = ws.join("paper.txt.failed");
         if !tokio::fs::try_exists(&txt).await? || tokio::fs::try_exists(&failed).await? {
             let pdf = library_root.join(&paper.rel_path);
-            match tokio::task::spawn_blocking(move || crate::pdf::extract_text_all(&pdf)).await? {
+            let title = paper.meta.title.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::pdf::paper_text(&pdf, title.as_deref(), crate::pdf::Pages::All)
+            })
+            .await?
+            {
                 Ok(text) => {
                     tokio::fs::write(&txt, text).await?;
                     let _ = tokio::fs::remove_file(&failed).await;
@@ -477,27 +488,7 @@ mod tests {
             .unwrap();
 
         // The transient failure is over: the PDF now extracts fine.
-        use printpdf::*;
-        let mut doc = PdfDocument::new("t");
-        let ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(12.0),
-            },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(15.0), Mm(280.0)),
-            },
-            Op::ShowText {
-                items: vec![TextItem::Text("recovered body".to_string())],
-            },
-            Op::EndTextSection,
-        ];
-        let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
-        let bytes = doc
-            .with_pages(vec![page])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(dir.path().join("p.pdf"), bytes).unwrap();
+        crate::testutil::write_pdf(&dir.path().join("p.pdf"), &["recovered body"]);
 
         let got = test_service()
             .ensure_workspace(dir.path(), &test_paper("p.pdf"))

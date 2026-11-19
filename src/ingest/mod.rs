@@ -9,8 +9,13 @@ pub mod watcher;
 use std::path::Path;
 
 use fetch::Fetcher;
+
 use import::{ImportError, Imported};
 use pipeline::IngestCtx;
+
+/// The largest PDF ingest accepts, uploaded or fetched: both are held whole
+/// in memory before they are staged.
+pub(crate) const MAX_PDF_BYTES: usize = 50 * 1024 * 1024;
 
 /// Held by `App` rather than cloned because `IngestCtx` is not `Clone` (its
 /// `Resolver`/`Grobid` are not).

@@ -12,6 +12,7 @@ mod render;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::locks::KeyedLocks;
 use render::{PageMeta, RenderError};
 
 /// How many pages may rasterize at once. hayro is synchronous CPU work whose
@@ -26,6 +27,11 @@ pub(crate) struct PreviewService {
     cache_dir: PathBuf,
     meta: cache::MetaCache,
     renders: Arc<tokio::sync::Semaphore>,
+    /// One render per `(content_hash, page)` at a time: a picker re-asking
+    /// for a page still rendering waits for it and reads the cache instead.
+    flights: KeyedLocks<(String, u32)>,
+    #[cfg(test)]
+    rendered: std::sync::atomic::AtomicUsize,
 }
 
 impl PreviewService {
@@ -36,6 +42,9 @@ impl PreviewService {
             cache_dir,
             meta: cache::MetaCache::default(),
             renders: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RENDERS)),
+            flights: KeyedLocks::default(),
+            #[cfg(test)]
+            rendered: Default::default(),
         }
     }
 
@@ -65,8 +74,15 @@ impl PreviewService {
         if let Some(png) = cache::read(&self.cache_dir, content_hash, page).await {
             return Ok(png);
         }
+        let _flight = self.flights.lock((content_hash.to_string(), page)).await;
+        if let Some(png) = cache::read(&self.cache_dir, content_hash, page).await {
+            return Ok(png);
+        }
         let bytes = read_pdf(pdf_path).await?;
         let png = self.blocking(move || render::page_png(bytes, page)).await?;
+        #[cfg(test)]
+        self.rendered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // A failed write costs a re-render next time, nothing more, so it
         // must not fail the request that already has the bytes in hand.
         if let Err(e) = cache::write(&self.cache_dir, content_hash, page, &png).await {
@@ -139,3 +155,31 @@ impl std::fmt::Display for PreviewError {
 }
 
 impl std::error::Error for PreviewError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn concurrent_requests_for_one_page_render_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("p.pdf");
+        crate::testutil::write_pdf(&pdf, &["page 0", "page 1"]);
+        let svc = PreviewService::new(dir.path().join("cache"));
+
+        let pngs = futures_util::future::join_all((0..6).map(|_| svc.page_png(&pdf, "h", 1))).await;
+        let first = pngs[0].as_ref().unwrap();
+        assert!(pngs.iter().all(|p| p.as_ref() == Ok(first)));
+        assert_eq!(svc.rendered.load(Ordering::SeqCst), 1);
+
+        svc.page_png(&pdf, "h", 0).await.unwrap();
+        assert_eq!(svc.rendered.load(Ordering::SeqCst), 2);
+        let mut files: Vec<_> = std::fs::read_dir(dir.path().join("cache/h"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(files, ["0.png", "1.png"]);
+    }
+}

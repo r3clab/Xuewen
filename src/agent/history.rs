@@ -3,16 +3,28 @@
 //! thread only ever contains completed exchanges.
 
 use anyhow::Result;
+use serde::Serialize;
 use sqlx::SqlitePool;
 
 use super::ask::ToolCall;
+
+/// `chat_messages.role` — the schema CHECK-constrains exactly these values
+/// (`0010_add_chat.sql`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type, ts_rs::TS)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
 
 // Storage row, not a wire type: the history endpoint maps it to
 // `web::handlers::chat::ChatTurn`, and `xuewen chat history` prints it.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChatMessageRow {
     pub(crate) id: i64,
-    pub role: String,
+    pub role: ChatRole,
     pub content: String,
     pub model: Option<String>,
     pub(crate) created_at: String,
@@ -56,17 +68,19 @@ pub async fn insert_exchange(
     let created_at = crate::db::now_rfc3339();
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO chat_messages (paper_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+        "INSERT INTO chat_messages (paper_id, role, content, created_at) VALUES (?, ?, ?, ?)",
     )
     .bind(paper_id)
+    .bind(ChatRole::User)
     .bind(user_content)
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
     let res = sqlx::query(
-        "INSERT INTO chat_messages (paper_id, role, content, model, tools_json, created_at) VALUES (?, 'assistant', ?, ?, ?, ?)",
+        "INSERT INTO chat_messages (paper_id, role, content, model, tools_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(paper_id)
+    .bind(ChatRole::Assistant)
     .bind(assistant_content)
     .bind(model_label)
     .bind(tools_json)
@@ -126,10 +140,10 @@ mod tests {
 
         let rows = list(&pool, "p1").await.unwrap();
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].role, ChatRole::User);
         assert_eq!(rows[0].content, "what is this?");
         assert_eq!(rows[0].model, None);
-        assert_eq!(rows[1].role, "assistant");
+        assert_eq!(rows[1].role, ChatRole::Assistant);
         assert_eq!(rows[1].model.as_deref(), Some("GPT-5 Mini"));
         assert_eq!(
             rows[1].tools_json.as_deref(),
@@ -152,7 +166,7 @@ mod tests {
         let (pool, _dir) = pool_with_paper("p1").await;
         sqlx::query(
             "INSERT INTO papers (id, content_hash, rel_path, added_at, status)
-             VALUES ('p2', 'hash2', 'q.pdf', datetime('now'), 'resolved')",
+             VALUES ('p2', 'hash2', 'q.pdf', '2026-01-01T00:00:00+00:00', 'resolved')",
         )
         .execute(&pool)
         .await

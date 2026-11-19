@@ -6,48 +6,15 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::search::IndexStatus;
-
-/// The slice of `GET /api/search` the CLI prints. A local struct rather than
-/// the web types, which are serialize-only.
-#[derive(Deserialize)]
-pub(super) struct SearchReply {
-    pub(super) semantic: Availability,
-    pub(super) results: Vec<Hit>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct Availability {
-    pub(super) reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct Hit {
-    pub(super) paper: HitPaper,
-    #[serde(rename = "match")]
-    pub(super) matched: HitMatch,
-}
-
-#[derive(Deserialize)]
-pub(super) struct HitPaper {
-    pub(super) id: String,
-    pub(super) cite_key: Option<String>,
-    pub(super) title: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct HitMatch {
-    pub(super) field: String,
-    pub(super) snippet: String,
-    pub(super) page: Option<i64>,
-}
+use super::search::PaperLabel;
+use crate::search::{IndexStatus, SearchResults};
 
 pub(super) async fn search(
     addr: SocketAddr,
     q: &str,
     fields: Option<&str>,
     engines: Option<&str>,
-) -> Result<SearchReply> {
+) -> Result<SearchResults<PaperLabel>> {
     let mut query = vec![("q", q)];
     query.extend(fields.map(|f| ("fields", f)));
     query.extend(engines.map(|e| ("engines", e)));
@@ -101,17 +68,16 @@ fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// The server's `{"error": …}` message when it sent one, else the raw body.
 async fn failure(resp: reqwest::Response) -> anyhow::Error {
     #[derive(Deserialize)]
     struct ErrorBody {
         error: String,
     }
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    let detail = serde_json::from_str::<ErrorBody>(&body)
-        .map_or_else(|_| body.trim().to_string(), |b| b.error);
-    anyhow!("{status}: {detail}")
+    match resp.json::<ErrorBody>().await {
+        Ok(body) => anyhow!("{status}: {}", body.error),
+        Err(e) => anyhow::Error::new(e).context(format!("{status} without an API error body")),
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +103,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
             .mount(&feed)
             .await;
+        let (_vectors_dir, vectors) = temp_vectors(4).await;
         let daily = DailyService::for_tests(
             DailyConfig {
                 categories: vec!["cs.AI".into()],
@@ -147,7 +114,7 @@ mod tests {
             },
             pool.clone(),
             Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-            temp_vectors(4).await,
+            vectors,
             LlmClient::new("http://127.0.0.1:1/v1", "m", None),
             &feed.uri(),
             "http://127.0.0.1:1/pdf",
@@ -178,5 +145,16 @@ mod tests {
             err.to_string(),
             "503 Service Unavailable: daily papers not configured"
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_endpoint_reports_the_api_error() {
+        let (dir, pool) = temp_pool().await;
+        let addr = serve(App::builder(pool, dir.path().to_path_buf()).build()).await;
+        let err = get::<serde_json::Value>(addr, "/api/no-such", &[])
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "404 Not Found: no such endpoint");
     }
 }

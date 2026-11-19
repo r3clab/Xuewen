@@ -59,8 +59,8 @@ describe('enqueueFiles', () => {
     await enqueueFiles([pdf('a.pdf'), pdf('b.pdf')]);
 
     expect(seen).toEqual(['a.pdf', 'b.pdf']); // one at a time, in order
-    expect(importState.items.map((i) => i.status)).toEqual(['ingested', 'duplicate']);
-    expect(importState.items[0].message).toBe('A');
+    expect(importState.items.map((i) => i.state.outcome)).toEqual(['ingested', 'duplicate']);
+    expect(importState.items[0].state).toEqual({ outcome: 'ingested', id: '1', title: 'A', status: 'resolved' });
   });
 
   it('marks a rejected upload as failed with the server message', async () => {
@@ -68,8 +68,7 @@ describe('enqueueFiles', () => {
 
     await enqueueFiles([pdf('bad.pdf')]);
 
-    expect(importState.items[0].status).toBe('failed');
-    expect(importState.items[0].message).toBe('not a PDF');
+    expect(importState.items[0].state).toEqual({ outcome: 'failed', message: 'not a PDF' });
   });
 
   it('drops a stale upload result from a superseded session', async () => {
@@ -113,8 +112,7 @@ describe('enqueueFiles', () => {
     await batchA;
 
     expect(importState.items.length).toBe(1);
-    expect(importState.items[0].status).toBe('duplicate');
-    expect(importState.items[0].message).toBeUndefined(); // no 'STALE' leak
+    expect(importState.items[0].state).toEqual({ outcome: 'duplicate' }); // no 'STALE' leak
   });
 
   it('records same_work and in_trash outcomes', async () => {
@@ -124,8 +122,22 @@ describe('enqueueFiles', () => {
 
     await enqueueFiles([pdf('dup.pdf'), pdf('trashed.pdf')]);
 
-    expect(importState.items.map((i) => i.status)).toEqual(['same-work', 'in-trash']);
-    expect(importState.items[1].message).toBe('x2');
+    expect(importState.items.map((i) => i.state)).toEqual([
+      { outcome: 'same_work', id: 'x1' },
+      { outcome: 'in_trash', id: 'x2' },
+    ]);
+  });
+
+  it('restores a paper found in the trash from its row', async () => {
+    stubFetch(() => ({ outcome: 'in_trash', id: 'x2' }));
+    await enqueueFiles([pdf('trashed.pdf')]);
+    render(ImportModal);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Restore' }));
+
+    await waitFor(() => expect(screen.getByText('restored from trash')).toBeInTheDocument());
+    expect(fetch).toHaveBeenCalledWith('/api/papers/x2/restore', expect.objectContaining({ method: 'POST' }));
+    expect(screen.queryByRole('button', { name: 'Restore' })).toBeNull();
   });
 });
 
@@ -153,8 +165,7 @@ describe('enqueueUrl', () => {
     await enqueueUrl('https://arxiv.org/abs/1706.03762');
 
     expect(importState.items).toHaveLength(1);
-    expect(importState.items[0].status).toBe('ingested');
-    expect(importState.items[0].message).toBe('Fetched Paper');
+    expect(importState.items[0].state).toEqual({ outcome: 'ingested', id: '1', title: 'Fetched Paper', status: 'resolved' });
   });
 
   it('marks an unfetched result distinctly', async () => {
@@ -174,8 +185,7 @@ describe('enqueueUrl', () => {
 
     await enqueueUrl('10.1145/x');
 
-    expect(importState.items[0].status).toBe('unfetched');
-    expect(importState.items[0].message).toBe('Paywalled Paper');
+    expect(importState.items[0].state).toEqual({ outcome: 'unfetched', title: 'Paywalled Paper', doi: '10.1145/x' });
   });
 });
 

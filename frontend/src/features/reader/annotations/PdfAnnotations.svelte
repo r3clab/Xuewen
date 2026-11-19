@@ -5,12 +5,14 @@
   import { useStage } from '@embedpdf/svelte/stage';
   import { annotationList, annotations, removeAnnotation } from './store.svelte';
   import { KIND_LABELS } from './adapter';
-  import { buildAnnotatedPdf, exportErrorMessage } from './export';
+  import { buildAnnotatedPdf } from './export';
   import { colorHex, colorLabel } from './palette';
-  import { annotatedFilename, downloadBlob } from './download';
+  import { annotatedFilename } from './download';
+  import { downloadBlob } from '$shared/browser/download';
   import { pdfUrl } from '$features/reader/pdf/api';
   import { viewer } from '$features/reader/tabs/state.svelte';
   import { toast } from '$shared/ui/toasts.svelte';
+  import { errorMessage } from '$shared/errors';
   import type { Annotation } from '$shared/api/generated/Annotation';
 
   let { documentId }: { documentId: string } = $props();
@@ -50,7 +52,7 @@
       if (mark) await annotation.delete(mark.ref);
       else await removeAnnotation(documentId, a.id);
     } catch (e) {
-      toast('error', e instanceof Error ? e.message : String(e));
+      toast('error', errorMessage(e, 'deleting the mark failed'));
     }
   }
 
@@ -72,7 +74,7 @@
       });
       downloadBlob(blob, annotatedFilename(title));
     } catch (e) {
-      toast('error', exportErrorMessage(e));
+      toast('error', errorMessage(e, 'exporting the annotated PDF failed'));
     } finally {
       exporting = false;
     }

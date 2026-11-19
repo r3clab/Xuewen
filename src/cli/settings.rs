@@ -2,8 +2,6 @@ use anyhow::Result;
 
 use super::Ctx;
 use crate::app::error::Error;
-use crate::app::settings::PROXY_COOKIE;
-use crate::library::settings;
 
 #[derive(clap::Args)]
 pub(super) struct ProxyCookieArgs {
@@ -29,7 +27,7 @@ pub(super) async fn proxy_cookie(ctx: &Ctx, args: ProxyCookieArgs) -> Result<()>
         })?;
         println!("proxy cookie stored");
     } else {
-        match settings::updated_at(&ctx.pool, PROXY_COOKIE).await? {
+        match app.proxy_cookie_status().await?.updated_at {
             Some(ts) => println!("proxy cookie set (updated {ts})"),
             None => println!("no proxy cookie set"),
         }

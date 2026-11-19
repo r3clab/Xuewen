@@ -131,8 +131,9 @@ function closure(graph: Map<string, Module>, entry: string): Set<string> {
   return seen;
 }
 
+/// A component's test is `X.test.ts`, or `X.svelte.test.ts` when it needs runes.
 function inComponentLayer(file: string): boolean {
-  const subject = file.replace(/\.test\.ts$/, '.svelte');
+  const subject = file.replace(/(\.svelte)?\.test\.ts$/, '.svelte');
   return subject.endsWith('.svelte') && files.has(subject);
 }
 

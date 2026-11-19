@@ -24,11 +24,10 @@ export interface ColumnResizeParams {
 /// Drag / keyboard / double-click behavior for a column-resize handle
 /// (same Action shape as clickOutside). Pointer capture keeps the gesture on
 /// the handle even when the cursor leaves it; ArrowLeft/ArrowRight resize
-/// from the keyboard; double-click asks the owner to auto-fit.
+/// from the keyboard; double-click or Enter asks the owner to auto-fit.
 export const columnResize: Action<HTMLElement, ColumnResizeParams> = (node, params) => {
   let p = params;
   let dragging = false;
-  let moved = false;
   let startX = 0;
   let startWidth = 0;
   let lastWidth = 0;
@@ -38,15 +37,6 @@ export const columnResize: Action<HTMLElement, ColumnResizeParams> = (node, para
   // Arrows and drags move the DIVIDER; a left-edge handle grows its column
   // by moving that divider left, hence the sign flip.
   const sign = () => (p.edge === 'left' ? -1 : 1);
-
-  // A drag's release generates a synthetic click that browsers may retarget
-  // to the common ancestor of down/up — i.e. the <th> housing a sort button.
-  // A one-shot capture-phase swallower (armed only after real movement, so
-  // plain clicks and dblclick still work) eats it regardless of target.
-  const swallowClick = (e: MouseEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-  };
 
   // Pinning the cursor for the whole gesture stops it flickering while
   // crossing sibling cells; killing user-select stops mid-drag selection.
@@ -58,47 +48,38 @@ export const columnResize: Action<HTMLElement, ColumnResizeParams> = (node, para
   function onPointerDown(e: PointerEvent) {
     if (e.button !== 0) return;
     e.preventDefault();
-    e.stopPropagation();
     dragging = true;
-    moved = false;
     startX = e.clientX;
     startWidth = p.width;
     lastWidth = p.width;
     maxPx = p.max();
-    try {
-      node.setPointerCapture(e.pointerId);
-    } catch {
-      /* no pointer capture (jsdom) — plain bubbling still works */
-    }
+    node.setPointerCapture(e.pointerId);
     document.documentElement.style.cursor = 'col-resize';
     document.documentElement.style.userSelect = 'none';
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
-    const dx = (e.clientX - startX) * sign();
-    if (Math.abs(dx) > 3) moved = true;
-    lastWidth = clamp(startWidth + dx);
+    lastWidth = clamp(startWidth + (e.clientX - startX) * sign());
     p.onResize(lastWidth);
   }
 
   function onPointerEnd(e: PointerEvent) {
     if (!dragging) return;
     dragging = false;
-    try {
-      node.releasePointerCapture(e.pointerId);
-    } catch {
-      /* not captured */
-    }
+    if (node.hasPointerCapture(e.pointerId)) node.releasePointerCapture(e.pointerId);
     restore();
     p.onCommit(lastWidth);
-    if (moved) window.addEventListener('click', swallowClick, { capture: true, once: true });
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      p.onAutoFit();
+      return;
+    }
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
-    e.stopPropagation();
     maxPx = p.max();
     const step = p.step ?? 8;
     const next = clamp(p.width + (e.key === 'ArrowRight' ? step : -step) * sign());
@@ -106,8 +87,7 @@ export const columnResize: Action<HTMLElement, ColumnResizeParams> = (node, para
     p.onCommit(next);
   }
 
-  function onDblClick(e: MouseEvent) {
-    e.stopPropagation();
+  function onDblClick() {
     p.onAutoFit();
   }
 

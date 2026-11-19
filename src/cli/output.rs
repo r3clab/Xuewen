@@ -42,17 +42,6 @@ pub(super) fn author_line(authors: &[String]) -> String {
     }
 }
 
-/// Terminal output: drop <mark> tags and undo the snippet's HTML escaping.
-pub(super) fn strip_snippet_html(s: &str) -> String {
-    s.replace("<mark>", "")
-        .replace("</mark>", "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-}
-
 pub(super) async fn print_outcome(pool: &SqlitePool, outcome: Outcome) -> Result<()> {
     let cite_key = match &outcome {
         Outcome::Duplicate(id) | Outcome::SameWork(id) => {

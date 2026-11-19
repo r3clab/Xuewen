@@ -9,40 +9,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use sqlx::SqlitePool;
+use tempfile::TempDir;
 
 use crate::support;
 
-fn write_config(dir: &Path) -> PathBuf {
-    write_config_with(dir, "")
-}
-
-/// A config with every path under `dir`, plus `extra` TOML appended.
-fn write_config_with(dir: &Path, extra: &str) -> PathBuf {
-    let path = dir.join("xuewen.toml");
-    let db = format!("sqlite:{}", dir.join("t.db").display());
-    std::fs::write(
-        &path,
-        format!(
-            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = {db:?}\n\n[search]\nindex_dir = {:?}\nvector_dir = {:?}\n{extra}",
-            dir.join("inbox"),
-            dir.join("library"),
-            dir.join("idx"),
-            dir.join("vectors"),
-        ),
-    )
-    .unwrap();
-    path
-}
-
-/// A library holding paper `p1`, and its config.
-async fn library() -> (SqlitePool, PathBuf) {
+async fn library() -> (SqlitePool, PathBuf, TempDir) {
     library_with("").await
 }
 
-async fn library_with(extra: &str) -> (SqlitePool, PathBuf) {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let config = write_config_with(root.parent().unwrap(), extra);
-    (pool, config)
+async fn library_with(extra: &str) -> (SqlitePool, PathBuf, TempDir) {
+    let (pool, _root, dir) = support::pool_and_root_with_paper("p1").await;
+    let config = support::write_config(dir.path(), extra);
+    (pool, config, dir)
 }
 
 fn command(config: &Path, args: &[&str]) -> Command {
@@ -106,7 +84,7 @@ fn fails(config: &Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn proxy_cookie_set_refuses_a_blank_cookie() {
-    let (pool, config) = library().await;
+    let (pool, config, _dir) = library().await;
     pool.close().await;
 
     ok(&config, &["proxy-cookie", "--set", " a=b "]);
@@ -121,11 +99,11 @@ async fn proxy_cookie_set_refuses_a_blank_cookie() {
 
 #[tokio::test]
 async fn code_commands_refuse_a_trashed_paper() {
-    let (pool, root) = support::pool_and_root_with_paper("cccc3333").await;
+    let (pool, _root, dir) = support::pool_and_root_with_paper("cccc3333").await;
     xuewen::library::trash::soft_delete(&pool, "cccc3333")
         .await
         .unwrap();
-    let config = write_config(root.parent().unwrap());
+    let config = support::write_config(dir.path(), "");
 
     for args in [
         &["code", "set", "cccc", "https://github.com/x/y"][..],
@@ -142,4 +120,34 @@ async fn code_commands_refuse_a_trashed_paper() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn code_set_needs_agent_ask_like_the_web_does() {
+    let (pool, config, _dir) = library().await;
+    assert_eq!(
+        fails(&config, &["code", "set", "p1", "https://github.com/x/y"]),
+        "Error: agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]\n"
+    );
+    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn xuewen_config_names_the_config_when_the_flag_is_absent() {
+    let (pool, config, _dir) = library().await;
+    pool.close().await;
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_xuewen"))
+        .arg("stats")
+        .env("XUEWEN_CONFIG", &config)
+        .env_remove("RUST_LOG")
+        .current_dir(elsewhere.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).starts_with("1 paper"), "got: {}", stdout(&out));
 }

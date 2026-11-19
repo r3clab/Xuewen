@@ -37,10 +37,9 @@ vi.mock(import('$features/reader/pdf/api'), () => ({
   pdfUrl: (id: string) => `/papers/${id}.pdf`,
 }));
 
-// The real filename rule, but jsdom has no URL.createObjectURL to hand a Blob to.
+// jsdom has no URL.createObjectURL to hand a Blob to.
 const downloadBlob = vi.fn();
-vi.mock(import('./download'), async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./download')>()),
+vi.mock(import('$shared/browser/download'), () => ({
   downloadBlob: (blob: Blob, filename: string) => downloadBlob(blob, filename),
 }));
 

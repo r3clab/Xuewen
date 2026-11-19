@@ -1,5 +1,5 @@
-/// Handing a generated file to the browser. Kept apart from the code that
-/// produces the bytes so the filename rule can be tested without a PDF engine.
+/// The filename an exported copy is saved under. Kept apart from the code that
+/// produces the bytes so the rule can be tested without a PDF engine.
 
 /// The name for an exported copy: `Attention Is All You Need (annotated).pdf`.
 /// The suffix goes before the extension so the file still opens as a PDF, and a
@@ -21,19 +21,4 @@ export function sanitizeFilename(name: string): string {
     // saved name differ from the one we offered.
     .replace(/^[\s.]+|[\s.]+$/g, '');
   return cleaned || 'paper';
-}
-
-/// Trigger a download. The object URL is revoked on the next macrotask rather
-/// than immediately: Safari reads the href *after* the click handler returns,
-/// and revoking synchronously hands it a dead URL.
-export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
 }

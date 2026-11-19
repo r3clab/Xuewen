@@ -1,9 +1,10 @@
 use anyhow::{Context as _, Result};
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use super::fields::{paper_meta, recover_unique_collision, resolve_fields, ResolveInputs};
+use super::fields::{paper_meta, unique_rival, ResolveInputs};
 use crate::config::Config;
 use crate::http::RetryPolicy;
 use crate::library::model::{Identifier, Paper};
@@ -65,6 +66,16 @@ impl Outcome {
             Outcome::SameWork(existing.id.clone())
         }
     }
+
+    /// What the pre-insert checks would have reported for `paper` had the
+    /// `unique_rival` that beat it been stored first.
+    fn lost_race(paper: &Paper, rival: &Paper) -> Self {
+        if rival.content_hash == paper.content_hash {
+            Self::from_hash_hit(rival)
+        } else {
+            Self::from_identifier_hit(rival)
+        }
+    }
 }
 
 /// What happens to the source file once ingest reaches an outcome. An ingest
@@ -78,6 +89,17 @@ pub enum Disposal {
     /// has already filed into the library — archiving those too would store
     /// every upload/URL import twice forever.
     Discard,
+}
+
+/// What `save_and_refile` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Saved {
+    /// Persisted, with the PDF moved to the path its new cite key implies.
+    Refiled,
+    /// Persisted; the PDF stays where it was.
+    InPlace,
+    /// The paper was trashed (or deleted) meanwhile: nothing was written.
+    Trashed,
 }
 
 /// Everything the ingest/refresh pipeline needs.
@@ -107,7 +129,7 @@ impl IngestCtx {
     /// caller's one decision: `production()` for CLI batch work,
     /// `interactive()` for serving (uploads answer synchronously).
     pub(crate) fn from_config(cfg: &Config, pool: SqlitePool, retry: RetryPolicy) -> Result<Self> {
-        let resolver = Resolver::new_with_policy(cfg.contact_email.as_deref(), retry)?;
+        let resolver = Resolver::new(cfg.contact_email.as_deref(), retry)?;
         let grobid = cfg.grobid_url.as_deref().map(Grobid::new).transpose()?;
         Ok(Self {
             pool,
@@ -172,12 +194,19 @@ impl IngestCtx {
         disposal: Disposal,
     ) -> Result<Outcome> {
         let outcome = self.ingest_inner(path, hint).await?;
-        // The one disposal point, shared by every outcome.
-        match disposal {
-            Disposal::Archive => move_to_async(path, &self.dirs.processed_dir).await?,
-            Disposal::Discard => tokio::fs::remove_file(path)
-                .await
-                .context("discard ingest source")?,
+        // The outcome stands whatever happens to the source: the paper is
+        // already filed and stored. Reported as an error instead, a successful
+        // ingest would read as a failure, and the watcher would quarantine a
+        // file the library already holds.
+        let disposed = match disposal {
+            Disposal::Archive => move_to_async(path, &self.dirs.processed_dir).await,
+            Disposal::Discard => tokio::fs::remove_file(path).await.map_err(Into::into),
+        };
+        if let Err(e) = disposed {
+            tracing::warn!(
+                "ingest of {} reached {outcome:?}, but its {disposal:?} failed: {e:#}",
+                path.display()
+            );
         }
         Ok(outcome)
     }
@@ -196,49 +225,42 @@ impl IngestCtx {
             return Ok(Outcome::from_hash_hit(&existing));
         }
 
-        // 3. Extract, identify, optionally GROBID, and resolve (factored for reuse).
-        let ResolveInputs {
-            ident,
-            provisional_title,
-            extracted,
-            resolution,
-        } = self.resolve_pdf(&path, hint).await?;
+        // 3. Extract, identify, optionally GROBID, and resolve; then decide
+        // the stored fields.
+        let fields = self.resolve_pdf(&path, hint).await?.into_meta();
 
-        // 4. Decide the stored fields, then the cite-key filename.
-        let fields = resolve_fields(provisional_title, extracted, &ident, resolution);
-
-        // 4b. A different file of a work we already have (same DOI/arXiv id)?
+        // 4. A different file of a work we already have (same DOI/arXiv id)?
         if let Some(existing) = papers::find_by_identifier(
             &self.pool,
             fields.doi.as_deref(),
             fields.arxiv_id.as_deref(),
+            None,
         )
         .await?
         {
             return Ok(Outcome::from_identifier_hit(&existing));
         }
 
-        // 5. Pick a free cite key and file the PDF under it exclusively.
-        // Disambiguation is read-compute-write with no lock, so two concurrent
-        // ingests sharing a base key can compute the same "free" key; the
-        // exclusive create turns that into a collision the loser observes.
-        // The loser must not merely re-query the DB — the winner copies before
-        // inserting, so its key may not be a row yet; the collided key joins a
-        // local taken set instead.
+        // 5. File the PDF under a free cite key and store the record. The
+        // database decides who owns a key (`insert` fails a lost claim with
+        // `CiteKeyTaken`); the exclusive create keeps a concurrent ingest's
+        // file from being overwritten, and since that ingest copies before
+        // it inserts, an occupied path is a taken key even without a row.
         let base = naming::cite_key_base(&fields.authors.0, fields.year, fields.title.as_deref());
         let mut taken = match base.as_deref() {
             Some(b) => papers::cite_keys_with_base(&self.pool, b, None).await?,
-            None => std::collections::HashSet::new(),
+            None => HashSet::new(),
         };
-        let (cite_key, rel_path, dest, created_excl) = loop {
+        loop {
             let cite_key = base.as_deref().map(|b| naming::disambiguate(b, &taken));
             let rel_path = naming::library_rel_path(cite_key.as_deref(), &content_hash);
             let dest = self.dirs.library_root.join(&rel_path);
-            match cite_key {
+            let created_excl = match &cite_key {
                 Some(key) => match copy_to_excl_async(&path, &dest).await {
-                    Ok(()) => break (Some(key), rel_path, dest, true),
+                    Ok(()) => true,
                     Err(e) if is_already_exists(&e) => {
-                        taken.insert(key);
+                        taken.insert(key.clone());
+                        continue;
                     }
                     Err(e) => return Err(e),
                 },
@@ -248,84 +270,87 @@ impl IngestCtx {
                 // plain overwrite is a repair, never a clobber.
                 None => {
                     copy_to_async(&path, &dest).await?;
-                    break (None, rel_path, dest, false);
+                    false
                 }
-            }
-        };
-
-        // 6. Build and store the record.
-        let paper = fields.into_paper(content_hash, rel_path, cite_key);
-        if let Err(e) = papers::insert(&self.pool, &paper).await {
+            };
+            let paper = fields
+                .clone()
+                .into_paper(content_hash.clone(), rel_path, cite_key);
+            let Err(e) = papers::insert(&self.pool, &paper).await else {
+                return Ok(Outcome::Ingested(paper.id));
+            };
             // Clean up only a file this ingest exclusively created: the
             // content-addressed path may be shared with — and still referenced
             // by — the concurrent winner of a same-bytes race.
             if created_excl {
                 let _ = tokio::fs::remove_file(&dest).await;
             }
+            if papers::is_cite_key_taken(&e) {
+                taken.extend(paper.cite_key);
+                continue;
+            }
             // Lost a race with a concurrent ingest of the same work? Report the
             // winner's outcome instead of surfacing a constraint error.
             if db::is_unique_violation(&e) {
-                tracing::warn!(
-                    "insert hit a UNIQUE constraint (concurrent ingest of the same work?); re-checking"
-                );
-                if let Some(outcome) = recover_unique_collision(
-                    &self.pool,
-                    &paper.content_hash,
-                    paper.meta.doi.as_deref(),
-                    paper.meta.arxiv_id.as_deref(),
-                )
-                .await?
-                {
-                    return Ok(outcome);
+                if let Some(rival) = unique_rival(&self.pool, &paper).await? {
+                    return Ok(Outcome::lost_race(&paper, &rival));
                 }
             }
             return Err(e);
         }
-
-        Ok(Outcome::Ingested(paper.id))
     }
 
-    /// Extract first-page text, identify a DOI/arXiv id, optionally enrich via GROBID
-    /// (title-only path), and resolve authoritative metadata. Degrades to
-    /// `None` on any resolver/network failure — never aborts.
+    /// Extract first-page text and resolve authoritative metadata: by
+    /// identifier first — `hint`, else one the text prints — and when that
+    /// finds nothing, by title, with a GROBID header (when configured)
+    /// supplying a better title and abstract than the text heuristic.
+    /// Resolver and GROBID failures degrade to less metadata; only reading
+    /// the PDF can fail.
     pub(crate) async fn resolve_pdf(
         &self,
         path: &Path,
         hint: Option<Identifier>,
     ) -> Result<ResolveInputs> {
-        // Extract first-page text (blocking IO off the async runtime) and identify.
         let text = {
             let p = path.to_path_buf();
             tokio::task::spawn_blocking(move || pdf::extract_text(&p, 1)).await??
         };
-        let ident = hint.unwrap_or_else(|| identify::identify(&text));
         let provisional_title = identify::guess_title(&text);
-
-        // For the title-only path, optionally use GROBID for a better header
-        // (degrades to None on failure).
-        let extracted: Option<ResolvedMetadata> = match (&ident, self.grobid.as_ref()) {
-            (Identifier::None, Some(g)) => match g.extract_header(path).await {
-                Ok(md) => md,
-                Err(e) => {
-                    tracing::warn!("grobid extraction failed: {e}");
-                    None
-                }
-            },
-            _ => None,
+        let (ident, vouched) = match hint {
+            Some(hint) => (hint, true),
+            None => (identify::identify(&text), false),
         };
+        if let Some(md) = self.resolver.lookup_or_skip(&ident).await {
+            return Ok(ResolveInputs {
+                ident,
+                provisional_title,
+                extracted: None,
+                resolution: Some(md),
+            });
+        }
+        let ident = if vouched { ident } else { Identifier::None };
 
-        // Search query prefers the GROBID title, else the heuristic first line.
-        let title_hint: Option<String> = extracted
-            .as_ref()
-            .and_then(|m| m.title.clone())
-            .or_else(|| provisional_title.clone());
-
+        let extracted = match &self.grobid {
+            Some(g) => g.extract_header(path).await.unwrap_or_else(|e| {
+                tracing::warn!("grobid extraction failed: {e}");
+                None
+            }),
+            None => None,
+        };
         // The first-page text goes along as corroboration: a title alone cannot
         // tell this paper from a same-titled work by other authors.
-        let query = title_hint
-            .as_deref()
-            .map(|title| TitleQuery { title, text: &text });
-        let resolution = self.resolver.resolve(&ident, query).await;
+        let title = extracted
+            .as_ref()
+            .and_then(|m| m.title.as_deref())
+            .or(provisional_title.as_deref());
+        let resolution = match title {
+            Some(title) => {
+                self.resolver
+                    .search_title(TitleQuery { title, text: &text })
+                    .await
+            }
+            None => None,
+        };
         Ok(ResolveInputs {
             ident,
             provisional_title,
@@ -334,75 +359,96 @@ impl IngestCtx {
         })
     }
 
-    /// Persist `paper` and re-file its PDF to the cite-key path implied by its
-    /// current metadata. Copy-first ordering: copy the file, update the row,
-    /// remove the old file — a failure at any step never leaves the DB
+    /// Persist `paper`'s metadata and re-file its PDF to the cite-key path
+    /// that metadata implies. Copy-first ordering: copy the file, update the
+    /// row, remove the old file — a failure at any step never leaves the DB
     /// pointing at a missing file. If the current file is missing or
-    /// unreadable, the copy step fails and only the metadata is persisted —
-    /// the row keeps its previous `rel_path`/`cite_key` and the caller gets
-    /// `Ok(false)`. Returns whether the file moved.
-    pub(crate) async fn save_and_refile(&self, paper: &mut Paper) -> Result<bool> {
-        let pdf = self.dirs.library_root.join(&paper.rel_path);
-        let cite_key = match naming::cite_key_base(
+    /// unreadable, the copy step fails and only the metadata is persisted
+    /// (`Saved::InPlace`): the row keeps its previous `rel_path`/`cite_key`.
+    pub(crate) async fn save_and_refile(&self, paper: &mut Paper) -> Result<Saved> {
+        let current = self.dirs.library_root.join(&paper.rel_path);
+        let filed = (paper.rel_path.clone(), paper.cite_key.clone());
+        let base = naming::cite_key_base(
             &paper.meta.authors.0,
             paper.meta.year,
             paper.meta.title.as_deref(),
-        ) {
-            Some(base) => {
-                let taken = papers::cite_keys_with_base(&self.pool, &base, Some(&paper.id)).await?;
-                Some(naming::disambiguate(&base, &taken))
-            }
-            None => None,
+        );
+        let mut taken = match base.as_deref() {
+            Some(b) => papers::cite_keys_with_base(&self.pool, b, Some(&paper.id)).await?,
+            None => HashSet::new(),
         };
-        let new_rel = naming::library_rel_path(cite_key.as_deref(), &paper.content_hash);
-        let mut refiled_paths: Option<(std::path::PathBuf, std::path::PathBuf)> = None; // (old, new)
-        if new_rel != paper.rel_path {
-            let to = self.dirs.library_root.join(&new_rel);
-            // Exclusive create: an occupied destination usually means a
-            // concurrent filing race and lands in the same leave-in-place
-            // degradation as any other copy failure. The exception is a file
-            // holding this paper's own bytes — a crash between a previous
-            // refile's copy and its row update leaves exactly that, and every
-            // retry would hit it forever; adopt it and finish the refile.
-            match copy_to_excl_async(&pdf, &to).await {
-                Ok(()) => {
-                    refiled_paths = Some((pdf.clone(), to));
-                    paper.rel_path = new_rel;
-                    paper.cite_key = cite_key;
+        loop {
+            let cite_key = base.as_deref().map(|b| naming::disambiguate(b, &taken));
+            let rel_path = naming::library_rel_path(cite_key.as_deref(), &paper.content_hash);
+            let unmoved = rel_path == filed.0;
+            let copy = if unmoved {
+                None
+            } else {
+                self.refile_copy(paper, &current, &rel_path).await
+            };
+            let claims_key = unmoved || copy.is_some();
+            if claims_key {
+                paper.rel_path = rel_path;
+                paper.cite_key = cite_key;
+            }
+            let written = papers::update(&self.pool, paper).await;
+            if !matches!(written, Ok(true)) {
+                // Roll back so filesystem, DB and `paper` stay consistent.
+                if let Some(copy) = &copy {
+                    let _ = tokio::fs::remove_file(copy).await;
                 }
-                Err(e) => {
-                    if is_already_exists(&e) && file_hash_matches(&to, &paper.content_hash).await {
-                        refiled_paths = Some((pdf.clone(), to));
-                        paper.rel_path = new_rel;
-                        paper.cite_key = cite_key;
-                    } else {
-                        tracing::warn!(
-                            "re-file copy failed for {}: {e}; leaving in place",
-                            paper.id
-                        )
+                let claimed = std::mem::replace(&mut paper.cite_key, filed.1.clone());
+                paper.rel_path = filed.0.clone();
+                if claims_key && written.as_ref().is_err_and(papers::is_cite_key_taken) {
+                    taken.extend(claimed);
+                    continue;
+                }
+            }
+            return match written {
+                Ok(true) if copy.is_some() => {
+                    if let Err(e) = tokio::fs::remove_file(&current).await {
+                        tracing::warn!("could not remove old file {}: {e}", current.display());
                     }
+                    Ok(Saved::Refiled)
                 }
-            }
+                Ok(true) => Ok(Saved::InPlace),
+                Ok(false) => Ok(Saved::Trashed),
+                Err(e) => Err(e),
+            };
         }
+    }
 
-        if let Err(e) = papers::update(&self.pool, paper).await {
-            // Roll the copy back so filesystem and DB stay consistent.
-            if let Some((_, new_path)) = &refiled_paths {
-                let _ = tokio::fs::remove_file(new_path).await;
+    /// Copy `paper`'s PDF from `from` to `rel_path` for a refile, returning
+    /// the new file, or `None` (logged) to leave the paper where it is.
+    async fn refile_copy(&self, paper: &Paper, from: &Path, rel_path: &str) -> Option<PathBuf> {
+        let to = self.dirs.library_root.join(rel_path);
+        match copy_to_excl_async(from, &to).await {
+            Ok(()) => Some(to),
+            // An occupied destination usually means a concurrent filing race
+            // and lands in the same leave-in-place degradation as any other
+            // copy failure. The exception is a file holding this paper's own
+            // bytes — a crash between a previous refile's copy and its row
+            // update leaves exactly that, and every retry would hit it
+            // forever; adopt it and finish the refile.
+            Err(e)
+                if is_already_exists(&e) && file_hash_matches(&to, &paper.content_hash).await =>
+            {
+                Some(to)
             }
-            return Err(e);
-        }
-        if let Some((old_path, _)) = &refiled_paths {
-            if let Err(e) = tokio::fs::remove_file(old_path).await {
-                tracing::warn!("could not remove old file {}: {e}", old_path.display());
+            Err(e) => {
+                tracing::warn!(
+                    "re-file copy failed for {}: {e}; leaving in place",
+                    paper.id
+                );
+                None
             }
         }
-        Ok(refiled_paths.is_some())
     }
 
     /// Apply user-confirmed metadata to `paper`: guard identifier conflicts,
     /// overwrite the metadata block (keeping the old abstract when the source
-    /// has none), mark it resolved, then persist + re-file.
+    /// has none), mark it resolved, then persist + re-file. On anything but
+    /// `Applied`, `paper` is left as it was.
     pub(crate) async fn apply_match(
         &self,
         paper: &mut Paper,
@@ -411,23 +457,36 @@ impl IngestCtx {
         if paper.deleted_at.is_some() {
             return Ok(IdentifyOutcome::Trashed);
         }
-        if let Some(existing) =
-            papers::find_by_identifier(&self.pool, md.doi.as_deref(), md.arxiv_id.as_deref())
-                .await?
-        {
-            if existing.id != paper.id {
-                return Ok(IdentifyOutcome::SameWork(existing.id));
-            }
-        }
         let mut meta = paper_meta(md);
+        if let Some(existing) = papers::find_by_identifier(
+            &self.pool,
+            meta.doi.as_deref(),
+            meta.arxiv_id.as_deref(),
+            Some(&paper.id),
+        )
+        .await?
+        {
+            return Ok(IdentifyOutcome::SameWork(existing.id));
+        }
         meta.abstract_text = meta
             .abstract_text
             .or_else(|| paper.meta.abstract_text.clone());
-        paper.meta = meta;
+        let previous = std::mem::replace(&mut paper.meta, meta);
         // No file-existence pre-check: fixing metadata must succeed even if the
         // PDF is missing; save_and_refile degrades to metadata-only in that case.
-        self.save_and_refile(paper).await?;
-        Ok(IdentifyOutcome::Applied)
+        let outcome = match self.save_and_refile(paper).await {
+            Ok(Saved::Refiled | Saved::InPlace) => return Ok(IdentifyOutcome::Applied),
+            Ok(Saved::Trashed) => Ok(IdentifyOutcome::Trashed),
+            // Lost a race: another paper claimed this identifier between the
+            // guard above and the write.
+            Err(e) if db::is_unique_violation(&e) => match unique_rival(&self.pool, paper).await? {
+                Some(rival) => Ok(IdentifyOutcome::SameWork(rival.id)),
+                None => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        paper.meta = previous;
+        outcome
     }
 }
 
@@ -483,12 +542,7 @@ mod tests {
         let ctx = IngestCtx::new(
             pool,
             Libraries::under(&inbox, &dir.path().join("library")),
-            Resolver::with_bases(
-                None,
-                "http://127.0.0.1:1".to_string(),
-                "http://127.0.0.1:1".to_string(),
-            )
-            .unwrap(),
+            Resolver::offline(),
             None,
         );
 
@@ -506,19 +560,13 @@ mod tests {
         );
     }
 
-    /// An `IngestCtx` wired to dead resolver endpoints (no network use).
     async fn offline_ctx(root: &Path, library: &Path) -> IngestCtx {
         let url = format!("sqlite:{}", root.join("t.db").display());
         let pool = db::connect(&url).await.unwrap();
         IngestCtx::new(
             pool,
             Libraries::under(root, library),
-            Resolver::with_bases(
-                None,
-                "http://127.0.0.1:1".to_string(),
-                "http://127.0.0.1:1".to_string(),
-            )
-            .unwrap(),
+            Resolver::offline(),
             None,
         )
     }
@@ -552,7 +600,7 @@ mod tests {
         // row update: the destination already holds this paper's own bytes.
         std::fs::write(library.join("he2016deep.pdf"), bytes).unwrap();
 
-        assert!(ctx.save_and_refile(&mut p).await.unwrap());
+        assert_eq!(ctx.save_and_refile(&mut p).await.unwrap(), Saved::Refiled);
         assert_eq!(p.rel_path, "he2016deep.pdf");
         assert_eq!(p.cite_key.as_deref(), Some("he2016deep"));
         assert!(!library.join("old.pdf").exists(), "old file removed");
@@ -574,7 +622,7 @@ mod tests {
         // adopted.
         std::fs::write(library.join("he2016deep.pdf"), b"other work").unwrap();
 
-        assert!(!ctx.save_and_refile(&mut p).await.unwrap());
+        assert_eq!(ctx.save_and_refile(&mut p).await.unwrap(), Saved::InPlace);
         assert_eq!(p.rel_path, "old.pdf", "left in place");
         assert!(library.join("old.pdf").exists());
         assert_eq!(
@@ -582,6 +630,48 @@ mod tests {
             b"other work",
             "occupant untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn save_and_refile_of_a_paper_trashed_meanwhile_rolls_back_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        let ctx = offline_ctx(dir.path(), &library).await;
+        let mut p = refile_fixture(&ctx, &library, b"%PDF-1.4 same bytes").await;
+        trash::soft_delete(&ctx.pool, &p.id).await.unwrap();
+
+        assert_eq!(ctx.save_and_refile(&mut p).await.unwrap(), Saved::Trashed);
+        assert_eq!(p.rel_path, "old.pdf");
+        assert_eq!(p.cite_key, None);
+        assert!(library.join("old.pdf").exists());
+        assert!(!library.join("he2016deep.pdf").exists(), "copy removed");
+        let row = papers::get(&ctx.pool, &p.id).await.unwrap().unwrap();
+        assert_eq!(row.meta.status, PaperStatus::NeedsReview);
+        assert!(row.deleted_at.is_some(), "still in the trash");
+    }
+
+    #[tokio::test]
+    async fn apply_match_reports_same_work_for_an_arxiv_id_held_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        let ctx = offline_ctx(dir.path(), &library).await;
+        let mut a = paper("01890000-0000-7000-8000-0000000000a1", "ha", None);
+        papers::insert(&ctx.pool, &a).await.unwrap();
+        let mut b = paper("01890000-0000-7000-8000-0000000000b2", "hb", None);
+        b.meta.arxiv_id = Some("1706.03762".into());
+        papers::insert(&ctx.pool, &b).await.unwrap();
+
+        let md = ResolvedMetadata {
+            title: Some("Attention Is All You Need".into()),
+            arxiv_id: Some("1706.03762v5".into()),
+            source: "arxiv".into(),
+            ..Default::default()
+        };
+        let out = ctx.apply_match(&mut a, md).await.unwrap();
+        assert_eq!(out, IdentifyOutcome::SameWork(b.id));
+        assert_eq!(a.meta.arxiv_id, None, "paper left as it was");
+        let row = papers::get(&ctx.pool, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.meta.status, PaperStatus::NeedsReview);
     }
 
     #[tokio::test]
@@ -594,12 +684,7 @@ mod tests {
         let ctx = IngestCtx::new(
             pool.clone(),
             Libraries::under(dir.path(), &library),
-            Resolver::with_bases(
-                None,
-                "http://127.0.0.1:1".to_string(),
-                "http://127.0.0.1:1".to_string(),
-            )
-            .unwrap(),
+            Resolver::offline(),
             None,
         );
 

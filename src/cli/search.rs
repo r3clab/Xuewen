@@ -1,10 +1,13 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::output::{self, strip_snippet_html};
+use serde::Deserialize;
+
+use super::output;
 use super::{freshness, remote, Ctx};
+use crate::library::model::Paper;
 use crate::search::indexer::{self, Scope};
-use crate::search::{IndexStatus, SearchOutcome, SearchService, TierCounts};
+use crate::search::{IndexStatus, SearchResults, SearchService, TierCounts};
 
 #[derive(clap::Args)]
 pub(super) struct SearchArgs {
@@ -37,57 +40,21 @@ pub(super) enum IndexCmd {
     },
 }
 
-/// What `xuewen search` prints, whether the search ran here or in the server
-/// holding the vector store.
-#[derive(Debug, PartialEq)]
-struct SearchReport {
-    semantic_reason: Option<String>,
-    rows: Vec<Row>,
-}
-
-#[derive(Debug, PartialEq)]
-struct Row {
-    label: String,
+/// The paper fields `xuewen search` prints, whether the search ran here or
+/// in the server holding the vector store (whose rows carry more, ignored).
+#[derive(Debug, PartialEq, Deserialize)]
+pub(super) struct PaperLabel {
+    id: String,
+    cite_key: Option<String>,
     title: Option<String>,
-    field: String,
-    page: Option<i64>,
-    snippet: String,
 }
 
-impl From<&SearchOutcome> for SearchReport {
-    fn from(out: &SearchOutcome) -> Self {
+impl From<Paper> for PaperLabel {
+    fn from(p: Paper) -> Self {
         Self {
-            semantic_reason: out.semantic.reason.clone(),
-            rows: out
-                .results
-                .iter()
-                .map(|(p, m)| Row {
-                    label: p.cite_key.clone().unwrap_or_else(|| p.id.clone()),
-                    title: p.meta.title.clone(),
-                    field: m.field.to_string(),
-                    page: m.page,
-                    snippet: m.snippet.clone(),
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<remote::SearchReply> for SearchReport {
-    fn from(reply: remote::SearchReply) -> Self {
-        Self {
-            semantic_reason: reply.semantic.reason,
-            rows: reply
-                .results
-                .into_iter()
-                .map(|h| Row {
-                    label: h.paper.cite_key.unwrap_or(h.paper.id),
-                    title: h.paper.title,
-                    field: h.matched.field,
-                    page: h.matched.page,
-                    snippet: h.matched.snippet,
-                })
-                .collect(),
+            id: p.id,
+            cite_key: p.cite_key,
+            title: p.meta.title,
         }
     }
 }
@@ -109,7 +76,7 @@ pub(super) async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             .or(keyword_only.then_some("keyword"));
         match remote::search(addr, &query, fields.as_deref(), engines).await {
             Ok(reply) => {
-                print_search(&SearchReport::from(reply), keyword_only);
+                print_search(&reply, keyword_only);
                 return Ok(());
             }
             Err(e) => eprintln!("note: could not reach xuewen at {addr} ({e:#}); searching here"),
@@ -127,7 +94,7 @@ pub(super) async fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     if let Some(vectors) = vectors {
         vectors.close_gracefully().await;
     }
-    print_search(&SearchReport::from(&out?), keyword_only);
+    print_search(&out?.map_papers(PaperLabel::from), keyword_only);
     Ok(())
 }
 
@@ -138,7 +105,7 @@ async fn search_here(
     fields: Option<String>,
     keyword_only: bool,
     semantic_only: bool,
-) -> Result<SearchOutcome> {
+) -> Result<SearchResults<Paper>> {
     let req = crate::search::SearchRequest::assemble(
         pool,
         query,
@@ -156,27 +123,29 @@ async fn search_here(
     svc.search(&req).await
 }
 
-fn print_search(report: &SearchReport, keyword_only: bool) {
-    if let Some(reason) = &report.semantic_reason {
+fn print_search(report: &SearchResults<PaperLabel>, keyword_only: bool) {
+    if let Some(reason) = &report.semantic.reason {
         if !keyword_only {
             eprintln!("note: semantic search unavailable — {reason}");
         }
     }
-    if report.rows.is_empty() {
+    if report.results.is_empty() {
         println!("no matches");
     }
-    for (i, row) in report.rows.iter().enumerate() {
+    for (i, hit) in report.results.iter().enumerate() {
+        let paper = &hit.paper;
         println!(
             "{:2}. {}  {}",
             i + 1,
-            row.label,
-            output::title(row.title.as_deref())
+            paper.cite_key.as_deref().unwrap_or(&paper.id),
+            output::title(paper.title.as_deref())
         );
-        let loc = match row.page {
-            Some(pg) => format!("{} p.{pg}", row.field),
-            None => row.field.clone(),
+        let m = &hit.matched;
+        let loc = match m.page {
+            Some(pg) => format!("{} p.{pg}", m.field),
+            None => m.field.to_string(),
         };
-        println!("      [{loc}] {}", strip_snippet_html(&row.snippet));
+        println!("      [{loc}] {}", m.snippet.text());
     }
 }
 
@@ -291,8 +260,7 @@ mod tests {
     #[tokio::test]
     async fn a_forwarded_search_reports_what_a_local_one_does() {
         let s = served(true).await;
-        let remote =
-            SearchReport::from(remote::search(s.addr, "fuzzing", None, None).await.unwrap());
+        let remote = remote::search(s.addr, "fuzzing", None, None).await.unwrap();
 
         let req = SearchRequest::assemble(
             &s.pool,
@@ -309,10 +277,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let local = SearchReport::from(&s.svc.search(&req).await.unwrap());
+        let local = s
+            .svc
+            .search(&req)
+            .await
+            .unwrap()
+            .map_papers(PaperLabel::from);
         assert_eq!(remote, local);
-        assert_eq!(local.rows.len(), 1);
-        assert!(local.semantic_reason.is_some());
+        assert_eq!(local.results.len(), 1);
+        assert!(local.semantic.reason.is_some());
     }
 
     #[tokio::test]

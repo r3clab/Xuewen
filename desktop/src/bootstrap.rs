@@ -32,51 +32,23 @@ impl AppDirs {
     }
 }
 
-/// TOML basic-string quoting (escapes `\` and `"`).
-fn toml_quote_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+const CONFIG_HEADER: &str = "\
+# Created by the Xuewen desktop app on first launch. Safe to edit; the app
+# never overwrites this file. AI features ([ai.*] sections) are opt-in; put
+# API keys in the `env` file next to this one, one KEY=value per line.
+";
+
+#[derive(serde::Serialize)]
+struct DefaultConfig<'a> {
+    data_dir: &'a Path,
 }
 
-/// TOML basic-string quoting for a path.
-fn toml_quote(p: &Path) -> String {
-    toml_quote_str(&p.display().to_string())
-}
-
-/// Config for a fresh install: every path absolute under `data`, because a
-/// Finder-launched app's working directory is `/`.
-pub fn default_config_toml(data: &Path) -> String {
-    format!(
-        "# Created by the Xuewen desktop app on first launch. Safe to edit; the\n\
-         # app never overwrites this file. AI features ([ai.*] sections) are\n\
-         # opt-in; put API keys in the `env` file next to this one, one\n\
-         # KEY=value per line.\n\
-         \n\
-         inbox_dir    = {inbox}\n\
-         library_root = {library}\n\
-         database_url = {db}\n\
-         \n\
-         [search]\n\
-         index_dir  = {index}\n\
-         vector_dir = {vectors}\n\
-         \n\
-         [preview]\n\
-         cache_dir = {preview}\n",
-        inbox = toml_quote(&data.join("inbox")),
-        library = toml_quote(&data.join("library")),
-        db = toml_quote_str(&format!("sqlite:{}", data.join("xuewen.db").display())),
-        index = toml_quote(&data.join("search-index")),
-        vectors = toml_quote(&data.join("search-vectors")),
-        preview = toml_quote(&data.join("preview-cache")),
-    )
-}
-
-/// Configs bootstrapped before the vector store existed lack
-/// `[search] vector_dir`, and its relative default would land under `/` in a
-/// Finder launch. In-memory only — never written back to the user's config.
-pub fn default_vector_dir(cfg: &mut xuewen::config::Config, data: &Path) {
-    if cfg.search.vector_dir == xuewen::config::SearchConfig::default().vector_dir {
-        cfg.search.vector_dir = data.join("search-vectors");
-    }
+/// Earlier versions spelled every path out (the database as `xuewen.db`);
+/// the app never rewrites a config, so those installs keep the database their
+/// file names.
+pub fn default_config_toml(data: &Path) -> Result<String> {
+    let body = toml::to_string(&DefaultConfig { data_dir: data })?;
+    Ok(format!("{CONFIG_HEADER}\n{body}"))
 }
 
 /// Create the app directories and, only when absent, the default config.
@@ -88,36 +60,17 @@ pub fn ensure_bootstrap(dirs: &AppDirs) -> Result<PathBuf> {
     std::fs::create_dir_all(dirs.data.join("library"))?;
     let cfg = dirs.config_file();
     if !cfg.exists() {
-        std::fs::write(&cfg, default_config_toml(&dirs.data))
+        std::fs::write(&cfg, default_config_toml(&dirs.data)?)
             .with_context(|| format!("writing {}", cfg.display()))?;
     }
     Ok(cfg)
 }
 
-/// Parse `KEY=value` lines. Blank lines and `#` comments are skipped, as is
-/// any line without `=` or with an empty key. One matching pair of single or
-/// double quotes around the value is stripped.
-pub fn parse_env_file(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let (k, v) = line.split_once('=')?;
-            let k = k.trim();
-            if k.is_empty() {
-                return None;
-            }
-            let v = v.trim();
-            let v = v
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                .unwrap_or(v);
-            Some((k.to_string(), v.to_string()))
-        })
-        .collect()
+pub fn load_env_file(path: &Path) -> Result<()> {
+    match dotenvy::from_path_override(path) {
+        Err(e) if e.not_found() => Ok(()),
+        loaded => loaded.with_context(|| format!("env file: {}", path.display())),
+    }
 }
 
 /// `dir` first, so bundled tools shadow any system copies.
@@ -133,41 +86,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_round_trips_through_config_load() {
+    fn default_config_puts_everything_under_the_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let data = tmp.path().join("Xuewen");
+        let data = tmp.path().join("Application Support/Xuewen \"quoted\"");
         std::fs::create_dir_all(&data).unwrap();
         let f = data.join("xuewen.toml");
-        std::fs::write(&f, default_config_toml(&data)).unwrap();
+        std::fs::write(&f, default_config_toml(&data).unwrap()).unwrap();
 
         let cfg = xuewen::config::Config::load(&f).unwrap();
         assert_eq!(cfg.inbox_dir, data.join("inbox"));
         assert_eq!(cfg.library_root, data.join("library"));
         assert_eq!(
             cfg.database_url,
-            format!("sqlite:{}", data.join("xuewen.db").display())
+            format!("sqlite:{}", data.join("library.db").display())
         );
         assert_eq!(cfg.search.index_dir, data.join("search-index"));
         assert_eq!(cfg.search.vector_dir, data.join("search-vectors"));
         assert_eq!(cfg.preview.cache_dir, data.join("preview-cache"));
-    }
-
-    #[test]
-    fn default_vector_dir_fills_only_a_missing_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data = tmp.path().join("Xuewen");
-        let f = tmp.path().join("xuewen.toml");
-        let base = "inbox_dir = \"/i\"\nlibrary_root = \"/l\"\ndatabase_url = \"sqlite:/d\"\n";
-
-        std::fs::write(&f, base).unwrap();
-        let mut cfg = xuewen::config::Config::load(&f).unwrap();
-        default_vector_dir(&mut cfg, &data);
-        assert_eq!(cfg.search.vector_dir, data.join("search-vectors"));
-
-        std::fs::write(&f, format!("{base}[search]\nvector_dir = \"/v\"\n")).unwrap();
-        let mut cfg = xuewen::config::Config::load(&f).unwrap();
-        default_vector_dir(&mut cfg, &data);
-        assert_eq!(cfg.search.vector_dir, PathBuf::from("/v"));
     }
 
     #[test]
@@ -189,18 +124,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_env_file_handles_comments_blanks_quotes() {
-        let text = "\n# comment\nOPENAI_API_KEY=sk-abc\nQUOTED=\"v a l\"\nSINGLE='x'\nNOVALUE=\nBROKEN_LINE\n = novalue\n";
-        let vars = parse_env_file(text);
-        assert_eq!(
-            vars,
-            vec![
-                ("OPENAI_API_KEY".into(), "sk-abc".into()),
-                ("QUOTED".into(), "v a l".into()),
-                ("SINGLE".into(), "x".into()),
-                ("NOVALUE".into(), "".into()),
-            ]
-        );
+    fn load_env_file_reads_shell_style_assignments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("env");
+        std::fs::write(
+            &f,
+            "\n# comment\nXUEWEN_DESKTOP_TEST_PLAIN=sk-abc\nexport XUEWEN_DESKTOP_TEST_EXPORTED=e\nXUEWEN_DESKTOP_TEST_QUOTED=\"v a l\"\nXUEWEN_DESKTOP_TEST_SINGLE='x'\n",
+        )
+        .unwrap();
+
+        load_env_file(&f).unwrap();
+        for (key, value) in [
+            ("XUEWEN_DESKTOP_TEST_PLAIN", "sk-abc"),
+            ("XUEWEN_DESKTOP_TEST_EXPORTED", "e"),
+            ("XUEWEN_DESKTOP_TEST_QUOTED", "v a l"),
+            ("XUEWEN_DESKTOP_TEST_SINGLE", "x"),
+        ] {
+            assert_eq!(std::env::var(key).unwrap(), value, "{key}");
+        }
+    }
+
+    #[test]
+    fn load_env_file_tolerates_a_missing_file_but_not_a_broken_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        load_env_file(&tmp.path().join("absent")).unwrap();
+
+        let f = tmp.path().join("env");
+        std::fs::write(&f, "XUEWEN_DESKTOP_TEST_BROKEN=\"unterminated\n").unwrap();
+        assert!(load_env_file(&f).is_err());
     }
 
     #[test]

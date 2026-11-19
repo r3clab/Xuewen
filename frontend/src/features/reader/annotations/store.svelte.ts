@@ -7,6 +7,7 @@
 import { deleteAnnotation, listAnnotations, putAnnotation } from './api';
 import type { Annotation } from '$shared/api/generated/Annotation';
 import type { NewAnnotation } from '$shared/api/generated/NewAnnotation';
+import { errorMessage } from '$shared/errors';
 
 export const annotations = $state<{
   /// paper id → annotation id → row.
@@ -47,7 +48,7 @@ export async function loadAnnotations(paperId: string): Promise<void> {
     annotations.loaded[paperId] = true;
     annotations.error[paperId] = null;
   } catch (e) {
-    annotations.error[paperId] = (e as Error).message;
+    annotations.error[paperId] = errorMessage(e, 'loading the annotations failed');
   }
 }
 

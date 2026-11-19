@@ -1,7 +1,7 @@
 <script lang="ts">
   import { chat } from '$features/reader/ask/chat.svelte';
   import { pillMotionStyle } from './pillStyles';
-  import { dock, toggleDock } from '$features/reader/dock/state.svelte';
+  import { askInDock, dock, toggleDock } from '$features/reader/dock/state.svelte';
   import type { PillHide } from './pillHide.svelte';
 
   let { pill }: { pill: PillHide } = $props();
@@ -16,12 +16,8 @@
   const hidden = $derived(dock.open || !pill.visible);
 </script>
 
-<!-- svelte-ignore a11y_interactive_supports_focus -- every control inside
-     the pill is individually tabbable via normal document tab order; the
-     toolbar container itself is not a tab stop (same rationale as
-     PdfToolbar's pill). -->
 <div
-  role="toolbar"
+  role="group"
   aria-label="Reader quick actions"
   onpointerenter={() => pill.pillEnter()}
   onpointerleave={() => pill.pillLeave()}
@@ -41,6 +37,6 @@
     }`}
     aria-label="Paper panel"
     title={chat.available ? 'Paper panel — i · ask c' : 'Paper panel — i'}
-    onclick={() => toggleDock(chat.available ? 'ask' : 'record')}
+    onclick={() => (chat.available ? askInDock() : toggleDock())}
   >{chat.available ? '問' : '詳'}</button>
 </div>

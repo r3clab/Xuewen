@@ -25,17 +25,34 @@ pub(crate) enum Imported {
     },
 }
 
-/// Why a URL/identifier import failed: there is no working import stack
-/// (`Unavailable`, `Internal`), no PDF could be produced
-/// (`Unsupported`..`Network`), or the fetched PDF failed to ingest (`Ingest`).
+/// Why an import failed: no PDF could be produced (`Unsupported`..`Network`),
+/// or the PDF failed to ingest (`Ingest`).
 #[derive(Debug)]
-pub(crate) enum ImportError {
-    Unavailable(String),
-    Internal(anyhow::Error),
+pub enum ImportError {
     Unsupported,
     CookieExpired,
     Network(anyhow::Error),
     Ingest(anyhow::Error),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ImportError::Unsupported => "unsupported input",
+            ImportError::CookieExpired => "proxy session expired",
+            ImportError::Network(_) => "fetch failed",
+            ImportError::Ingest(_) => "import failed",
+        })
+    }
+}
+
+impl std::error::Error for ImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ImportError::Network(e) | ImportError::Ingest(e) => Some(e.as_ref()),
+            ImportError::Unsupported | ImportError::CookieExpired => None,
+        }
+    }
 }
 
 /// Turn an input string into PDF bytes, following the spec's fetch order:
@@ -49,9 +66,11 @@ async fn import_source(
     let src = parse_source(input).ok_or(ImportError::Unsupported)?;
     let hint = source_identifier(&src);
 
+    let target = pdf_target(&src, &fetcher.arxiv_pdf_base);
+
     // 1. arXiv is always taken direct (open, no proxy).
     if let Source::Arxiv(_) = &src {
-        let target = pdf_target(&src).expect("arxiv always has a target");
+        let target = target.expect("arxiv always has a target");
         return match fetcher.fetch_plain(&target.url).await {
             Ok(Some(bytes)) => Ok(Fetched::Pdf { bytes, hint }),
             Ok(None) => Ok(Fetched::Unfetched {
@@ -62,20 +81,21 @@ async fn import_source(
     }
 
     // 2. Known paywalled publisher + a cookie → proxied fetch (preferred).
+    // A fetch that fails outright is kept for step 4: without a PDF, it is
+    // the reason the import failed.
     let mut cookie_expired = false;
-    if let (Some(target), Some(cookie)) = (pdf_target(&src), cookie) {
+    let mut network_error = None;
+    if let (Some(target), Some(cookie)) = (target, cookie) {
         if target.requires_proxy && fetcher.proxy_enabled() {
             match fetcher.fetch_proxied(&target.url, cookie).await {
                 Ok(Some(bytes)) => return Ok(Fetched::Pdf { bytes, hint }),
                 Ok(None) => cookie_expired = true, // non-PDF: likely expired session
-                Err(e) => tracing::warn!("proxied fetch failed: {e}"),
+                Err(e) => network_error = Some(e.context("proxied fetch")),
             }
         }
     }
 
-    // 3. Open-access fallback via Unpaywall (needs a DOI). Failures fall
-    // through to the terminal error but must not vanish silently — the CLI's
-    // "paywalled or cookie expired" message would misattribute them.
+    // 3. Open-access fallback via Unpaywall (needs a DOI).
     if let Source::Doi(doi) = &src {
         if let Some(oa) = resolver.oa_pdf_url(doi).await {
             match fetcher.fetch_plain(&oa).await {
@@ -83,19 +103,24 @@ async fn import_source(
                 // Unpaywall asserted a PDF at this URL, so a non-PDF body is
                 // itself noteworthy (link rot, an interstitial page).
                 Ok(None) => tracing::warn!("oa fetch for {oa} returned a non-PDF body"),
-                Err(e) => tracing::warn!("oa fetch failed for {oa}: {e}"),
+                Err(e) => {
+                    network_error = Some(e.context(format!("open-access fetch of {oa}")));
+                }
             }
         }
     }
 
-    // 4. Give up. Prefer the actionable "cookie expired" over generic "unfetched".
+    // 4. Give up, with the most actionable reason: an expired cookie the user
+    // can renew, then the fetch that broke, and only then "no PDF anywhere".
     if cookie_expired {
-        Err(ImportError::CookieExpired)
-    } else {
-        Ok(Fetched::Unfetched {
-            metadata: metadata_for(resolver, &src).await,
-        })
+        return Err(ImportError::CookieExpired);
     }
+    if let Some(e) = network_error {
+        return Err(ImportError::Network(e));
+    }
+    Ok(Fetched::Unfetched {
+        metadata: metadata_for(resolver, &src).await,
+    })
 }
 
 /// Fetch → stage → ingest → cleanup-on-error, shared by `xuewen import` and
@@ -117,9 +142,10 @@ pub(crate) async fn fetch_stage_ingest(
             Identifier::Arxiv(a) => (None, Some(a.as_str())),
             Identifier::None => (None, None),
         };
-        if let Some(existing) = crate::library::papers::find_by_identifier(&ctx.pool, doi, arxiv)
-            .await
-            .map_err(ImportError::Ingest)?
+        if let Some(existing) =
+            crate::library::papers::find_by_identifier(&ctx.pool, doi, arxiv, None)
+                .await
+                .map_err(ImportError::Ingest)?
         {
             return Ok(Imported::Ingested(Outcome::from_identifier_hit(&existing)));
         }
@@ -143,7 +169,7 @@ pub(crate) async fn fetch_stage_ingest(
 /// Best-effort metadata for the clean-failure message.
 async fn metadata_for(resolver: &Resolver, src: &Source) -> Option<Box<ResolvedMetadata>> {
     match source_identifier(src) {
-        Some(ident) => resolver.resolve(&ident, None).await.map(Box::new),
+        Some(ident) => resolver.lookup_or_skip(&ident).await.map(Box::new),
         None => None,
     }
 }
@@ -157,23 +183,33 @@ mod orchestration_tests {
 
     const PDF: &[u8] = b"%PDF-1.4\nx\n";
 
-    fn offline_resolver() -> Resolver {
-        Resolver::with_bases(
-            None,
-            "http://127.0.0.1:1".into(),
-            "http://127.0.0.1:1".into(),
-        )
-        .unwrap()
-        .with_dblp_base("http://127.0.0.1:1".into())
-        .with_unpaywall_base("http://127.0.0.1:1".into())
+    #[tokio::test]
+    async fn arxiv_pdf_is_fetched_direct() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pdf/1706.03762v5"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(PDF))
+            .mount(&server)
+            .await;
+        let fetcher = Fetcher::new(None)
+            .unwrap()
+            .with_arxiv_pdf_base(format!("{}/pdf", server.uri()));
+
+        let Fetched::Pdf { bytes, hint } =
+            import_source(&fetcher, &Resolver::offline(), "arXiv:1706.03762v5", None)
+                .await
+                .unwrap()
+        else {
+            panic!("expected a fetched PDF");
+        };
+        assert_eq!(bytes, PDF);
+        assert_eq!(hint, Some(Identifier::Arxiv("1706.03762".into())));
     }
 
     #[tokio::test]
     async fn doi_oa_copy_is_fetched() {
-        // The arXiv host is hard-coded (arxiv.org) and can't be repointed at a
-        // mock, so we exercise the plain-download path via the OA fallback: a DOI
-        // with no cookie whose Unpaywall record points at a PDF the mock serves.
-        // (fetch_plain itself is unit-tested against a mock in fetch_tests.)
+        // A DOI with no cookie whose Unpaywall record points at a PDF the mock
+        // serves.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/10.1145/oa"))
@@ -188,9 +224,8 @@ mod orchestration_tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(PDF))
             .mount(&server)
             .await;
-        let resolver = Resolver::with_bases(Some("me@uchicago.edu"), server.uri(), server.uri())
-            .unwrap()
-            .with_dblp_base(server.uri())
+        let resolver = Resolver::offline()
+            .with_contact_email("me@uchicago.edu")
             .with_unpaywall_base(server.uri());
         let fetcher = Fetcher::new(None).unwrap();
 
@@ -210,7 +245,7 @@ mod orchestration_tests {
     #[tokio::test]
     async fn unsupported_input_errors() {
         let fetcher = Fetcher::new(None).unwrap();
-        let err = import_source(&fetcher, &offline_resolver(), "not an id", None)
+        let err = import_source(&fetcher, &Resolver::offline(), "not an id", None)
             .await
             .unwrap_err();
         assert!(matches!(err, ImportError::Unsupported));
@@ -220,7 +255,7 @@ mod orchestration_tests {
     async fn paywalled_no_cookie_no_oa_is_unfetched() {
         let fetcher = Fetcher::new(None).unwrap(); // proxy disabled
                                                    // ACM DOI, no cookie, offline resolver → no OA, no metadata → Unfetched.
-        let out = import_source(&fetcher, &offline_resolver(), "10.1145/paywalled", None)
+        let out = import_source(&fetcher, &Resolver::offline(), "10.1145/paywalled", None)
             .await
             .unwrap();
         assert!(matches!(out, Fetched::Unfetched { .. }));
@@ -261,7 +296,7 @@ mod orchestration_tests {
         let ctx = IngestCtx::new(
             pool.clone(),
             Libraries::under(&dir.path().join("inbox"), &dir.path().join("library")),
-            offline_resolver(),
+            Resolver::offline(),
             None,
         );
         // Proxy-less fetcher + offline resolver: without the pre-fetch check
@@ -291,15 +326,43 @@ mod orchestration_tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("<html>login</html>"))
             .mount(&server)
             .await;
-        let fetcher = Fetcher::new(Some(format!("{}/login?url=", server.uri()))).unwrap();
+        let fetcher = Fetcher::new(Some(
+            format!("{}/login?url=", server.uri()).parse().unwrap(),
+        ))
+        .unwrap();
         let err = import_source(
             &fetcher,
-            &offline_resolver(),
-            "10.1145/x",
+            &Resolver::offline(),
+            "10.1145/3292500.3330701",
             Some("ezproxy=stale"),
         )
         .await
         .unwrap_err();
         assert!(matches!(err, ImportError::CookieExpired));
+    }
+
+    #[tokio::test]
+    async fn a_failed_proxied_fetch_is_a_network_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let fetcher = Fetcher::new(Some(
+            format!("{}/login?url=", server.uri()).parse().unwrap(),
+        ))
+        .unwrap();
+        let err = import_source(
+            &fetcher,
+            &Resolver::offline(),
+            "10.1145/3292500.3330701",
+            Some("ezproxy=good"),
+        )
+        .await
+        .unwrap_err();
+        let ImportError::Network(e) = err else {
+            panic!("expected a network error, got {err:?}");
+        };
+        assert!(format!("{e:#}").contains("502"), "got: {e:#}");
     }
 }

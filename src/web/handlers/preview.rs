@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -9,6 +9,7 @@ use super::fetch_paper;
 use super::papers::library_file;
 use crate::app::{App, Trash};
 use crate::web::error::ApiError;
+use crate::web::extract::ApiPath;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -42,7 +43,7 @@ fn preview_error(e: crate::preview::PreviewError) -> ApiError {
 /// How many pages the picker should lay out, and page one's shape.
 async fn preview_meta(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Json<PreviewMeta>, ApiError> {
     // Trash::Allow, like `pdf`: a paper trashed while the picker is open is
     // still a paper the picker is showing.
@@ -63,14 +64,8 @@ async fn preview_meta(
 /// One rendered page as a PNG.
 async fn preview_page(
     State(app): State<App>,
-    // The page number is parsed here rather than by a typed extractor: a
-    // typed one rejects with axum's own body shape, and every error this API
-    // returns is `{"error": "..."}`.
-    Path((id, page)): Path<(String, String)>,
+    ApiPath((id, page)): ApiPath<(String, u32)>,
 ) -> Result<Response, ApiError> {
-    let page: u32 = page
-        .parse()
-        .map_err(|_| ApiError::BadRequest("page must be a number".into()))?;
     let paper = fetch_paper(&app, &id, Trash::Allow, "preview").await?;
     let path = library_file(app.library_root(), &paper.rel_path).await?;
     let png = app

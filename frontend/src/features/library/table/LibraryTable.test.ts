@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
@@ -45,12 +46,8 @@ function paper(id: string, title: string, extra: Partial<PaperSummary> = {}): Pa
   };
 }
 
-// This jsdom build has no PointerEvent; MouseEvent carries the same fields
-// the resize action reads (clientX/button), and pointer capture is try/caught.
-function pointerEvent(type: string, clientX: number): Event {
-  const Ctor: typeof MouseEvent =
-    typeof PointerEvent === 'undefined' ? MouseEvent : (PointerEvent as unknown as typeof MouseEvent);
-  return new Ctor(type, { clientX, button: 0, bubbles: true, cancelable: true });
+function pointerEvent(type: string, clientX: number): PointerEvent {
+  return new PointerEvent(type, { clientX, button: 0, bubbles: true, cancelable: true });
 }
 
 beforeEach(() => {
@@ -63,9 +60,7 @@ beforeEach(() => {
   toasts.items.length = 0;
   resetColumnWidths(); // module singleton — a prior test's widths would leak
   localStorage.clear();
-  Object.assign(filters, {
-    q: '', status: 'all', sort: 'year_desc', project: 'all', tag: undefined, starred: undefined,
-  });
+  Object.assign(filters, { q: '', sort: 'year_desc' });
   searchMeta.byId = {};
 });
 
@@ -235,10 +230,20 @@ describe('LibraryTable', () => {
   it('shows the search snippet under the title while searching', () => {
     filters.q = 'fuzz';
     searchMeta.byId = {
-      p1: { engine: 'keyword', field: 'body', page: 7, snippet: 'a <mark>fuzz</mark>er' },
+      p1: {
+        engine: 'keyword',
+        field: 'body',
+        page: 7,
+        snippet: [
+          { text: 'a <b>', marked: false },
+          { text: 'fuzz', marked: true },
+          { text: 'er', marked: false },
+        ],
+      },
     };
     render(LibraryTable);
     expect(screen.getByText('fuzz').tagName).toBe('MARK');
+    expect(screen.getByText('fuzz').parentElement).toHaveTextContent('a <b>fuzzer');
     expect(screen.getByText(/body/).closest('tr')).toHaveTextContent('First Paper');
     expect(screen.getByText(/p\.7/)).toBeInTheDocument();
     expect(screen.getAllByRole('row')).toHaveLength(3); // the snippet adds no row
@@ -247,7 +252,7 @@ describe('LibraryTable', () => {
   it('hides a stale snippet once the query no longer searches', () => {
     filters.q = 'tag:nlp';
     searchMeta.byId = {
-      p1: { engine: 'keyword', field: 'body', page: 7, snippet: 'a <mark>fuzz</mark>er' },
+      p1: { engine: 'keyword', field: 'body', page: 7, snippet: [{ text: 'fuzz', marked: true }] },
     };
     render(LibraryTable);
     expect(screen.queryByText('fuzz')).not.toBeInTheDocument();
@@ -300,6 +305,9 @@ describe('LibraryTable', () => {
 
   it('dragging a handle commits and persists the width', async () => {
     render(LibraryTable);
+    // jsdom lays nothing out; give the pane room so the drag ceiling (sized
+    // against the pane) is not what stops the handle.
+    Object.defineProperty(screen.getByRole('table').parentElement!, 'clientWidth', { value: 4000 });
     const handle = screen.getByRole('separator', { name: 'Resize Title column' });
     await fireEvent(handle, pointerEvent('pointerdown', 100));
     await fireEvent(handle, pointerEvent('pointermove', 150));
@@ -307,9 +315,6 @@ describe('LibraryTable', () => {
     expect(columnWidths.title).toBe(PINNED_COLUMNS.title.defaultWidth + 50);
     const saved = JSON.parse(localStorage.getItem('xuewen-library-columns') ?? '{}');
     expect(saved.title).toBe(PINNED_COLUMNS.title.defaultWidth + 50);
-    // A real browser fires a post-drag click that consumes the one-shot
-    // swallower; jsdom doesn't, so drain it or it leaks into the next test.
-    window.dispatchEvent(new MouseEvent('click'));
   });
 
   it('double-clicking a handle auto-fits that column to its content', async () => {
@@ -337,5 +342,33 @@ describe('LibraryTable', () => {
     expect(columnWidths.title).toBeLessThan(PINNED_COLUMNS.title.defaultWidth);
     const saved = JSON.parse(localStorage.getItem('xuewen-library-columns') ?? '{}');
     expect(saved.title).toBe(columnWidths.title);
+  });
+
+  it('a click on a row control acts on that control; elsewhere on the row it opens the paper', async () => {
+    render(LibraryTable);
+    const row = screen.getByRole('button', { name: 'First Paper' }).closest('tr')!;
+    await userEvent.click(within(row).getByRole('button', { name: 'Star paper' }));
+    expect(api.setStar).toHaveBeenCalledWith('p1', true);
+    await userEvent.click(within(row).getByRole('checkbox').closest('label')!);
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+    expect(viewer.activeId).toBeNull();
+    await userEvent.click(within(row).getByText('Ada Lovelace'));
+    expect(viewer.activeId).toBe('p1');
+  });
+
+  it('the Column options button opens the header menu from the keyboard', async () => {
+    render(LibraryTable);
+    screen.getByRole('button', { name: 'Column options' }).focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByRole('menuitem', { name: /reset to default widths/i })).toBeInTheDocument();
+  });
+
+  it('drops papers that leave the list from the selection', async () => {
+    render(LibraryTable);
+    await userEvent.click(screen.getByRole('checkbox', { name: /select all/i }));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    library.papers = [library.papers[0]];
+    await tick();
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
   });
 });

@@ -2,23 +2,22 @@
   import { ChevronDown, ChevronUp, X } from '@lucide/svelte';
   import { useSearch, useSearchState } from '@embedpdf/svelte/search';
   import { btn } from './pillStyles';
-  import { setFind } from '$features/reader/state.svelte';
+  import { findFocus, setFind } from '$features/reader/state.svelte';
+  import { viewer } from '$features/reader/tabs/state.svelte';
+  import { escapeLayer } from '$shared/ui/escape';
+  import { focusOnMount } from '$shared/ui/focus';
 
   let { documentId }: { documentId: string } = $props();
   const search = useSearch();
   const found = useSearchState();
 
   let query = $state('');
-  let inputEl: HTMLInputElement | undefined = $state();
   let debounce: ReturnType<typeof setTimeout> | undefined;
 
-  // Focus on mount; on unmount stop the session so highlights clear.
-  $effect(() => {
-    inputEl?.focus();
-    return () => {
-      clearTimeout(debounce);
-      search.clear();
-    };
+  // On unmount stop the session so highlights clear.
+  $effect(() => () => {
+    clearTimeout(debounce);
+    search.clear();
   });
 
   // A failed or refused search leaves the count at zero, which is all the
@@ -41,15 +40,6 @@
   function close(): void {
     setFind(documentId, false);
   }
-  // Owns its Esc anywhere inside the bar (input AND the prev/next/close
-  // buttons) — the global cascade (shortcuts.ts) runs before the
-  // editable-target check and would close info/zen instead.
-  function onBarKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  }
   // Enter stays on the input only: Enter on a focused button must keep
   // activating that button, not cycle matches.
   function onKeydown(e: KeyboardEvent): void {
@@ -61,20 +51,17 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -- the div is
-     not an interaction target; it only delegates Esc bubbling up from the
-     focused input/buttons so the bar can close without the global shortcut
-     handler also firing. -->
+<!-- Hidden tabs keep their bar mounted; Esc belongs to the visible one. -->
 <div
+  {@attach escapeLayer(close, { active: () => viewer.activeId === documentId })}
   role="search"
   aria-label="Find in document"
   class="absolute left-1/2 top-14 z-20 flex -translate-x-1/2 items-center gap-1 rounded-xl border border-stone-200 bg-paper/90 px-1.5 py-1 shadow backdrop-blur dark:border-stone-800 dark:bg-soot/90"
-  onkeydown={onBarKeydown}
 >
   <input
-    bind:this={inputEl}
+    {@attach focusOnMount}
+    {@attach findFocus(documentId).attach}
     bind:value={query}
-    data-find-input={documentId}
     placeholder="Find in document"
     aria-label="Find in document"
     class="w-48 bg-transparent px-1 text-sm text-ink placeholder:text-stone-400 focus:outline-none dark:text-stone-100 dark:placeholder:text-stone-500"

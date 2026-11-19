@@ -1,34 +1,41 @@
 {
   flake,
   inputs,
-  perSystem,
   pkgs,
   ...
 }:
 let
+  inherit (pkgs) lib;
   rumdlConfig = (pkgs.formats.toml { }).generate "rumdl.toml" {
     MD013 = {
       reflow = true;
       reflow-mode = "sentence-per-line";
     };
   };
-  # Author surnames (Ba), pdftotext small-caps fragments (R EFERENCES),
-  # streamed-delta test text (Hel), a crate name (flate2), and the halves typos
-  # splits mixed-case acronyms into (DELETEs, NAMEs, ANDed, PNGs).
   typosConfig = (pkgs.formats.toml { }).generate "typos.toml" {
-    default.extend-words = pkgs.lib.genAttrs [
-      "ba"
-      "flate"
-      "eferences"
-      "hel"
-      "mis"
-      "unparseable"
-      "empted"
-      "delet"
-      "nam"
-      "ded"
-      "pn"
-    ] (word: word);
+    default = {
+      # Whole tokens only: an author surname (Ba), a pdftotext small-caps
+      # fragment (EFERENCES), streamed-delta test text (Hel), GROBID's persName
+      # binding (pn), and mixed-case acronym plurals typos would otherwise split
+      # into fragments (ANDed, DELETEs, NAMEs, PNGs).
+      extend-identifiers = lib.genAttrs [
+        "ANDed"
+        "Ba"
+        "DELETEs"
+        "EFERENCES"
+        "Hel"
+        "NAMEs"
+        "PNGs"
+        "pn"
+      ] lib.id;
+      # The spelling the code base uses; typos only knows "unparsable".
+      extend-words.unparseable = "unparseable";
+      # Hyphenated prefixes typos splits into a non-word ("pre-empted").
+      extend-ignore-re = [
+        "pre-empted"
+        "\\bmis-[a-z]+"
+      ];
+    };
   };
   treefmt = inputs.treefmt-nix.lib.evalModule pkgs {
     projectRootFile = null;
@@ -40,8 +47,8 @@ let
     programs.statix.enable = true;
     programs.rumdl-format.enable = true;
     programs.rustfmt.enable = true;
-    programs.rustfmt.package = perSystem.fenix.stable.rustfmt;
-    programs.rustfmt.edition = "2021";
+    programs.rustfmt.package = (flake.lib.rustToolchain pkgs).override { extensions = [ "rustfmt" ]; };
+    programs.rustfmt.edition = (lib.importTOML ../Cargo.toml).package.edition;
     programs.taplo.enable = true;
     programs.typos.enable = true;
     programs.typos.configFile = "${typosConfig}";

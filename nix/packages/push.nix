@@ -1,18 +1,18 @@
-{ flake, pkgs, ... }:
+{ perSystem, pkgs, ... }:
 let
-  tag = flake.shortRev or "dev";
+  inherit (perSystem.self) image;
 in
 pkgs.writeShellApplication {
   name = "xuewen-push";
+  runtimeInputs = [ pkgs.kustomize ];
   # Prereq: skopeo login ghcr.io (documented in deploy/k8s/README.md)
   text = ''
-    nix run .#image.copyTo -- docker://ghcr.io/r3clab/xuewen:${tag}
-    if [ "${tag}" = "dev" ]; then
-      echo "dirty tree — pushed :dev only, not :latest"
-    else
-      nix run .#image.copyTo -- docker://ghcr.io/r3clab/xuewen:latest
+    ${pkgs.lib.getExe image.copyToRegistry}
+    if [ "$#" -gt 0 ]; then
+      cd "$1"
+      kustomize edit set image ${image.imageName}:${image.imageTag}
     fi
   '';
-  meta.description = "push the xuewen image to ghcr";
-  meta.platforms = [ "x86_64-linux" ];
+  meta.description = "push the xuewen image to ghcr and, given a kustomization directory, pin it there";
+  meta.platforms = pkgs.lib.platforms.linux;
 }

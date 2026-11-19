@@ -19,9 +19,14 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: xuewen
-          image: ghcr.io/r3clab/xuewen:latest
+          image: ghcr.io/r3clab/xuewen   # tag pinned in kustomization.yaml
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           ports:
             - containerPort: 8080
               name: http
@@ -35,16 +40,18 @@ spec:
             - name: config
               mountPath: /etc/xuewen
             - name: tmp
-              mountPath: /tmp   # image has no /tmp; daily TL;DR stages PDFs here
+              mountPath: /tmp   # writable under the read-only root; daily TL;DR stages PDFs here
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 60   # up to 5 min for migrations and opening the indexes
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
           readinessProbe:
             httpGet: { path: /api/stats, port: http }
-            initialDelaySeconds: 3
             periodSeconds: 10
-            timeoutSeconds: 5
-          livenessProbe:
-            httpGet: { path: /api/stats, port: http }
-            initialDelaySeconds: 10
-            periodSeconds: 30
             timeoutSeconds: 5
           resources:
             requests: { cpu: 100m, memory: 256Mi }

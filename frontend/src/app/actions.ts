@@ -2,7 +2,8 @@ import { applyIdentify as applyIdentifyWith } from '$features/identify/actions';
 import { loadPapers, loadStats } from '$features/library/actions';
 import { deletePaper, restorePaper, setPaperName as apiSetPaperName } from '$features/library/api';
 import { filters } from '$features/library/search/state.svelte';
-import { applyPaperName, dropPaper, markLibraryChanged } from '$features/library/state.svelte';
+import { applyPaperName, dropPaper } from '$features/library/state.svelte';
+import { errorMessage } from '$shared/errors';
 import { toast } from '$shared/ui/toasts.svelte';
 import { closeTab, renameTab, retitleTab, selection } from '$features/reader/tabs/state.svelte';
 
@@ -12,7 +13,6 @@ async function deleteAndDrop(id: string): Promise<void> {
   await deletePaper(id);
   closeTab(id);
   dropPaper(id);
-  markLibraryChanged();
   if (selection.id === id) selection.id = null;
 }
 
@@ -39,19 +39,18 @@ export async function removePapers(ids: string[]): Promise<void> {
   if (failures.length > 0) {
     const label =
       failures.length === 1 ? "Couldn't delete" : `Couldn't delete ${failures.length} papers`;
-    toast('error', `${label}: ${(failures[0].reason as Error).message}`);
+    toast('error', `${label}: ${errorMessage(failures[0].reason, 'delete failed')}`);
   }
 }
 
 async function undoDelete(ids: string[]): Promise<void> {
   try {
     await Promise.all(ids.map((id) => restorePaper(id)));
-    markLibraryChanged();
     await loadPapers();
     await loadStats();
     toast('success', ids.length === 1 ? 'Paper restored' : `${ids.length} papers restored`);
   } catch (e) {
-    toast('error', `Couldn't restore: ${(e as Error).message}`);
+    toast('error', `Couldn't restore: ${errorMessage(e, 'restore failed')}`);
   }
 }
 

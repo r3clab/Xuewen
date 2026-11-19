@@ -1,7 +1,7 @@
 # Running Xuewen on NixOS
 
-The flake exposes `nixosModules.default`, a systemd service for Xuewen.
-It builds the package from this flake, generates `xuewen.toml` from Nix options, runs `pdftotext` (poppler) in the unit's `PATH`, and applies systemd hardening.
+The flake exposes `nixosModules.default`, a hardened systemd service for Xuewen.
+Settings, secrets, Agent Ask and the shared options are described in [`../README.md`](../README.md); this page covers what is NixOS-specific.
 
 ## Quick start (flakes)
 
@@ -25,11 +25,11 @@ It builds the package from this flake, generates `xuewen.toml` from Nix options,
               api_key_env = "OPENAI_API_KEY";
               embedding = { model = "text-embedding-3-small"; dims = 1536; };
               summary = { };  # per-paper LLM summaries
-              # Paper chat / the Ask tab is Agent Ask — see below.
+              # Paper chat / the Ask tab is Agent Ask — see ../README.md.
             };
 
-            # Secrets stay OUT of the Nix store (see below).
-            environmentFile = "/run/secrets/xuewen.env";
+            # Secrets stay OUT of the Nix store.
+            environmentFile = "/run/secrets/xuewen.env";  # 0600, root-owned
           };
         })
       ];
@@ -38,44 +38,13 @@ It builds the package from this flake, generates `xuewen.toml` from Nix options,
 }
 ```
 
-`inbox_dir`, `library_root`, `database_url`, `search.index_dir`, `search.vector_dir` and `preview.cache_dir` default under `services.xuewen.dataDir` (`/var/lib/xuewen`); override them via `settings` if needed.
+State lives in `dataDir`, `/var/lib/xuewen` by default, created with the service user's ownership.
 
-## Secrets
+## Agent Ask authentication
 
-The generated `xuewen.toml` lands in the world-readable Nix store, so never put API keys in `settings`.
-Instead reference an env var with `api_key_env` and provide it through `environmentFile`:
+The service user has no `claude`/`codex` CLI login, so authentication comes from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the `environmentFile`.
 
-```text
-# /run/secrets/xuewen.env  (0600, root-owned, e.g. via sops-nix / agenix)
-OPENAI_API_KEY=sk-...
-```
-
-## Semantic search (optional)
-
-Keyword search works out of the box.
-Semantic search needs only `settings.ai.embedding` (as in the quick start) and its API key in `environmentFile`; vectors are stored in-process under `search.vector_dir`, with no separate server to run.
-
-## Agent Ask (optional)
-
-The reader's Ask tab runs a tool-using agent through the Claude Code / Codex SDKs.
-Enabling a backend is all that's needed — the module puts Node on the unit's `PATH` and points `[ai.agent].runner` at the packaged runner in the store, so nothing has to be installed under `dataDir`:
-
-```nix
-services.xuewen.settings.ai.agent.claude_code = { };   # and/or .codex = { };
-services.xuewen.environmentFile = "/run/secrets/xuewen.env";  # ANTHROPIC_API_KEY=…
-```
-
-The service user has no `claude`/`codex` CLI login, so authentication comes
-from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the `environmentFile`.
-
-Two things to know.
-The runner package vendors each SDK's prebuilt CLI binary, so it adds roughly 250 MB to the closure.
-And enabling it relaxes one hardening knob — `MemoryDenyWriteExecute` has to go off for Node's JIT — which is why the section is opt-in rather than on by default.
-
-## Exposing it
-
-The web UI has **no authentication** and exposes mutating endpoints.
-Keep the default loopback bind and front it with an authenticating reverse proxy, e.g.:
+## Reverse proxy
 
 ```nix
 services.nginx.virtualHosts."papers.example.com" = {
@@ -85,24 +54,13 @@ services.nginx.virtualHosts."papers.example.com" = {
 };
 ```
 
-Setting a non-loopback `host` binds publicly and requires the explicit
-`allowRemote = true` opt-in (an eval-time assertion reminds you); only do that
-on a trusted network.
-
-## Options
+## NixOS-only options
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `enable` | `false` | Enable the service |
-| `package` | flake build | Xuewen package to run |
-| `agentRunnerPackage` | flake build | Agent Ask runner; defaults `settings.ai.agent.runner` |
-| `host` / `port` | `127.0.0.1` / `8080` | Bind address |
-| `allowRemote` | `false` | Pass `--allow-remote` (required for a non-loopback `host`) |
-| `openFirewall` | `false` | Open the port |
 | `dataDir` | `/var/lib/xuewen` | Library / DB / index state |
 | `user` / `group` | `xuewen` | Service identity (auto-created) |
-| `environmentFile` | `null` | systemd `EnvironmentFile` for secrets |
-| `settings` | `{}` | `xuewen.toml` as a Nix attrset |
+| `openFirewall` | `false` | Open the port |
 
 ## Test
 

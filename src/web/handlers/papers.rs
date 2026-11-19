@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -9,18 +9,20 @@ use tower_http::services::ServeFile;
 
 use super::fetch_paper;
 use crate::app::{App, Trash};
-use crate::library::export;
+use crate::library::export::{self, BibFormat};
 use crate::library::model::{Paper, PaperStatus};
-use crate::library::papers::{self, PaperName};
+use crate::library::papers::{self, PaperName, Sort};
 use crate::library::{projects, tags};
+use crate::search::query;
 use crate::web::error::ApiError;
+use crate::web::extract::{ApiJson, ApiPath, ApiQuery};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .route("/api/papers", get(list_papers))
-        .route("/api/papers/export", get(export_papers))
+        .route("/api/papers/export", post(export_papers))
         .route("/api/papers/{id}", get(get_paper).delete(delete_paper))
         .route("/api/papers/{id}/restore", post(restore_paper))
         .route("/api/papers/{id}/export", get(export_paper))
@@ -33,27 +35,17 @@ pub(super) fn routes() -> Router<App> {
         .route("/api/papers/{id}/name", patch(set_paper_name))
 }
 
-#[derive(Deserialize)]
+/// GET /api/papers query. `q` is the search box's string, parsed by the one
+/// query grammar: qualifiers filter the list and leftover free text matches
+/// title and authors. Ranked queries (free text, `author:`, `in:`) belong to
+/// `/api/search`; this is the unranked, sortable library view.
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct ListParams {
+    #[ts(optional)]
     q: Option<String>,
-    status: Option<String>,
-    sort: Option<String>,
-    project: Option<String>,
-    tag: Option<String>,
-    starred: Option<bool>,
-}
-
-impl ListParams {
-    /// The shared filter portion (`q`/`sort` travel separately into
-    /// `papers::list`).
-    fn filter(&self) -> papers::PaperFilter {
-        papers::PaperFilter {
-            status: self.status.clone(),
-            project: self.project.clone(),
-            tag: self.tag.clone(),
-            starred: self.starred,
-        }
-    }
+    #[ts(optional)]
+    sort: Option<Sort>,
 }
 
 /// A tag reference as embedded in a paper row/detail.
@@ -231,11 +223,21 @@ pub(super) async fn paper_refs(
 
 async fn list_papers(
     State(app): State<App>,
-    Query(p): Query<ListParams>,
+    ApiQuery(p): ApiQuery<ListParams>,
 ) -> Result<Response, ApiError> {
-    let papers = papers::list(app.pool(), p.q.as_deref(), p.sort.as_deref(), &p.filter())
+    let parsed = query::parse(p.q.as_deref().unwrap_or_default());
+    let filter = parsed
+        .filter(app.pool())
         .await
-        .context("list_papers")?;
+        .context("list_papers filter")?;
+    let papers = papers::list(
+        app.pool(),
+        Some(parsed.text.as_str()),
+        p.sort.unwrap_or_default(),
+        &filter,
+    )
+    .await
+    .context("list_papers")?;
     let mut out: Vec<PaperSummary> = papers.iter().map(PaperSummary::from).collect();
     attach_row_extras(app.pool(), &mut out)
         .await
@@ -243,7 +245,10 @@ async fn list_papers(
     Ok(Json(out).into_response())
 }
 
-async fn get_paper(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn get_paper(
+    State(app): State<App>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Response, ApiError> {
     let p = fetch_paper(&app, &id, Trash::Allow, "get_paper").await?;
     let (tags, projects) = paper_refs(app.pool(), &p.id)
         .await
@@ -263,7 +268,7 @@ async fn get_paper(State(app): State<App>, Path(id): Path<String>) -> Result<Res
 /// Purge (permanent removal) is CLI-only. Idempotent on an already-trashed paper.
 async fn delete_paper(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     app.trash_paper(&id)
         .await
@@ -275,7 +280,7 @@ async fn delete_paper(
 /// paper doesn't exist or isn't trashed — `trash::restore` only flips trashed rows.
 async fn restore_paper(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     app.restore_paper(&id)
         .await
@@ -297,7 +302,7 @@ async fn stats(State(app): State<App>) -> Result<Response, ApiError> {
 /// path-safe: the resolved file must live under `library_root`.
 async fn pdf(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     req: Request,
 ) -> Result<Response, ApiError> {
     let paper = fetch_paper(&app, &id, Trash::Allow, "pdf").await?;
@@ -337,13 +342,16 @@ pub(super) async fn library_file(
     }
 }
 
-async fn star_paper(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn star_paper(
+    State(app): State<App>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Response, ApiError> {
     set_star(&app, &id, true).await
 }
 
 async fn unstar_paper(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     set_star(&app, &id, false).await
 }
@@ -358,7 +366,8 @@ async fn set_star(app: &App, id: &str, on: bool) -> Result<Response, ApiError> {
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct SetPaperNameBody {
     /// Missing key, null, and whitespace-only all mean "clear".
     name: Option<String>,
@@ -366,8 +375,8 @@ struct SetPaperNameBody {
 
 async fn set_paper_name(
     State(app): State<App>,
-    Path(id): Path<String>,
-    Json(body): Json<SetPaperNameBody>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<SetPaperNameBody>,
 ) -> Result<Response, ApiError> {
     let name = PaperName::parse(body.name.as_deref().unwrap_or_default())?;
     if !papers::set_name(app.pool(), &id, name.as_ref())
@@ -384,25 +393,19 @@ async fn set_paper_name(
 
 #[derive(Deserialize)]
 struct FormatParam {
-    format: Option<String>,
-}
-
-fn parse_format(s: Option<&str>) -> export::BibFormat {
-    match s {
-        Some(v) if v.eq_ignore_ascii_case("biblatex") => export::BibFormat::Biblatex,
-        _ => export::BibFormat::Bibtex,
-    }
+    #[serde(default)]
+    format: BibFormat,
 }
 
 /// One paper's `.bib` entry as plain text (inline, so the frontend can copy it
 /// or force a download via `<a download>`).
 async fn export_paper(
     State(app): State<App>,
-    Path(id): Path<String>,
-    Query(p): Query<FormatParam>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<FormatParam>,
 ) -> Result<Response, ApiError> {
     let paper = fetch_paper(&app, &id, Trash::Allow, "export_paper").await?;
-    let body = export::format_entry(&paper, parse_format(p.format.as_deref()));
+    let body = export::format_entry(&paper, p.format);
     Ok((
         [(
             axum::http::header::CONTENT_TYPE,
@@ -413,19 +416,24 @@ async fn export_paper(
         .into_response())
 }
 
-/// The current filtered set as a downloadable `.bib` file. Same filter
-/// semantics as `GET /api/papers` by construction: the query string is
-/// extracted twice (`Query` reads request parts, so this composes) — once as
-/// the same `ListParams` the list endpoint uses, once for `format`.
+/// POST /api/papers/export body: the papers to export, in entry order.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+struct ExportPapersBody {
+    ids: Vec<String>,
+    format: BibFormat,
+}
+
+/// The given papers as one downloadable `.bib` file — the client sends the
+/// exact result set it shows, so export always matches the view. Ids naming
+/// no active paper are skipped.
 async fn export_papers(
     State(app): State<App>,
-    Query(f): Query<FormatParam>,
-    Query(p): Query<ListParams>,
+    ApiJson(body): ApiJson<ExportPapersBody>,
 ) -> Result<Response, ApiError> {
-    let papers = papers::list(app.pool(), p.q.as_deref(), p.sort.as_deref(), &p.filter())
+    let papers = papers::by_ids(app.pool(), &body.ids)
         .await
         .context("export_papers")?;
-    let body = export::format_entries(&papers, parse_format(f.format.as_deref()));
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, "application/x-bibtex"),
@@ -434,7 +442,7 @@ async fn export_papers(
                 "attachment; filename=\"xuewen.bib\"",
             ),
         ],
-        body,
+        export::format_entries(&papers, body.format),
     )
         .into_response())
 }

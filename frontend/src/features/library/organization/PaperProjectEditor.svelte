@@ -7,6 +7,7 @@
     removeFromProject,
   } from './actions';
   import { projects } from './state.svelte';
+  import { errorMessage } from '$shared/errors';
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 
   let { d }: { d: PaperDetail } = $props();
@@ -24,7 +25,7 @@
     try {
       await addToProject(d.id, projectId);
     } catch (err) {
-      error = (err as Error).message;
+      error = errorMessage(err, 'project update failed');
     }
   }
 
@@ -33,7 +34,7 @@
     try {
       await removeFromProject(d.id, projectId);
     } catch (err) {
-      error = (err as Error).message;
+      error = errorMessage(err, 'project update failed');
     }
   }
 
@@ -43,7 +44,7 @@
       const p = await createNewProject(name);
       await addToProject(d.id, p.id);
     } catch (err) {
-      error = (err as Error).message;
+      error = errorMessage(err, 'project update failed');
     }
   }
 </script>

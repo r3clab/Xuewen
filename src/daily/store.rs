@@ -3,8 +3,9 @@ use sqlx::SqlitePool;
 use std::collections::HashSet;
 
 /// One recommended paper in a daily batch. Columns match `daily_papers`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DailyPaper {
+    #[serde(skip)]
     pub batch_date: String,
     /// 1-based, by descending score.
     pub rank: i64,
@@ -12,17 +13,24 @@ pub struct DailyPaper {
     pub arxiv_id: String,
     pub title: String,
     pub authors: Vec<String>,
+    #[serde(rename = "abstract")]
     pub abstract_text: String,
     pub categories: Vec<String>,
     pub score: f64,
-    /// `None` when TL;DR generation failed (widget falls back to abstract).
-    pub tldr: Option<String>,
     pub abs_url: String,
     pub pdf_url: String,
     /// Structured five-part summary; `None` for old rows or failed generation.
     pub summary: Option<crate::summary::Summary>,
     /// First GitHub repository URL found in the paper text.
     pub code_url: Option<String>,
+}
+
+impl DailyPaper {
+    /// `None` when summary generation failed (the widget falls back to the
+    /// abstract).
+    pub fn tldr(&self) -> Option<&str> {
+        self.summary.as_ref().map(|s| s.tldr.as_str())
+    }
 }
 
 /// Raw `daily_papers` row; the JSON-in-TEXT columns decode in `into_paper`.
@@ -37,7 +45,6 @@ struct DailyPaperRow {
     abstract_text: String,
     categories: String,
     score: f64,
-    tldr: Option<String>,
     abs_url: String,
     pdf_url: String,
     summary: Option<String>,
@@ -67,7 +74,6 @@ impl DailyPaperRow {
             abstract_text: self.abstract_text,
             categories: serde_json::from_str(&self.categories)?,
             score: self.score,
-            tldr: self.tldr,
             abs_url: self.abs_url,
             pdf_url: self.pdf_url,
             summary,
@@ -76,12 +82,38 @@ impl DailyPaperRow {
     }
 }
 
+/// `daily_runs.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+pub(crate) enum DailyStatus {
+    Ok,
+    /// The feed had no new candidates.
+    Empty,
+    Failed,
+}
+
+impl DailyStatus {
+    /// Whether the day is done; a failed run is retried.
+    pub(crate) fn settled(self) -> bool {
+        self != Self::Failed
+    }
+}
+
+impl std::fmt::Display for DailyStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ok => "ok",
+            Self::Empty => "empty",
+            Self::Failed => "failed",
+        })
+    }
+}
+
 /// Outcome row for one day's run. Columns match `daily_runs`.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub(crate) struct DailyRun {
     pub(crate) batch_date: String,
-    /// "ok" | "empty" | "failed"
-    pub(crate) status: String,
+    pub(crate) status: DailyStatus,
     /// Candidates after dedup, before top-N.
     pub(crate) papers_found: i64,
     /// Failure detail; also set on 'ok' runs where summaries failed.
@@ -108,7 +140,7 @@ pub(crate) async fn record_run(pool: &SqlitePool, run: &DailyRun) -> Result<()> 
            error = excluded.error, ran_at = excluded.ran_at",
     )
     .bind(&run.batch_date)
-    .bind(&run.status)
+    .bind(run.status)
     .bind(run.papers_found)
     .bind(&run.error)
     .bind(&run.ran_at)
@@ -152,8 +184,8 @@ pub async fn replace_batch(
         sqlx::query(
             "INSERT INTO daily_papers
                (batch_date, rank, arxiv_id, title, authors, abstract,
-                categories, score, tldr, abs_url, pdf_url, summary, code_url)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                categories, score, abs_url, pdf_url, summary, code_url)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(batch_date)
         .bind(p.rank)
@@ -163,7 +195,6 @@ pub async fn replace_batch(
         .bind(&p.abstract_text)
         .bind(serde_json::to_string(&p.categories)?)
         .bind(p.score)
-        .bind(&p.tldr)
         .bind(&p.abs_url)
         .bind(&p.pdf_url)
         .bind(p.summary.as_ref().map(serde_json::to_string).transpose()?)
@@ -184,7 +215,7 @@ pub(crate) async fn latest_batch(pool: &SqlitePool) -> Result<Option<(String, Ve
     let Some((date,)) = date else { return Ok(None) };
     let rows: Vec<DailyPaperRow> = sqlx::query_as(
         "SELECT batch_date, rank, arxiv_id, title, authors, abstract,
-                categories, score, tldr, abs_url, pdf_url, summary, code_url
+                categories, score, abs_url, pdf_url, summary, code_url
          FROM daily_papers WHERE batch_date = ? ORDER BY rank",
     )
     .bind(&date)
@@ -221,21 +252,14 @@ pub(crate) async fn library_arxiv_ids(pool: &SqlitePool) -> Result<HashSet<Strin
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id,)| super::feed::strip_version(&id))
+        .map(|(id,)| crate::library::model::canonical_arxiv(&id))
         .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn pool() -> sqlx::SqlitePool {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", dir.path().join("t.db").display());
-        let p = crate::db::connect(&url).await.unwrap();
-        std::mem::forget(dir);
-        p
-    }
+    use crate::library::model::{ARXIV_ABS_BASE, ARXIV_PDF_BASE};
 
     fn paper(date: &str, rank: i64, id: &str) -> DailyPaper {
         DailyPaper {
@@ -247,9 +271,8 @@ mod tests {
             abstract_text: "We do things.".into(),
             categories: vec!["cs.AI".into()],
             score: 0.5,
-            tldr: Some("Short.".into()),
-            abs_url: format!("https://arxiv.org/abs/{id}"),
-            pdf_url: format!("https://arxiv.org/pdf/{id}"),
+            abs_url: format!("{ARXIV_ABS_BASE}/{id}"),
+            pdf_url: format!("{ARXIV_PDF_BASE}/{id}"),
             summary: None,
             code_url: None,
         }
@@ -257,21 +280,26 @@ mod tests {
 
     #[tokio::test]
     async fn record_run_upserts_by_date() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let mut run = DailyRun {
             batch_date: "2026-07-10".into(),
-            status: "failed".into(),
+            status: DailyStatus::Failed,
             papers_found: 0,
             error: Some("boom".into()),
             ran_at: "2026-07-10T09:00:00Z".into(),
         };
         record_run(&pool, &run).await.unwrap();
-        run.status = "ok".into();
+        let stored: String = sqlx::query_scalar("SELECT status FROM daily_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "failed");
+        run.status = DailyStatus::Ok;
         run.papers_found = 5;
         run.error = None;
         record_run(&pool, &run).await.unwrap();
         let got = get_run(&pool, "2026-07-10").await.unwrap().unwrap();
-        assert_eq!(got.status, "ok");
+        assert_eq!(got.status, DailyStatus::Ok);
         assert_eq!(got.papers_found, 5);
         assert_eq!(got.error, None);
         assert!(get_run(&pool, "2026-07-09").await.unwrap().is_none());
@@ -279,12 +307,12 @@ mod tests {
 
     #[tokio::test]
     async fn latest_run_is_the_newest_day() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         assert!(latest_run(&pool).await.unwrap().is_none());
         for date in ["2026-07-11", "2026-07-09"] {
             let run = DailyRun {
                 batch_date: date.into(),
-                status: "empty".into(),
+                status: DailyStatus::Empty,
                 papers_found: 0,
                 error: None,
                 ran_at: format!("{date}T09:00:00Z"),
@@ -297,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_batch_and_latest_batch_roundtrip() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         replace_batch(&pool, "2026-07-09", &[paper("2026-07-09", 1, "2507.00001")])
             .await
             .unwrap();
@@ -331,13 +359,13 @@ mod tests {
 
     #[tokio::test]
     async fn latest_batch_none_when_empty() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         assert!(latest_batch(&pool).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn prune_deletes_older_batches_and_runs() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         for date in ["2026-06-01", "2026-07-10"] {
             replace_batch(&pool, date, &[paper(date, 1, "x")])
                 .await
@@ -346,7 +374,7 @@ mod tests {
                 &pool,
                 &DailyRun {
                     batch_date: date.into(),
-                    status: "ok".into(),
+                    status: DailyStatus::Ok,
                     papers_found: 1,
                     error: None,
                     ran_at: format!("{date}T09:00:00Z"),
@@ -364,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn library_arxiv_ids_includes_trashed() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let mut p = crate::library::model::Paper {
             id: "p1".into(),
             content_hash: "h1".into(),
@@ -406,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn library_arxiv_ids_strips_versions() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let p = crate::library::model::Paper {
             id: "p1".into(),
             content_hash: "h1".into(),
@@ -439,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn summary_and_code_url_roundtrip() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let mut p = paper("2026-07-10", 1, "2507.00001");
         p.summary = Some(crate::summary::Summary {
             tldr: "One line.".into(),
@@ -462,5 +490,31 @@ mod tests {
         let (_, papers) = latest_batch(&pool).await.unwrap().unwrap();
         assert!(papers[0].summary.is_none());
         assert!(papers[0].code_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_tldr_copy_folds_it_into_a_summary_lacking_one() {
+        let (_dir, pool) = crate::db::pool_before_migration("drop daily tldr").await;
+        let full =
+            r#"{"tldr":"Kept.","problem":"P","approach":"A","results":"R","limitations":"L"}"#;
+        let tldr_less = r#"{"problem":"P","approach":"A","results":"R","limitations":"L"}"#;
+        for (rank, summary) in [(1, Some(tldr_less)), (2, Some(full)), (3, None)] {
+            sqlx::query(
+                "INSERT INTO daily_papers (batch_date, rank, arxiv_id, title, authors, abstract, \
+                 categories, score, tldr, abs_url, pdf_url, summary) \
+                 VALUES ('2026-07-10', ?, ?, 't', '[]', 'a', '[]', 0.5, 'Copied.', 'u', 'u', ?)",
+            )
+            .bind(rank)
+            .bind(format!("2507.0000{rank}"))
+            .bind(summary)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let (_, papers) = latest_batch(&pool).await.unwrap().unwrap();
+        let tldrs: Vec<Option<&str>> = papers.iter().map(DailyPaper::tldr).collect();
+        assert_eq!(tldrs, [Some("Copied."), Some("Kept."), None]);
     }
 }

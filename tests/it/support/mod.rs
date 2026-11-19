@@ -48,47 +48,29 @@ pub fn write_test_pdf(path: &Path, lines: &[&str]) {
     std::fs::write(path, bytes).unwrap();
 }
 
-/// A migrated pool plus a library root, seeded with one active, resolved
-/// paper `id` (see `pool_with_paper`). The backing temp dir is leaked so both
-/// stay valid for the caller's duration.
-pub async fn pool_and_root_with_paper(id: &str) -> (sqlx::SqlitePool, PathBuf) {
+/// The pool and library root live in the returned temp dir, which the caller
+/// keeps alive for as long as it uses them.
+pub async fn pool_and_root_with_paper(id: &str) -> (sqlx::SqlitePool, PathBuf, tempfile::TempDir) {
     let (pool, dir) = xuewen::testutil::pool_with_paper(id).await;
     let library_root = dir.path().join("library");
     std::fs::create_dir_all(&library_root).unwrap();
-    std::mem::forget(dir);
-    (pool, library_root)
+    (pool, library_root, dir)
 }
 
-/// Minimal loadable config with all paths under `dir`.
+/// `data_dir` is `dir`, so the database is the one `temp_pool` creates there.
+pub fn write_config(dir: &Path, extra: &str) -> PathBuf {
+    let data_dir = toml::Value::from(dir.display().to_string());
+    let path = dir.join("xuewen.toml");
+    std::fs::write(&path, format!("data_dir = {data_dir}\n{extra}")).unwrap();
+    path
+}
+
 pub fn test_cfg(dir: &Path) -> xuewen::config::Config {
     test_cfg_with(dir, "")
 }
 
 pub fn test_cfg_with(dir: &Path, extra: &str) -> xuewen::config::Config {
-    let f = dir.join("xuewen.toml");
-    std::fs::write(
-        &f,
-        format!(
-            "inbox_dir = {:?}\nlibrary_root = {:?}\ndatabase_url = \"sqlite::memory:\"\n\n[search]\nindex_dir = {:?}\nvector_dir = {:?}\n{extra}",
-            dir.join("inbox"),
-            dir.join("library"),
-            dir.join("search-index"),
-            dir.join("search-vectors"),
-        ),
-    )
-    .unwrap();
-    xuewen::config::Config::load(&f).unwrap()
-}
-
-// Upstreams refuse instantly -> lookups degrade to Unresolved (offline, fast).
-pub fn offline_resolver() -> Resolver {
-    Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string())
+    xuewen::config::Config::load(&write_config(dir, extra)).unwrap()
 }
 
 pub fn ingest(pool: sqlx::SqlitePool, dir: &Path, resolver: Resolver, fetcher: Fetcher) -> Ingest {

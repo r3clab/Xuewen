@@ -44,14 +44,16 @@ fn is_pdf(p: &Path) -> bool {
 
 /// List the top-level `*.pdf` files currently in the inbox (non-recursive, so the
 /// `_processed`/`_failed` subdirectories are skipped). Sorted for determinism.
-fn catch_up_scan(inbox: &Path) -> Result<Vec<PathBuf>> {
+async fn catch_up_scan(inbox: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    if !inbox.exists() {
-        return Ok(out);
-    }
-    for entry in std::fs::read_dir(inbox)? {
-        let path = entry?.path();
-        if path.is_file() && is_pdf(&path) {
+    let mut entries = match tokio::fs::read_dir(inbox).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if is_pdf(&path) && tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
             out.push(path);
         }
     }
@@ -123,10 +125,12 @@ async fn ingest_with_retry(
     Err(last_err.expect("at least one attempt ran"))
 }
 
-/// Stabilize then ingest one path; on repeated failure, quarantine to `failed_dir`.
-async fn process_one(ctx: &IngestCtx, failed_dir: &Path, cfg: &WatchConfig, path: &Path) {
+/// Stabilize then ingest one path; on repeated failure, quarantine to
+/// `failed_dir`. Returns whether an ingest ran: even a failed one can have
+/// stored the paper before failing to archive the file.
+async fn process_one(ctx: &IngestCtx, failed_dir: &Path, cfg: &WatchConfig, path: &Path) -> bool {
     if !stabilize(path, cfg).await {
-        return; // file vanished (e.g. already processed by a prior event)
+        return false; // file vanished (e.g. already processed by a prior event)
     }
     match ingest_with_retry(ctx, cfg, path).await {
         Ok(outcome) => tracing::info!("processed {}: {outcome:?}", path.display()),
@@ -140,11 +144,18 @@ async fn process_one(ctx: &IngestCtx, failed_dir: &Path, cfg: &WatchConfig, path
             }
         }
     }
+    true
 }
 
 /// Run the watch loop: catch up on existing files, then watch for new ones until
-/// `cancel` fires. Blocks (the `notify` watcher is held for the loop's life).
-pub async fn run(ctx: &IngestCtx, inbox: &Path, cancel: CancellationToken) -> Result<()> {
+/// `cancel` fires, calling `library_changed` after every ingest. Blocks (the
+/// `notify` watcher is held for the loop's life).
+pub async fn run(
+    ctx: &IngestCtx,
+    inbox: &Path,
+    cancel: CancellationToken,
+    library_changed: &(dyn Fn() + Sync),
+) -> Result<()> {
     let cfg = WatchConfig::default();
     let failed_dir = ctx.dirs.failed_dir.clone();
 
@@ -173,11 +184,13 @@ pub async fn run(ctx: &IngestCtx, inbox: &Path, cancel: CancellationToken) -> Re
     tracing::info!("watching {}", inbox.display());
 
     // Catch-up: ingest anything already sitting in the inbox.
-    for path in catch_up_scan(inbox)? {
+    for path in catch_up_scan(inbox).await? {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        process_one(ctx, &failed_dir, &cfg, &path).await;
+        if process_one(ctx, &failed_dir, &cfg, &path).await {
+            library_changed();
+        }
     }
 
     loop {
@@ -189,7 +202,9 @@ pub async fn run(ctx: &IngestCtx, inbox: &Path, cancel: CancellationToken) -> Re
                 None => break,
             },
         };
-        process_one(ctx, &failed_dir, &cfg, &path).await;
+        if process_one(ctx, &failed_dir, &cfg, &path).await {
+            library_changed();
+        }
     }
     Ok(())
 }
@@ -199,33 +214,10 @@ mod tests {
     use super::*;
     use crate::ingest::pipeline::Libraries;
     use crate::metadata::resolve::Resolver;
-    use printpdf::*;
+    use crate::testutil::write_pdf;
     use sqlx::SqlitePool;
     use std::fs::File;
     use std::io::Write;
-
-    fn write_pdf(path: &Path, line: &str) {
-        let mut doc = PdfDocument::new("t");
-        let ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(12.0),
-            },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(15.0), Mm(280.0)),
-            },
-            Op::ShowText {
-                items: vec![TextItem::Text(line.to_string())],
-            },
-            Op::EndTextSection,
-        ];
-        let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
-        let bytes = doc
-            .with_pages(vec![page])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(path, bytes).unwrap();
-    }
 
     fn fast_cfg() -> WatchConfig {
         WatchConfig {
@@ -237,25 +229,13 @@ mod tests {
         }
     }
 
-    // A resolver whose upstreams refuse instantly -> every lookup degrades to
-    // Unresolved without any real network wait.
-    fn offline_resolver() -> Resolver {
-        Resolver::with_bases(
-            None,
-            "http://127.0.0.1:1".to_string(),
-            "http://127.0.0.1:1".to_string(),
-        )
-        .unwrap()
-        .with_dblp_base("http://127.0.0.1:1".to_string())
-    }
-
     async fn temp_pool(dir: &Path) -> SqlitePool {
         let url = format!("sqlite:{}", dir.join("library.db").display());
         crate::db::connect(&url).await.unwrap()
     }
 
-    #[test]
-    fn catch_up_scan_lists_top_level_pdfs_only() {
+    #[tokio::test]
+    async fn catch_up_scan_lists_top_level_pdfs_only() {
         let dir = tempfile::tempdir().unwrap();
         let inbox = dir.path();
         File::create(inbox.join("b.pdf")).unwrap();
@@ -264,7 +244,11 @@ mod tests {
         std::fs::create_dir_all(inbox.join("_processed")).unwrap();
         File::create(inbox.join("_processed/old.pdf")).unwrap();
 
-        let found = catch_up_scan(inbox).unwrap();
+        assert!(catch_up_scan(&inbox.join("missing"))
+            .await
+            .unwrap()
+            .is_empty());
+        let found = catch_up_scan(inbox).await.unwrap();
         assert_eq!(
             found,
             vec![inbox.join("a.pdf"), inbox.join("b.pdf")] // sorted, top-level only
@@ -288,13 +272,13 @@ mod tests {
         let inbox = dir.path().join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
         let pdf = inbox.join("paper.pdf");
-        write_pdf(&pdf, "A Paper With No Identifier Here");
+        write_pdf(&pdf, &["A Paper With No Identifier Here"]);
 
         let pool = temp_pool(dir.path()).await;
         let ctx = IngestCtx::new(
             pool.clone(),
             Libraries::under(&inbox, &dir.path().join("library")),
-            offline_resolver(),
+            Resolver::offline(),
             None,
         );
 
@@ -321,7 +305,7 @@ mod tests {
         let ctx = IngestCtx::new(
             pool.clone(),
             Libraries::under(&inbox, &dir.path().join("library")),
-            offline_resolver(),
+            Resolver::offline(),
             None,
         );
         let failed = inbox.join("_failed");

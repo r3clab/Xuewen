@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -11,6 +11,7 @@ use super::fetch_paper;
 use crate::app::code::CloneMode;
 use crate::app::{App, Trash};
 use crate::web::error::ApiError;
+use crate::web::extract::{ApiJson, ApiPath};
 
 pub(super) fn routes() -> Router<App> {
     Router::new().route(
@@ -30,7 +31,8 @@ struct CodeAttachment {
     pub(crate) code: Option<crate::agent::store::PaperCode>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, TS)]
+#[ts(export)]
 struct CodeBody {
     repo_url: String,
 }
@@ -39,10 +41,9 @@ struct CodeBody {
 /// clone runs in the background; poll GET for the outcome.
 async fn set_paper_code(
     State(app): State<App>,
-    Path(id): Path<String>,
-    Json(body): Json<CodeBody>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<CodeBody>,
 ) -> Result<Response, ApiError> {
-    app.agent()?;
     let paper = fetch_paper(&app, &id, Trash::Deny, "code").await?;
     let code = app
         .attach_code(&paper, &body.repo_url, CloneMode::Background)
@@ -60,7 +61,7 @@ async fn set_paper_code(
 
 async fn get_paper_code(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     let p = fetch_paper(&app, &id, Trash::Deny, "code").await?;
     let code = crate::agent::store::get_paper_code(app.pool(), &p.id)
@@ -75,7 +76,7 @@ async fn get_paper_code(
 
 async fn delete_paper_code(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     let p = fetch_paper(&app, &id, Trash::Deny, "code").await?;
     app.detach_code(&p)

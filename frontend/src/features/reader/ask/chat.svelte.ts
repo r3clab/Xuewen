@@ -1,7 +1,10 @@
 import { deleteChatThread, getChatModels, getChatThread, postChatMessage } from './api';
 import { readLocal, writeLocal } from '$shared/browser/persist';
-import { readSse } from '$shared/api/sse';
+import { sseData } from '$shared/api/sse';
+import { errorMessage } from '$shared/errors';
 import type { ChatModelInfo } from '$shared/api/generated/ChatModelInfo';
+import type { ChatRequest } from '$shared/api/generated/ChatRequest';
+import type { ChatSseEvent } from '$shared/api/generated/ChatSseEvent';
 import type { ChatTurnRow } from '$shared/api/generated/ChatTurnRow';
 import type { ToolCall } from '$shared/api/generated/ToolCall';
 
@@ -101,45 +104,49 @@ export async function sendChatMessage(): Promise<void> {
   let failure: string | null = null;
   let completed = false;
   try {
-    const resp = await postChatMessage(
+    const stream = await postChatMessage(
       chat.paperId,
-      { model_id: chat.modelId, message: text },
+      { model_id: chat.modelId, message: text } satisfies ChatRequest,
       myAborter.signal,
     );
-    await readSse(resp.body!, (e) => {
+    for await (const data of sseData(stream)) {
       if (my !== session) return;
-      if (e.event === 'delta') {
-        chat.streaming = (chat.streaming ?? '') + (JSON.parse(e.data).text ?? '');
-      } else if (e.event === 'tool') {
-        const t = JSON.parse(e.data) as { name?: string; detail?: string };
-        chat.streamTools.push({ name: String(t.name ?? ''), detail: String(t.detail ?? '') });
-      } else if (e.event === 'error') {
-        failure = String(JSON.parse(e.data).message ?? 'unknown error');
-      } else if (e.event === 'done') {
-        completed = true;
-        const label = chat.models.find((m) => m.id === chat.modelId)?.label ?? null;
-        const doneId: unknown = JSON.parse(e.data).id;
-        chat.messages.push({
-          id: localId--,
-          role: 'user',
-          content: text,
-          model: null,
-          created_at: '',
-          tools: null,
-        });
-        chat.messages.push({
-          id: doneId == null ? localId-- : Number(doneId),
-          role: 'assistant',
-          content: chat.streaming ?? '',
-          model: label,
-          created_at: '',
-          tools: chat.streamTools.length ? [...chat.streamTools] : null,
-        });
-        chat.pending = null;
-        chat.streaming = null;
-        chat.streamTools = [];
+      const event = JSON.parse(data) as ChatSseEvent;
+      switch (event.type) {
+        case 'delta':
+          chat.streaming = (chat.streaming ?? '') + event.text;
+          break;
+        case 'tool':
+          chat.streamTools.push({ name: event.name, detail: event.detail });
+          break;
+        case 'error':
+          failure = event.message;
+          break;
+        case 'done': {
+          completed = true;
+          const label = chat.models.find((m) => m.id === chat.modelId)?.label ?? null;
+          chat.messages.push({
+            id: localId--,
+            role: 'user',
+            content: text,
+            model: null,
+            created_at: '',
+            tools: null,
+          });
+          chat.messages.push({
+            id: event.id,
+            role: 'assistant',
+            content: chat.streaming ?? '',
+            model: label,
+            created_at: '',
+            tools: chat.streamTools.length ? [...chat.streamTools] : null,
+          });
+          chat.pending = null;
+          chat.streaming = null;
+          chat.streamTools = [];
+        }
       }
-    });
+    }
     if (my !== session) return;
     if (failure) throw new Error(failure);
     if (!completed) throw new Error('the connection closed before the reply finished');
@@ -155,7 +162,7 @@ export async function sendChatMessage(): Promise<void> {
     chat.draft = text; // give the message back for editing or resend
     chat.error = aborted
       ? null
-      : `The model request failed: ${(err as Error).message} Send again to retry.`;
+      : `The model request failed: ${errorMessage(err, 'unknown error')} Send again to retry.`;
   } finally {
     if (my === session) chat.busy = false;
     if (aborter === myAborter) aborter = null; // never null a newer send's controller

@@ -4,19 +4,22 @@ pub mod fts;
 mod fusion;
 pub mod indexer;
 mod planner;
-mod query;
+pub(crate) mod query;
 mod semantic;
+mod snippet;
 mod store;
 pub mod vector;
 
 pub(crate) use semantic::Semantic;
 pub use semantic::SemanticTier;
+pub use snippet::{Snippet, SnippetPart};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use ts_rs::TS;
 
 use crate::config::SearchConfig;
 use crate::library::model::Paper;
@@ -28,13 +31,13 @@ const SEMANTIC_SNIPPET_CHARS: usize = 200;
 
 pub struct SearchRequest {
     pub q: String,
-    /// `author:` qualifier terms — each compiled to a Tantivy
-    /// `authors:"…"`-scoped phrase, ANDed with the free text in `q`.
+    /// `author:` qualifier terms — each a phrase on the authors field, ANDed
+    /// with the free text in `q`.
     pub author_terms: Vec<String>,
     pub fields: fts::FieldSel,
     pub keyword: bool,
     pub semantic: bool,
-    pub status: Option<String>,
+    pub status: Option<crate::library::model::PaperStatus>,
     pub project: Option<String>,
     pub tag: Option<String>,
     pub starred: Option<bool>,
@@ -49,7 +52,7 @@ pub(crate) struct RequestOverrides {
     pub(crate) semantic: bool,
     /// CSV field list, used only when the query has no `in:` qualifier.
     pub(crate) fields: Option<String>,
-    pub(crate) status: Option<String>,
+    pub(crate) status: Option<crate::library::model::PaperStatus>,
     /// Project id (not name — `project:` NAMEs live in the query string).
     pub(crate) project: Option<String>,
     pub(crate) tag: Option<String>,
@@ -98,61 +101,88 @@ impl SearchRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "SemanticAvailability")]
 pub struct SemanticState {
     pub available: bool,
-    pub(crate) reason: Option<String>,
+    pub reason: Option<String>,
 }
 
-/// Which engine(s) matched a paper. Stringified (lowercase) only at the
-/// web/CLI boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Engine {
+impl SemanticState {
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Which engine(s) matched a paper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, rename = "SearchEngine")]
+pub enum Engine {
     Keyword,
     Semantic,
     Both,
 }
 
-impl Engine {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Engine::Keyword => "keyword",
-            Engine::Semantic => "semantic",
-            Engine::Both => "both",
+/// Why a paper matched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "SearchMatch")]
+pub struct MatchInfo {
+    pub engine: Engine,
+    pub field: fts::FieldName,
+    pub snippet: Snippet,
+    pub page: Option<i64>,
+}
+
+/// One hit, with the paper in whatever shape the consumer shows it: the
+/// service returns the `Paper`, `/api/search` a row summary, and the CLI
+/// reads back only the labels it prints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "SearchResultItem")]
+pub struct SearchHit<P> {
+    pub paper: P,
+    #[serde(rename = "match")]
+    pub matched: MatchInfo,
+}
+
+/// The body of `GET /api/search`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "SearchResponse")]
+pub struct SearchResults<P> {
+    pub semantic: SemanticState,
+    pub results: Vec<SearchHit<P>>,
+}
+
+impl<P> SearchResults<P> {
+    pub(crate) fn map_papers<Q>(self, mut f: impl FnMut(P) -> Q) -> SearchResults<Q> {
+        SearchResults {
+            semantic: self.semantic,
+            results: self
+                .results
+                .into_iter()
+                .map(|h| SearchHit {
+                    paper: f(h.paper),
+                    matched: h.matched,
+                })
+                .collect(),
         }
     }
 }
 
-impl std::fmt::Display for Engine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MatchInfo {
-    pub(crate) engine: Engine,
-    pub field: fts::FieldName,
-    /// HTML-safe (escaped text, <mark> highlights only).
-    pub snippet: String,
-    pub(crate) page: Option<i64>,
-}
-
-pub struct SearchOutcome {
-    pub semantic: SemanticState,
-    pub results: Vec<(Paper, MatchInfo)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TierCounts {
     pub(crate) indexed: i64,
     pub pending: i64,
     pub failed: i64,
 }
 
-/// The CLI deserializes `GET /api/search/status` into this, so field names
-/// must match that JSON.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// The body of `GET /api/search/status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "SearchStatus")]
 pub struct IndexStatus {
     pub fts: TierCounts,
     pub(crate) vectors: TierCounts,
@@ -189,7 +219,7 @@ impl SearchService {
         }))
     }
 
-    /// Dependency-injection constructor for tests.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_with(
         pool: SqlitePool,
         fts: fts::FtsIndex,
@@ -203,50 +233,51 @@ impl SearchService {
         })
     }
 
-    /// Tantivy's commit/reload/search do real fsync-backed disk I/O; these
-    /// facades run them on the blocking pool so a commit-heavy sweep or a
+    /// Tantivy's writes, commits and searches do real fsync-backed disk I/O;
+    /// this runs them on the blocking pool so a commit-heavy sweep or a
     /// large-segment search can't stall the tokio workers serving HTTP.
+    async fn on_fts<T: Send + 'static>(
+        &self,
+        what: &'static str,
+        op: impl FnOnce(&fts::FtsIndex) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let fts = Arc::clone(&self.fts);
+        tokio::task::spawn_blocking(move || op(&fts))
+            .await
+            .with_context(|| format!("fts {what} task panicked"))?
+    }
+
     async fn fts_search(
         &self,
         q: String,
+        authors: Vec<String>,
         sel: fts::FieldSel,
-        limit: usize,
         scope: Option<Vec<String>>,
     ) -> Result<Vec<fts::FtsHit>> {
-        let fts = Arc::clone(&self.fts);
-        tokio::task::spawn_blocking(move || fts.search(&q, &sel, limit, scope.as_deref()))
-            .await
-            .context("fts search task panicked")?
+        self.on_fts("search", move |fts| {
+            fts.search(&q, &authors, &sel, KEYWORD_LIMIT, scope.as_deref())
+        })
+        .await
     }
 
-    pub(crate) async fn fts_upsert(&self, doc: fts::PaperDoc) -> Result<()> {
-        let fts = Arc::clone(&self.fts);
-        tokio::task::spawn_blocking(move || fts.upsert(&doc))
+    pub(crate) async fn fts_stage_upsert(&self, doc: fts::PaperDoc) -> Result<()> {
+        self.on_fts("upsert", move |fts| fts.stage_upsert(&doc))
             .await
-            .context("fts upsert task panicked")?
     }
 
-    pub(crate) async fn fts_delete(&self, paper_id: String) -> Result<()> {
-        let fts = Arc::clone(&self.fts);
-        tokio::task::spawn_blocking(move || fts.delete(&paper_id))
-            .await
-            .context("fts delete task panicked")?
+    pub(crate) async fn fts_stage_deletes(&self, paper_ids: Vec<String>) -> Result<()> {
+        self.on_fts("delete", move |fts| {
+            paper_ids.iter().try_for_each(|id| fts.stage_delete(id))
+        })
+        .await
     }
 
-    /// Take the Tantivy writer lock, retrying every 250ms until `wait` has
-    /// passed (`Duration::ZERO` tries once).
-    pub(crate) async fn claim_writer(&self, wait: Duration) -> Result<fts::WriterClaim> {
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            let fts = Arc::clone(&self.fts);
-            let claim = tokio::task::spawn_blocking(move || fts.claim_writer())
-                .await
-                .context("fts writer claim task panicked")??;
-            if claim == fts::WriterClaim::Claimed || tokio::time::Instant::now() >= deadline {
-                return Ok(claim);
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
+    pub(crate) async fn fts_commit(&self) -> Result<()> {
+        self.on_fts("commit", |fts| fts.commit()).await
+    }
+
+    pub(crate) async fn claim_writer(&self) -> Result<fts::WriterClaim> {
+        self.on_fts("writer claim", |fts| fts.claim_writer()).await
     }
 
     pub(crate) fn release_writer(&self) {
@@ -264,14 +295,6 @@ impl SearchService {
         self.notify.notify_one();
     }
 
-    /// Wait for a wake() or the periodic tick, whichever comes first.
-    async fn wait_work(&self, tick: Duration) {
-        tokio::select! {
-            _ = self.notify.notified() => {}
-            _ = tokio::time::sleep(tick) => {}
-        }
-    }
-
     fn semantic_config_state(&self) -> SemanticState {
         let reason = self.semantic.reason();
         SemanticState {
@@ -280,25 +303,20 @@ impl SearchService {
         }
     }
 
-    pub async fn search(&self, req: &SearchRequest) -> Result<SearchOutcome> {
+    pub async fn search(&self, req: &SearchRequest) -> Result<SearchResults<Paper>> {
         let q = req.q.trim();
         let mut semantic = self.semantic_config_state();
         // Only title/abstract/body are embedded; a query scoped to authors or
         // notes alone has nothing for the vector tier to match.
         if !req.fields.semantic_applicable() && semantic.available {
-            semantic = SemanticState {
-                available: false,
-                reason: Some(
-                    "semantic search does not apply to a query scoped to authors or notes".into(),
-                ),
-            };
+            semantic = SemanticState::unavailable(
+                "semantic search does not apply to a query scoped to authors or notes",
+            );
         }
-
         if q.is_empty() && !req.author_terms.is_empty() && semantic.available {
-            semantic = SemanticState {
-                available: false,
-                reason: Some("semantic search does not apply to an authors-only query".into()),
-            };
+            semantic = SemanticState::unavailable(
+                "semantic search does not apply to an authors-only query",
+            );
         }
 
         // Resolve org filters to a paper-id scope BEFORE either engine runs:
@@ -306,7 +324,7 @@ impl SearchService {
         // cutoff would silently drop matches ranked past it exactly when a
         // qualifier narrows a broad term.
         let filter = crate::library::papers::PaperFilter {
-            status: req.status.clone(),
+            status: req.status,
             project: req.project.clone(),
             tag: req.tag.clone(),
             starred: req.starred,
@@ -322,16 +340,20 @@ impl SearchService {
         };
         if scope.as_ref().is_some_and(|ids| ids.is_empty()) {
             // Nothing satisfies the filter; don't bother either engine.
-            return Ok(SearchOutcome {
+            return Ok(SearchResults {
                 semantic,
                 results: Vec::new(),
             });
         }
 
         let keyword_hits = if req.keyword {
-            let keyword_q = query::compose_keyword_query(&req.author_terms, q);
-            self.fts_search(keyword_q, req.fields, KEYWORD_LIMIT, scope.clone())
-                .await?
+            self.fts_search(
+                q.to_string(),
+                req.author_terms.clone(),
+                req.fields,
+                scope.clone(),
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -351,10 +373,7 @@ impl SearchService {
                     }
                     Err(e) => {
                         tracing::warn!("semantic search failed: {e}");
-                        semantic = SemanticState {
-                            available: false,
-                            reason: Some(e.to_string()),
-                        };
+                        semantic = SemanticState::unavailable(e.to_string());
                     }
                 }
             }
@@ -366,38 +385,41 @@ impl SearchService {
 
         let papers = store::papers_by_ids_ordered(&self.pool, &fused).await?;
 
-        let kw_by_id: std::collections::HashMap<&str, &fts::FtsHit> = keyword_hits
+        let mut kw_by_id: HashMap<&str, &fts::FtsHit> = keyword_hits
             .iter()
             .map(|h| (h.paper_id.as_str(), h))
             .collect();
-        let sem_by_id: std::collections::HashMap<&str, &vector::VecHit> = semantic_best
+        let semantic_only: Vec<&vector::VecHit> = semantic_best
             .iter()
-            .map(|h| (h.paper_id.as_str(), h))
+            .filter(|h| !kw_by_id.contains_key(h.paper_id.as_str()))
             .collect();
+        let mut semantic_matches = self.semantic_matches(&semantic_only).await?;
+        let semantic_ids: std::collections::HashSet<&str> =
+            semantic_best.iter().map(|h| h.paper_id.as_str()).collect();
 
         let mut results = Vec::with_capacity(papers.len());
-        for p in papers {
-            let kw = kw_by_id.get(p.id.as_str());
-            let sem = sem_by_id.get(p.id.as_str());
-            let info = match (kw, sem) {
-                (Some(k), Some(_)) => MatchInfo {
-                    engine: Engine::Both,
+        for paper in papers {
+            let matched = match kw_by_id.remove(paper.id.as_str()) {
+                Some(k) => MatchInfo {
+                    engine: if semantic_ids.contains(paper.id.as_str()) {
+                        Engine::Both
+                    } else {
+                        Engine::Keyword
+                    },
                     field: k.field,
-                    snippet: k.snippet_html.clone(),
+                    snippet: k.snippet.clone(),
                     page: None,
                 },
-                (Some(k), None) => MatchInfo {
-                    engine: Engine::Keyword,
-                    field: k.field,
-                    snippet: k.snippet_html.clone(),
-                    page: None,
+                // A semantic hit whose chunk text is gone (re-chunked since
+                // the vector was written) has nothing to show.
+                None => match semantic_matches.remove(paper.id.as_str()) {
+                    Some(m) => m,
+                    None => continue,
                 },
-                (None, Some(s)) => self.semantic_match_info(s).await,
-                (None, None) => continue, // cannot happen: fused ⊆ union
             };
-            results.push((p, info));
+            results.push(SearchHit { paper, matched });
         }
-        Ok(SearchOutcome { semantic, results })
+        Ok(SearchResults { semantic, results })
     }
 
     async fn semantic_search(
@@ -418,36 +440,41 @@ impl SearchService {
             .await
     }
 
-    /// Snippet for a semantic-only hit: the matching chunk's text (escaped, trimmed).
-    async fn semantic_match_info(&self, hit: &vector::VecHit) -> MatchInfo {
-        let (field, page) = if hit.seq == 0 {
-            (fts::FieldName::Abstract, None)
-        } else {
-            (fts::FieldName::Body, hit.page)
-        };
-        let text = store::chunk_text(&self.pool, &hit.paper_id, hit.seq)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.text)
-            .unwrap_or_default();
-        let trimmed: String = text.chars().take(SEMANTIC_SNIPPET_CHARS).collect();
-        let ellipsis = if text.chars().count() > SEMANTIC_SNIPPET_CHARS {
-            "…"
-        } else {
-            ""
-        };
-        MatchInfo {
-            engine: Engine::Semantic,
-            field,
-            snippet: format!("{}{}", fts::html_escape(&trimmed), ellipsis),
-            page,
-        }
+    /// Snippets for semantic-only hits: each matching chunk's text, trimmed.
+    /// Keyed by paper id; a hit whose chunk is missing gets none.
+    async fn semantic_matches(
+        &self,
+        hits: &[&vector::VecHit],
+    ) -> Result<HashMap<String, MatchInfo>> {
+        let keys: Vec<(String, i64)> = hits.iter().map(|h| (h.paper_id.clone(), h.seq)).collect();
+        let mut texts = store::chunk_texts(&self.pool, &keys).await?;
+        Ok(hits
+            .iter()
+            .filter_map(|hit| {
+                let text = texts.remove(&(hit.paper_id.clone(), hit.seq))?;
+                let mut shown: String = text.chars().take(SEMANTIC_SNIPPET_CHARS).collect();
+                if shown.len() < text.len() {
+                    shown.push('…');
+                }
+                let (field, page) = if hit.seq == 0 {
+                    (fts::FieldName::Abstract, None)
+                } else {
+                    (fts::FieldName::Body, hit.page)
+                };
+                let info = MatchInfo {
+                    engine: Engine::Semantic,
+                    field,
+                    snippet: Snippet::plain(&shown),
+                    page,
+                };
+                Some((hit.paper_id.clone(), info))
+            })
+            .collect())
     }
 
     /// Planner input for every paper — deliberately unfiltered, trashed rows
     /// included: the planner needs them (as `trashed`) to detect tombstones
-    /// still holding index state. Meta hashes are computed here.
+    /// still holding index state.
     async fn paper_states(&self) -> Result<Vec<planner::PaperState>> {
         let papers = sqlx::query_as::<_, Paper>("SELECT * FROM papers")
             .fetch_all(&self.pool)
@@ -460,8 +487,8 @@ impl SearchService {
             .map(|p| planner::PaperState {
                 id: p.id.clone(),
                 content_hash: p.content_hash.clone(),
-                meta_hash: store::meta_hash(p),
-                notes_hash: store::notes_hash(notes.get(&p.id).map_or("", String::as_str)),
+                summary_hash: store::summary_hash(p),
+                doc_hash: store::doc_hash(p, notes.get(&p.id).map_or("", String::as_str)),
                 trashed: p.deleted_at.is_some(),
             })
             .collect())
@@ -470,7 +497,7 @@ impl SearchService {
     pub async fn status(&self) -> Result<IndexStatus> {
         let papers = self.paper_states().await?;
         let rows = store::all_index_rows(&self.pool).await?;
-        let by_id: std::collections::HashMap<&str, &store::IndexRow> =
+        let by_id: HashMap<&str, &store::IndexRow> =
             rows.iter().map(|r| (r.paper_id.as_str(), r)).collect();
         let model = self.semantic.tier().map(|t| t.embedder.model());
 
@@ -494,7 +521,7 @@ impl SearchService {
             } else if row.is_some_and(|r| r.fts_last_error.is_some()) {
                 fts_failed += 1;
             }
-            if !stale.vectors {
+            if stale.vectors == planner::VectorWork::None {
                 vec_indexed += 1;
             } else if row.is_some_and(|r| r.vec_last_error.is_some()) {
                 vec_failed += 1;
@@ -536,14 +563,6 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn pool() -> sqlx::SqlitePool {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", dir.path().join("t.db").display());
-        let p = crate::db::connect(&url).await.unwrap();
-        std::mem::forget(dir);
-        p
-    }
-
     fn paper(id: &str, title: &str) -> Paper {
         Paper {
             id: id.into(),
@@ -572,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn assemble_merges_qualifiers_over_overrides_and_resolves_project() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let proj = crate::library::projects::create(
             &pool,
             &crate::library::projects::ProjectName::parse("Thesis").unwrap(),
@@ -589,7 +608,7 @@ mod tests {
                 keyword: true,
                 semantic: false,
                 fields: Some("body".into()),
-                status: Some("needs_review".into()),
+                status: Some(crate::library::model::PaperStatus::NeedsReview),
                 project: Some("fallback-id".into()),
                 tag: Some("systems".into()),
                 starred: None,
@@ -600,7 +619,10 @@ mod tests {
         assert_eq!(req.q, "fuzzing");
         assert_eq!(req.project.as_deref(), Some(proj.id.as_str()));
         assert_eq!(req.tag.as_deref(), Some("nlp"));
-        assert_eq!(req.status.as_deref(), Some("resolved"));
+        assert_eq!(
+            req.status,
+            Some(crate::library::model::PaperStatus::Resolved)
+        );
         assert_eq!(req.starred, Some(true));
         assert!(req.fields.title && !req.fields.body);
         assert!(req.keyword && !req.semantic);
@@ -613,7 +635,7 @@ mod tests {
                 keyword: true,
                 semantic: true,
                 fields: Some("body".into()),
-                status: Some("needs_review".into()),
+                status: Some(crate::library::model::PaperStatus::NeedsReview),
                 project: Some("explicit-id".into()),
                 tag: Some("systems".into()),
                 starred: Some(true),
@@ -623,7 +645,10 @@ mod tests {
         .unwrap();
         assert_eq!(req.project.as_deref(), Some("explicit-id"));
         assert_eq!(req.tag.as_deref(), Some("systems"));
-        assert_eq!(req.status.as_deref(), Some("needs_review"));
+        assert_eq!(
+            req.status,
+            Some(crate::library::model::PaperStatus::NeedsReview)
+        );
         assert_eq!(req.starred, Some(true));
         assert!(req.fields.body && !req.fields.title);
 
@@ -647,14 +672,18 @@ mod tests {
     }
 
     /// Service with keyword tier real (temp Tantivy), semantic unavailable.
-    async fn keyword_only_service(pool: sqlx::SqlitePool) -> std::sync::Arc<SearchService> {
+    async fn keyword_only_service(
+        pool: sqlx::SqlitePool,
+    ) -> (tempfile::TempDir, std::sync::Arc<SearchService>) {
         let dir = tempfile::tempdir().unwrap();
         let (fts, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
-        SearchService::open_with(pool, fts, None)
+        (dir, SearchService::open_with(pool, fts, None))
     }
 
-    async fn tier(server: &MockServer, seeds: Vec<vector::ChunkPoint>) -> SemanticTier {
+    async fn tier(
+        server: &MockServer,
+        seeds: Vec<vector::ChunkPoint>,
+    ) -> (tempfile::TempDir, SemanticTier) {
         crate::testutil::tier(&format!("{}/v1", server.uri()), seeds).await
     }
 
@@ -665,13 +694,13 @@ mod tests {
 
     #[tokio::test]
     async fn keyword_search_returns_papers_with_snippets_in_rank_order() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         for (id, title) in [("a", "Fuzzing Firmware"), ("b", "Sorting Networks")] {
             crate::library::papers::insert(&pool, &paper(id, title))
                 .await
                 .unwrap();
         }
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         svc.fts
             .upsert(&fts::PaperDoc {
                 id: "a".into(),
@@ -713,21 +742,21 @@ mod tests {
         assert!(!out.semantic.available); // no embedder configured
         assert!(out.semantic.reason.is_some());
         assert_eq!(out.results.len(), 1);
-        assert_eq!(out.results[0].0.id, "a");
-        assert_eq!(out.results[0].1.engine, Engine::Keyword);
-        assert!(out.results[0].1.snippet.contains("<mark>"));
+        assert_eq!(out.results[0].paper.id, "a");
+        assert_eq!(out.results[0].matched.engine, Engine::Keyword);
+        assert!(out.results[0].matched.snippet.0.iter().any(|p| p.marked));
     }
 
     #[tokio::test]
     async fn trashed_papers_are_filtered_at_hydration() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Fuzzing Firmware"))
             .await
             .unwrap();
         crate::library::trash::soft_delete(&pool, "a")
             .await
             .unwrap();
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         svc.fts
             .upsert(&fts::PaperDoc {
                 id: "a".into(),
@@ -761,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn org_filters_scope_the_engines_and_short_circuit_when_empty() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         for (id, title) in [("a", "Fuzzing Firmware"), ("b", "Fuzzing Kernels")] {
             crate::library::papers::insert(&pool, &paper(id, title))
                 .await
@@ -774,7 +803,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         for (id, title) in [("a", "Fuzzing Firmware"), ("b", "Fuzzing Kernels")] {
             svc.fts
                 .upsert(&fts::PaperDoc {
@@ -802,7 +831,7 @@ mod tests {
 
         let out = svc.search(&search_with_tag("nlp")).await.unwrap();
         assert_eq!(out.results.len(), 1);
-        assert_eq!(out.results[0].0.id, "a");
+        assert_eq!(out.results[0].paper.id, "a");
 
         // A filter nothing satisfies resolves to an empty id scope, which
         // short-circuits before either engine runs.
@@ -812,12 +841,12 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_fuses_and_marks_both() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Fuzzing Firmware"))
             .await
             .unwrap();
         // Chunk for the semantic snippet lookup.
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
@@ -826,7 +855,6 @@ mod tests {
                 text: "router fuzz harness details".into(),
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
@@ -842,7 +870,6 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
         fts_idx
             .upsert(&fts::PaperDoc {
                 id: "a".into(),
@@ -854,11 +881,8 @@ mod tests {
                 notes: String::new(),
             })
             .unwrap();
-        let svc = SearchService::open_with(
-            pool,
-            fts_idx,
-            Some(tier(&server, vec![seed("a", 1, Some(7))]).await),
-        );
+        let (_vectors, tier) = tier(&server, vec![seed("a", 1, Some(7))]).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
             .search(&SearchRequest {
@@ -877,20 +901,20 @@ mod tests {
 
         assert!(out.semantic.available);
         assert_eq!(out.results.len(), 1);
-        assert_eq!(out.results[0].1.engine, Engine::Both);
+        assert_eq!(out.results[0].matched.engine, Engine::Both);
         assert!(
-            out.results[0].1.snippet.contains("<mark>"),
+            out.results[0].matched.snippet.0.iter().any(|p| p.marked),
             "keyword snippet preferred"
         );
     }
 
     #[tokio::test]
     async fn semantic_only_hit_uses_chunk_text_snippet() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Some Paper"))
             .await
             .unwrap();
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
@@ -899,7 +923,6 @@ mod tests {
                 text: "novel <escaping> content".into(),
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
@@ -915,12 +938,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
-        let svc = SearchService::open_with(
-            pool,
-            fts_idx,
-            Some(tier(&server, vec![seed("a", 2, Some(3))]).await),
-        );
+        let (_vectors, tier) = tier(&server, vec![seed("a", 2, Some(3))]).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
             .search(&SearchRequest {
@@ -938,25 +957,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.results.len(), 1);
-        let m = &out.results[0].1;
+        let m = &out.results[0].matched;
         assert_eq!(m.engine, Engine::Semantic);
         assert_eq!(m.field, fts::FieldName::Body);
         assert_eq!(m.page, Some(3));
-        assert!(
-            m.snippet.contains("&lt;escaping&gt;"),
-            "chunk text must be HTML-escaped: {}",
-            m.snippet
+        assert_eq!(
+            m.snippet,
+            Snippet::plain("novel <escaping> content"),
+            "chunk text is shown as is, nothing marked"
         );
     }
 
     async fn degraded_reason(tier: SemanticTier) -> String {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Fuzzing Firmware"))
             .await
             .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
         fts_idx
             .upsert(&fts::PaperDoc {
                 id: "a".into(),
@@ -992,7 +1010,8 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_failure_degrades_with_reason() {
-        degraded_reason(crate::testutil::tier("http://127.0.0.1:1/v1", Vec::new()).await).await;
+        let (_vectors, tier) = crate::testutil::tier("http://127.0.0.1:1/v1", Vec::new()).await;
+        degraded_reason(tier).await;
     }
 
     #[tokio::test]
@@ -1005,7 +1024,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let tier = tier(&server, Vec::new()).await;
+        let (_vectors, tier) = tier(&server, Vec::new()).await;
         tier.store.close().await.unwrap();
 
         let reason = degraded_reason(tier).await;
@@ -1023,9 +1042,8 @@ mod tests {
             dir: cfg.vector_dir.clone(),
             holder: None,
         });
-        let svc = SearchService::open(pool().await, &cfg, semantic)
-            .await
-            .unwrap();
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        let svc = SearchService::open(pool, &cfg, semantic).await.unwrap();
 
         let st = svc.status().await.unwrap();
         assert!(!st.semantic_available);
@@ -1038,8 +1056,8 @@ mod tests {
 
     #[tokio::test]
     async fn authors_only_selection_skips_semantic() {
-        let pool = pool().await;
-        let svc = keyword_only_service(pool).await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let out = svc
             .search(&SearchRequest {
                 q: "lovelace".into(),
@@ -1063,11 +1081,11 @@ mod tests {
 
     #[tokio::test]
     async fn status_counts_pending_and_failed() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "T"))
             .await
             .unwrap();
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let st = svc.status().await.unwrap();
         assert_eq!(st.fts.pending, 1); // never indexed
         assert_eq!(st.fts.failed, 0);
@@ -1076,20 +1094,19 @@ mod tests {
 
     #[tokio::test]
     async fn authors_only_disables_semantic_even_with_embedder() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Some Paper"))
             .await
             .unwrap();
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
-                seq: 0,
-                page: None,
+                seq: 1,
+                page: Some(1),
                 text: "Ada content".into(),
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
@@ -1105,8 +1122,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(tier(&server, Vec::new()).await));
+        let (_vectors, tier) = tier(&server, Vec::new()).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
             .search(&SearchRequest {
@@ -1139,8 +1156,8 @@ mod tests {
 
     #[tokio::test]
     async fn notes_only_selection_skips_semantic() {
-        let pool = pool().await;
-        let svc = keyword_only_service(pool).await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let out = svc
             .search(&SearchRequest {
                 q: "baseline".into(),
@@ -1164,20 +1181,19 @@ mod tests {
 
     #[tokio::test]
     async fn status_counts_failed_rows() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "T"))
             .await
             .unwrap();
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
-                seq: 0,
-                page: None,
+                seq: 1,
+                page: Some(1),
                 text: "some chunk".into(),
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
@@ -1185,26 +1201,25 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let st = svc.status().await.unwrap();
         assert_eq!(st.fts.failed, 1, "status should count papers with errors");
     }
 
     #[tokio::test]
     async fn status_does_not_count_errors_on_tiers_with_no_pending_work() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let p = paper("a", "T");
         crate::library::papers::insert(&pool, &p).await.unwrap();
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
-                seq: 0,
-                page: None,
+                seq: 1,
+                page: Some(1),
                 text: "T".into(),
             }],
             "hash-a",
-            &crate::search::store::meta_hash(&p),
         )
         .await
         .unwrap();
@@ -1214,7 +1229,7 @@ mod tests {
             .await
             .unwrap();
         // ...and the next FTS pass succeeds.
-        crate::search::store::mark_fts_done(&pool, "a", "")
+        crate::search::store::mark_fts_done(&pool, &[("a", &store::doc_hash(&p, ""))])
             .await
             .unwrap();
         // Migration-0023-style residue: an error stamped on a tier that is
@@ -1224,7 +1239,7 @@ mod tests {
             .await
             .unwrap();
 
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let st = svc.status().await.unwrap();
         assert_eq!(st.fts.indexed, 1);
         assert_eq!(st.fts.pending, 0);
@@ -1240,12 +1255,12 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_snippet_truncates_long_chunks_with_ellipsis() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "Some Paper"))
             .await
             .unwrap();
         let long_text = "x".repeat(250);
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
@@ -1254,7 +1269,6 @@ mod tests {
                 text: long_text,
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
@@ -1270,12 +1284,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
-        let svc = SearchService::open_with(
-            pool,
-            fts_idx,
-            Some(tier(&server, vec![seed("a", 2, Some(3))]).await),
-        );
+        let (_vectors, tier) = tier(&server, vec![seed("a", 2, Some(3))]).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
             .search(&SearchRequest {
@@ -1293,14 +1303,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.results.len(), 1);
-        let m = &out.results[0].1;
+        let m = &out.results[0].matched;
         assert_eq!(m.engine, Engine::Semantic);
+        let text = m.snippet.text();
         assert!(
-            m.snippet.ends_with("…"),
-            "snippet should end with ellipsis: {}",
-            m.snippet
+            text.ends_with("…"),
+            "snippet should end with ellipsis: {text}"
         );
-        let text_before_ellipsis = m.snippet.trim_end_matches('…');
+        let text_before_ellipsis = text.trim_end_matches('…');
         assert_eq!(
             text_before_ellipsis.chars().count(),
             200,
@@ -1309,14 +1319,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_semantic_hit_without_its_chunk_is_dropped() {
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        for id in ["a", "b"] {
+            crate::library::papers::insert(&pool, &paper(id, "Some Paper"))
+                .await
+                .unwrap();
+        }
+        // Only "a" still has the chunk its point was embedded from.
+        crate::search::store::replace_body(
+            &pool,
+            "a",
+            &[crate::search::chunker::Chunk {
+                seq: 1,
+                page: Some(1),
+                text: "kept".into(),
+            }],
+            "hash-a",
+        )
+        .await
+        .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
+        let (_vectors, tier) =
+            tier(&server, vec![seed("a", 1, Some(1)), seed("b", 1, Some(1))]).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
+
+        let out = svc
+            .search(&SearchRequest {
+                q: "different words entirely".into(),
+                author_terms: Vec::new(),
+                fields: fts::FieldSel::all(),
+                keyword: true,
+                semantic: true,
+                status: None,
+                project: None,
+                tag: None,
+                starred: None,
+            })
+            .await
+            .unwrap();
+        let ids: Vec<&str> = out.results.iter().map(|h| h.paper.id.as_str()).collect();
+        assert_eq!(ids, ["a"]);
+        assert_eq!(out.results[0].matched.snippet.text(), "kept");
+    }
+
+    #[tokio::test]
     async fn author_terms_scope_only_that_term_to_authors() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         for (id, title) in [("a", "Fuzzing Firmware"), ("b", "Sorting Networks")] {
             crate::library::papers::insert(&pool, &paper(id, title))
                 .await
                 .unwrap();
         }
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         // "a" by Lovelace mentions smith in the body; "b" is BY smith.
         svc.fts
             .upsert(&fts::PaperDoc {
@@ -1360,12 +1424,12 @@ mod tests {
             1,
             "smith-in-body must not match author:smith"
         );
-        assert_eq!(out.results[0].0.id, "b");
+        assert_eq!(out.results[0].paper.id, "b");
     }
 
     #[tokio::test]
     async fn author_terms_without_text_degrade_semantic_with_reason() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "T"))
             .await
             .unwrap();
@@ -1373,8 +1437,8 @@ mod tests {
         // No embeddings mock: reaching the embedder would 404 loudly.
         let dir = tempfile::tempdir().unwrap();
         let (fts_idx, _) = fts::FtsIndex::open(dir.path()).unwrap();
-        std::mem::forget(dir);
-        let svc = SearchService::open_with(pool, fts_idx, Some(tier(&server, Vec::new()).await));
+        let (_vectors, tier) = tier(&server, Vec::new()).await;
+        let svc = SearchService::open_with(pool, fts_idx, Some(tier));
 
         let out = svc
             .search(&SearchRequest {
@@ -1399,27 +1463,26 @@ mod tests {
 
     #[tokio::test]
     async fn status_counts_backed_off_failures_as_pending() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "T"))
             .await
             .unwrap();
-        crate::search::store::replace_chunks(
+        crate::search::store::replace_body(
             &pool,
             "a",
             &[crate::search::chunker::Chunk {
-                seq: 0,
-                page: None,
+                seq: 1,
+                page: Some(1),
                 text: "T".into(),
             }],
             "hash-a",
-            "mh",
         )
         .await
         .unwrap();
         crate::search::store::record_error(&pool, "a", "boom", store::ErrorTier::Both)
             .await
             .unwrap();
-        let svc = keyword_only_service(pool).await;
+        let (_index, svc) = keyword_only_service(pool).await;
         let st = svc.status().await.unwrap();
         assert_eq!(
             st.fts.pending, 1,

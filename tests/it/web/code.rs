@@ -16,7 +16,7 @@ fn stub_agent() -> std::sync::Arc<AgentService> {
 
 #[tokio::test]
 async fn code_endpoints_gate_validate_and_report() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
 
     // 503 without the agent service.
     let plain = TestServer::new(support::router(pool.clone(), root.clone()));
@@ -28,9 +28,9 @@ async fn code_endpoints_gate_validate_and_report() {
 
     let app = xuewen::app::App::builder(pool.clone(), root)
         .agent(stub_agent())
-        // `invalid.example` (RFC 2606) is allowlisted so the accept-then-fail
-        // path is reachable; it never resolves, so the clone fails offline.
-        .clone_allowed_hosts(vec!["invalid.example".to_string()])
+        // Allowlisted so the accept-then-fail path is reachable: nothing listens
+        // on port 1, so the clone is refused at once.
+        .clone_allowed_hosts(vec!["127.0.0.1".to_string()])
         .build();
     let tasks = app.tasks().clone();
     let server = TestServer::new(xuewen::web::router(app));
@@ -61,10 +61,10 @@ async fn code_endpoints_gate_validate_and_report() {
     );
 
     // A valid URL is accepted and the row enters 'cloning' (the background
-    // clone then fails offline, flipping it to 'error' — wait for the job).
+    // clone is then refused, flipping it to 'error' — wait for the job).
     let resp = server
         .put("/api/papers/p1/code")
-        .json(&json!({"repo_url": "https://invalid.example/none.git"}))
+        .json(&json!({"repo_url": "https://127.0.0.1:1/none.git"}))
         .await;
     resp.assert_status(axum::http::StatusCode::ACCEPTED);
     tasks.drain().await;
@@ -113,17 +113,20 @@ async fn code_endpoints_gate_validate_and_report() {
 /// `ON DELETE CASCADE` on its `paper_id` FK, so purging a paper with an
 /// attached repo hit `FOREIGN KEY constraint failed` after the PDF was
 /// already removed. This drives `App::purge` — the sequence
-/// `xuewen purge` itself runs — and asserts everything is gone afterward.
-/// Its explicit sidecar deletes are belt-and-braces beside the migrations'
-/// cascades, which is why the cascade gets its own test below: the explicit
-/// `delete_paper_code` call would mask a cascade regression on its own.
+/// `xuewen purge` itself runs — and asserts everything is gone afterward:
+/// the sidecar rows through the migrations' cascades alone.
 #[tokio::test]
-async fn purge_clears_paper_code_and_agent_workspace() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+async fn purge_clears_paper_code_chat_and_agent_workspace() {
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
 
     xuewen::agent::store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
         .await
         .unwrap();
+    xuewen::agent::history::insert_exchange(&pool, "p1", "q", "a", "M", None)
+        .await
+        .unwrap();
+    let pdf = root.join("missing.pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
     assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
         .await
         .unwrap()
@@ -154,6 +157,11 @@ async fn purge_clears_paper_code_and_agent_workspace() {
         .await
         .unwrap()
         .is_none());
+    assert!(xuewen::agent::history::list(&pool, "p1")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!pdf.exists());
     assert!(!ws.exists());
     assert!(
         !cached_pages.exists(),
@@ -168,12 +176,11 @@ async fn purge_clears_paper_code_and_agent_workspace() {
 }
 
 /// Isolates the migration's `ON DELETE CASCADE` itself: deletes the papers
-/// row directly (no explicit `delete_paper_code` first) and asserts the FK
-/// cascade alone removes the attached `paper_code` row, rather than failing
-/// with `FOREIGN KEY constraint failed`.
+/// row directly and asserts the FK cascade alone removes the attached
+/// `paper_code` row, rather than failing with `FOREIGN KEY constraint failed`.
 #[tokio::test]
 async fn deleting_paper_cascades_to_paper_code() {
-    let (pool, _root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, _root, _dir) = support::pool_and_root_with_paper("p1").await;
 
     xuewen::agent::store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
         .await

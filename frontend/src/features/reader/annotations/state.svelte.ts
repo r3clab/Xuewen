@@ -9,6 +9,7 @@ import {
 } from './palette';
 import type { AnnotationColor } from '$shared/api/generated/AnnotationColor';
 import type { AnnotationKind } from '$shared/api/generated/AnnotationKind';
+import { readLocal, writeLocal } from '$shared/browser/persist';
 
 export const annotationTools = $state<{
   /// The armed tool, or null for plain reading. Deliberately NOT persisted: a
@@ -21,21 +22,13 @@ const COLOR_KEY = 'xuewen-annotation-color';
 
 /// Load the remembered color. Call once at startup.
 export function initAnnotationTools(): void {
-  try {
-    const saved = localStorage.getItem(COLOR_KEY);
-    if (isAnnotationColor(saved)) annotationTools.color = saved;
-  } catch {
-    /* no localStorage — the default color still applies */
-  }
+  const saved = readLocal(COLOR_KEY);
+  if (isAnnotationColor(saved)) annotationTools.color = saved;
 }
 
 export function setToolColor(c: AnnotationColor): void {
   annotationTools.color = c;
-  try {
-    localStorage.setItem(COLOR_KEY, c);
-  } catch {
-    /* no localStorage — the choice still applies, only persistence is lost */
-  }
+  writeLocal(COLOR_KEY, c);
 }
 
 export function setActiveTool(k: AnnotationKind | null): void {

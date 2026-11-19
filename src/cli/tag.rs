@@ -72,7 +72,7 @@ pub(super) async fn tag(ctx: &Ctx, cmd: TagCmd) -> Result<()> {
                 tag: Some(name.clone()),
                 ..Default::default()
             };
-            let papers = papers::list(pool, None, None, &filter).await?;
+            let papers = papers::list(pool, None, papers::Sort::default(), &filter).await?;
             println!("{name} — {} paper(s)", papers.len());
             for p in papers {
                 println!("  {}  {}", p.id, output::title(p.meta.title.as_deref()));

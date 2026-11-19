@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { Spring } from 'svelte/motion';
   import { useDocuments, useOptionalCapability, usePageList, type PageRef } from '@embedpdf/svelte/runtime';
   import { AnnotationLayer, AnnotationMenu, AnnotationToken, useAnnotationState } from '@embedpdf/svelte/annotation';
@@ -83,11 +83,11 @@
   });
 
   // Shared zen auto-hide for the floating pills (see pdf/pillHide.svelte.ts).
-  const pill = createPillHide(() => documentId);
-  let pillHost = $state<HTMLDivElement | undefined>();
-  $effect(() => {
-    pill.setHost(pillHost ?? null);
-  });
+  let toolbar = $state<PdfToolbar>();
+  const pill = createPillHide(
+    () => documentId,
+    () => toolbar?.held() ?? false,
+  );
 
   // Reading direction feeds the toolbar's scroll-hide. A camera tween is one
   // this app commanded (jump to page, find, outline), so it re-anchors
@@ -101,8 +101,6 @@
   // Animated panel push: the wrapper's width springs 0↔PANEL_W so the PDF
   // eases sideways instead of jumping when the panel toggles.
   // Per-view (annotations need room for prose) — see reader/state.svelte.ts.
-  // svelte-ignore state_referenced_locally -- initial value only; the
-  // $effect below drives every subsequent update via panelW.target.
   const panelW = new Spring(reader.panel ? panelWidth(reader.panel) : 0, SPRINGS.pane);
   $effect(() => {
     springTo(panelW, reader.panel ? panelWidth(reader.panel) : 0);
@@ -111,20 +109,17 @@
   let citations = $state<CitationData>({ references: [], markers: [] });
   let matches = $state<Map<number, PaperSummary>>(new Map());
 
-  // Extract citation markers and match them against the library ONCE per
-  // document, at idle so the first pages paint before the crawl starts. The
-  // link annotations it starts from are read once the document's annotations
-  // are in. Failures are caught inside the pipeline, so the reader still
-  // works without citation hovers.
-  let extractionStarted = false;
-  let extractionCancelled = false;
-  let cancelExtractionIdle: (() => void) | null = null;
+  // Extract citation markers and match them against the library once the
+  // document's annotations are in (the link annotations are its starting
+  // point), at idle so the first pages paint before the crawl starts.
+  // Failures are caught inside the pipeline, so the reader still works
+  // without citation hovers.
   $effect(() => {
     const scope = annotation.current;
     const text = pageText.current;
-    if (!scope || !text || !marksReady || extractionStarted) return;
-    extractionStarted = true;
-    untrack(() => {
+    if (!scope || !text || !marksReady) return;
+    return untrack(() => {
+      let cancelled = false;
       const source: CitationSource = {
         pages: documents.listPages(documentId).map((page) => page.size),
         links: () =>
@@ -136,21 +131,20 @@
         readRuns: (pageIndex) => text.readRuns(pageIndex),
         pageIndexOf,
       };
-      cancelExtractionIdle = runWhenIdle(() => {
+      const cancelIdle = runWhenIdle(() => {
         void runCitationPipeline(source, documentId, {
-          isCancelled: () => extractionCancelled,
+          isCancelled: () => cancelled,
           onUpdate: (u) => {
             if (u.citations) citations = u.citations;
             if (u.matches) matches = u.matches;
           },
         });
       });
+      return () => {
+        cancelled = true;
+        cancelIdle();
+      };
     });
-  });
-
-  onDestroy(() => {
-    extractionCancelled = true;
-    cancelExtractionIdle?.();
   });
 </script>
 
@@ -173,8 +167,8 @@
       </div>
     </div>
   {/if}
-  <div class="relative min-w-0 flex-1" bind:this={pillHost}>
-    <PdfToolbar {documentId} {pill} />
+  <div class="relative min-w-0 flex-1" {@attach pill.host}>
+    <PdfToolbar bind:this={toolbar} {documentId} {pill} />
     <PdfQuickActions {pill} />
     {#if reader.find[documentId]}
       <PdfFindBar {documentId} />

@@ -1,20 +1,22 @@
 import { importPaper, importUrl } from './api';
 import { loadPapers, loadStats } from '$features/library/actions';
-import { markLibraryChanged } from '$features/library/state.svelte';
+import { restorePaper } from '$features/library/api';
+import { errorMessage } from '$shared/errors';
+import { toast } from '$shared/ui/toasts.svelte';
+import type { ImportResult } from '$shared/api/generated/ImportResult';
+
+/// A row's progress: the server's own outcome once it answers, plus the
+/// client-side phases around it.
+export type ImportState =
+  | { outcome: 'queued' }
+  | { outcome: 'importing' }
+  | { outcome: 'failed'; message: string }
+  | { outcome: 'restored' }
+  | ImportResult;
 
 export interface ImportItem {
   name: string;
-  status:
-    | 'queued'
-    | 'importing'
-    | 'ingested'
-    | 'duplicate'
-    | 'same-work'
-    | 'in-trash'
-    | 'unfetched'
-    | 'failed';
-  message?: string;
-  needsReview?: boolean;
+  state: ImportState;
 }
 
 export const importState = $state<{ items: ImportItem[]; cancelled: boolean; open: boolean }>({
@@ -49,7 +51,7 @@ export function closeImport(): void {
 export function enqueueFiles(files: File[]): Promise<void> {
   const session = importSession;
   for (const file of files) {
-    const index = importState.items.push({ name: file.name, status: 'queued' }) - 1;
+    const index = importState.items.push({ name: file.name, state: { outcome: 'queued' } }) - 1;
     pending.push({ job: { kind: 'file', file }, index, session });
   }
   return startDrain();
@@ -59,7 +61,7 @@ export function enqueueFiles(files: File[]): Promise<void> {
 /// Resolves when the current batch finishes.
 export function enqueueUrl(input: string): Promise<void> {
   const session = importSession;
-  const index = importState.items.push({ name: input, status: 'queued' }) - 1;
+  const index = importState.items.push({ name: input, state: { outcome: 'queued' } }) - 1;
   pending.push({ job: { kind: 'url', input }, index, session });
   return startDrain();
 }
@@ -73,39 +75,37 @@ function startDrain(): Promise<void> {
   return draining;
 }
 
+
 async function drainQueue(): Promise<void> {
   while (pending.length > 0) {
     const item = pending.shift()!;
     // Skip work that was cancelled or belongs to a superseded import session.
     if (importState.cancelled || item.session !== importSession) continue;
-    importState.items[item.index].status = 'importing';
+    const row = importState.items[item.index];
+    row.state = { outcome: 'importing' };
     try {
       const res =
         item.job.kind === 'file' ? await importPaper(item.job.file) : await importUrl(item.job.input);
       if (item.session !== importSession) continue; // a new session started mid-fetch
-      if (res.outcome === 'duplicate') {
-        importState.items[item.index].status = 'duplicate';
-      } else if (res.outcome === 'same_work') {
-        importState.items[item.index].status = 'same-work';
-      } else if (res.outcome === 'in_trash') {
-        importState.items[item.index].status = 'in-trash';
-        importState.items[item.index].message = res.id;
-      } else if (res.outcome === 'unfetched') {
-        importState.items[item.index].status = 'unfetched';
-        importState.items[item.index].message = res.title ?? '(untitled)';
-      } else {
-        importState.items[item.index].status = 'ingested';
-        importState.items[item.index].message = res.title ?? '(untitled)';
-        importState.items[item.index].needsReview = res.status === 'needs_review';
-      }
+      row.state = res;
     } catch (e) {
       if (item.session !== importSession) continue;
-      importState.items[item.index].status = 'failed';
-      importState.items[item.index].message = (e as Error).message;
+      row.state = { outcome: 'failed', message: errorMessage(e, 'import failed') };
     }
   }
-  // Reflect the newly ingested papers in the library table and counts.
-  markLibraryChanged();
   await loadPapers();
   await loadStats();
+}
+
+/// Un-trash the paper an import found in the trash, then show it in the list.
+export async function restoreTrashed(row: ImportItem): Promise<void> {
+  if (row.state.outcome !== 'in_trash') return;
+  try {
+    await restorePaper(row.state.id);
+    row.state = { outcome: 'restored' };
+    await loadPapers();
+    await loadStats();
+  } catch (e) {
+    toast('error', `Couldn't restore: ${errorMessage(e, 'restore failed')}`);
+  }
 }

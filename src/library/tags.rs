@@ -4,7 +4,7 @@ use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use super::model::NameError;
+use super::model::{NameError, NameWriteError};
 use crate::db::now_rfc3339;
 
 /// A topical label. Column names match the `tags` table.
@@ -50,6 +50,14 @@ fn normalize_tag_name(raw: &str) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
+/// SQL condition: the tag named by `name` is `root` itself or one of its
+/// `root/…` descendants — ASCII-case-insensitively, like tag identity (the
+/// name index is NOCASE), and by plain prefix comparison, so a `%` or `_` in
+/// a name matches only itself.
+pub(crate) fn subtree_sql(name: &str, root: &str) -> String {
+    format!("substr({name} || '/', 1, length({root}) + 1) COLLATE NOCASE = {root} || '/'")
+}
+
 pub(crate) async fn find_by_name(pool: &SqlitePool, name: &str) -> Result<Option<Tag>> {
     let t = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE name = ? COLLATE NOCASE")
         .bind(name)
@@ -61,6 +69,10 @@ pub(crate) async fn find_by_name(pool: &SqlitePool, name: &str) -> Result<Option
 /// Create the tag if it doesn't exist (case-insensitively), then link it to
 /// the paper. Idempotent: re-adding an already-linked tag is a no-op.
 pub async fn add_paper(pool: &SqlitePool, paper_id: &str, name: &TagName) -> Result<Tag> {
+    // One transaction, so `remove_paper`'s orphan GC cannot delete the tag
+    // between its upsert and the link. Its first statement writes, so the
+    // transaction holds SQLite's write lock from the start.
+    let mut tx = pool.begin().await?;
     // Atomic get-or-create: a find-then-create pair races on the NOCASE unique
     // index when two adds of the same new name run concurrently, and the loser
     // surfaces a UNIQUE violation. `DO UPDATE SET name = name` is a no-op write
@@ -73,18 +85,18 @@ pub async fn add_paper(pool: &SqlitePool, paper_id: &str, name: &TagName) -> Res
     .bind(uuid::Uuid::now_v7().to_string())
     .bind(name.as_str())
     .bind(now_rfc3339())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
-    let ts = now_rfc3339();
     sqlx::query(
         "INSERT INTO paper_tags (paper_id, tag_id, added_at) VALUES (?,?,?) \
          ON CONFLICT (paper_id, tag_id) DO NOTHING",
     )
     .bind(paper_id)
     .bind(&tag.id)
-    .bind(&ts)
-    .execute(pool)
+    .bind(now_rfc3339())
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(tag)
 }
 
@@ -155,32 +167,33 @@ pub async fn for_papers(
 }
 
 pub(crate) async fn list(pool: &SqlitePool) -> Result<Vec<TagSummary>> {
-    // `paper_count` is a prefix rollup, not a flat count: it counts distinct
-    // papers carrying this tag OR any `name/*` child, matching what clicking the
-    // tag's filter returns (parent + every descendant).
-    // NOTE: a tag name literally containing `%`/`_` would over-match under LIKE;
-    // this mirrors the search filter's known caveat — we don't escape here.
-    let rows = sqlx::query_as::<_, TagSummary>(
+    // `paper_count` is what clicking the tag's filter returns: distinct active
+    // papers carrying the tag or any descendant (`papers::push_paper_filters`
+    // shares `subtree_sql`).
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT t.id, t.name, t.created_at, \
                 (SELECT COUNT(DISTINCT pt.paper_id) \
                    FROM paper_tags pt JOIN tags c ON c.id = pt.tag_id \
-                   WHERE c.name = t.name OR c.name LIKE t.name || '/%') AS paper_count \
-         FROM tags t ORDER BY t.name COLLATE NOCASE",
-    )
-    .fetch_all(pool)
-    .await?;
+                   JOIN papers p ON p.id = pt.paper_id AND p.deleted_at IS NULL \
+                   WHERE ",
+    );
+    qb.push(subtree_sql("c.name", "t.name"))
+        .push(") AS paper_count FROM tags t ORDER BY t.name COLLATE NOCASE");
+    let rows = qb.build_query_as::<TagSummary>().fetch_all(pool).await?;
     Ok(rows)
 }
 
-pub(crate) async fn rename(pool: &SqlitePool, id: &str, name: &TagName) -> Result<Option<Tag>> {
-    let tag = sqlx::query_as::<_, Tag>(
-        "UPDATE tags SET name = ? WHERE id = ? RETURNING id, name, created_at",
-    )
-    .bind(name.as_str())
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(tag)
+pub(crate) async fn rename(
+    pool: &SqlitePool,
+    id: &str,
+    name: &TagName,
+) -> Result<Option<Tag>, NameWriteError> {
+    sqlx::query_as::<_, Tag>("UPDATE tags SET name = ? WHERE id = ? RETURNING id, name, created_at")
+        .bind(name.as_str())
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(NameWriteError::of("tag"))
 }
 
 pub(crate) async fn delete(pool: &SqlitePool, id: &str) -> Result<bool> {
@@ -225,6 +238,17 @@ mod tests {
         assert_eq!(b.name, "Security/Fuzzing", "existing casing wins");
         assert_eq!(b.created_at, a.created_at);
         assert_eq!(list(&pool).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn renaming_onto_an_existing_tag_name_is_taken() {
+        let (_dir, pool) = temp_pool().await;
+        let pid = insert_test_paper(&pool).await;
+        add_paper(&pool, &pid, &tag("ml")).await.unwrap();
+        let t = add_paper(&pool, &pid, &tag("nlp")).await.unwrap();
+        let err = rename(&pool, &t.id, &tag("ML")).await.unwrap_err();
+        assert!(matches!(err, NameWriteError::Taken("tag")));
+        assert_eq!(err.to_string(), "a tag with that name already exists");
     }
 
     #[tokio::test]
@@ -273,5 +297,25 @@ mod tests {
         assert_eq!(by_name("security"), 2);
         // The leaf child is unaffected: its rollup equals its direct count.
         assert_eq!(by_name("security/fuzzing"), 1);
+    }
+
+    #[tokio::test]
+    async fn tag_counts_skip_trashed_papers_and_match_names_literally() {
+        let (_dir, pool) = temp_pool().await;
+        let kept = insert_test_paper(&pool).await;
+        let trashed = insert_test_paper(&pool).await;
+        let lookalike = insert_test_paper(&pool).await;
+        add_paper(&pool, &kept, &tag("a_b")).await.unwrap();
+        add_paper(&pool, &trashed, &tag("A_B/c")).await.unwrap();
+        add_paper(&pool, &lookalike, &tag("axb/c")).await.unwrap();
+        crate::library::trash::soft_delete(&pool, &trashed)
+            .await
+            .unwrap();
+
+        let counts = list(&pool).await.unwrap();
+        let by_name = |n: &str| counts.iter().find(|s| s.tag.name == n).unwrap().paper_count;
+        assert_eq!(by_name("a_b"), 1, "trashed child not counted, `_` literal");
+        assert_eq!(by_name("A_B/c"), 0);
+        assert_eq!(by_name("axb/c"), 1);
     }
 }

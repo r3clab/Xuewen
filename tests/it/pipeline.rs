@@ -33,7 +33,9 @@ async fn ingests_pdf_and_dedups() {
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
     let mock = MockServer::start().await;
-    let resolver = Resolver::with_bases(None, mock.uri(), mock.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(mock.uri())
+        .with_crossref_base(mock.uri());
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
@@ -53,8 +55,22 @@ async fn ingests_pdf_and_dedups() {
         paper.meta.title.as_deref(),
         Some("Attention Is All You Need")
     );
-    assert_eq!(paper.meta.doi.as_deref(), Some("10.1145/3292500.3330701"));
+    // Crossref did not confirm the DOI printed on page 1, so it is not stored,
+    // and the miss fell through to a title search.
+    assert_eq!(paper.meta.doi, None);
     assert_eq!(paper.meta.status, PaperStatus::NeedsReview);
+    let paths: Vec<String> = mock
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p == "/works/10.1145/3292500.3330701"),
+        "{paths:?}"
+    );
+    assert!(paths.iter().any(|p| p == "/works"), "{paths:?}");
 
     // File was copied into the library and the original moved to _processed.
     assert!(library
@@ -80,7 +96,7 @@ async fn same_doi_different_bytes_reports_same_work() {
     let processed = inbox.join("_processed");
     std::fs::create_dir_all(&inbox).unwrap();
 
-    let doi_line = "https://doi.org/10.1000/xyz123";
+    let doi_line = "https://doi.org/10.1145/3292500.3330701";
     let a = inbox.join("a.pdf");
     let b = inbox.join("b.pdf");
     support::write_test_pdf(&a, &["Paper A Title", doi_line]);
@@ -89,10 +105,17 @@ async fn same_doi_different_bytes_reports_same_work() {
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
     let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/works/10.1145/3292500.3330701"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
+        .mount(&mock)
+        .await;
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
-        Resolver::with_bases(None, mock.uri(), mock.uri()).unwrap(),
+        Resolver::offline()
+            .with_arxiv_base(mock.uri())
+            .with_crossref_base(mock.uri()),
         None,
     );
 
@@ -104,11 +127,10 @@ async fn same_doi_different_bytes_reports_same_work() {
     // Same DOI, different bytes → reported as the same work; file archived.
     let out = ctx.ingest_file(&b).await.unwrap();
     assert_eq!(out, Outcome::SameWork(id_a));
+    assert!(library.join("wang2019kgat.pdf").exists());
     assert_eq!(
-        std::fs::read_dir(library.join("_unsorted"))
-            .unwrap()
-            .count(),
-        1
+        std::fs::read_dir(library.join("_unsorted")).map_or(0, |d| d.count()),
+        0
     );
     assert!(!b.exists());
     assert!(processed.join("b.pdf").exists());
@@ -137,7 +159,9 @@ async fn ingest_with_doi_resolves_via_crossref() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
@@ -188,7 +212,9 @@ async fn ingest_with_arxiv_resolves_via_api() {
         .respond_with(ResponseTemplate::new(200).set_body_string(ARXIV_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
@@ -246,8 +272,9 @@ async fn ingest_without_identifier_resolves_via_dblp() {
         .respond_with(ResponseTemplate::new(200).set_body_string(DBLP_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
@@ -309,8 +336,9 @@ async fn grobid_title_drives_dblp_resolution() {
         .respond_with(ResponseTemplate::new(200).set_body_string(DBLP_BERT_FIXTURE))
         .mount(&api_server)
         .await;
-    let resolver = Resolver::with_bases(None, api_server.uri(), api_server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(api_server.uri())
+        .with_crossref_base(api_server.uri())
         .with_dblp_base(api_server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
@@ -360,8 +388,9 @@ async fn grobid_enriches_needs_review_when_unmatched() {
 
     // Resolver points at a stub-less server: DBLP + Crossref both 404 -> Unresolved.
     let api_server = MockServer::start().await;
-    let resolver = Resolver::with_bases(None, api_server.uri(), api_server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(api_server.uri())
+        .with_crossref_base(api_server.uri())
         .with_dblp_base(api_server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
@@ -405,7 +434,9 @@ async fn colliding_cite_key_gets_letter_suffix() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
@@ -509,7 +540,9 @@ async fn citekey_collision_on_disk_only_picks_the_next_suffix() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
-        Resolver::with_bases(None, server.uri(), server.uri()).unwrap(),
+        Resolver::offline()
+            .with_arxiv_base(server.uri())
+            .with_crossref_base(server.uri()),
         None,
     );
     let id = match ctx.ingest_file(&pdf_path).await.unwrap() {
@@ -544,13 +577,7 @@ async fn ingest_bytes_discards_the_staged_copy_on_success() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
-        Resolver::with_bases(
-            None,
-            "http://127.0.0.1:1".to_string(),
-            "http://127.0.0.1:1".to_string(),
-        )
-        .unwrap()
-        .with_dblp_base("http://127.0.0.1:1".to_string()),
+        Resolver::offline(),
         None,
     );
 
@@ -575,6 +602,37 @@ async fn ingest_bytes_discards_the_staged_copy_on_success() {
 }
 
 #[tokio::test]
+async fn a_failed_archive_move_still_reports_the_ingest() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = dir.path().join("inbox");
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&inbox).unwrap();
+    // A file squatting on the archive directory's path.
+    std::fs::write(inbox.join("_processed"), b"").unwrap();
+    let pdf_path = inbox.join("paper.pdf");
+    support::write_test_pdf(&pdf_path, &["A Paper Whose Archive Move Fails"]);
+
+    let url = format!("sqlite:{}", dir.path().join("library.db").display());
+    let pool = db::connect(&url).await.unwrap();
+    let ctx = IngestCtx::new(
+        pool.clone(),
+        Libraries::under(&inbox, &library),
+        Resolver::offline(),
+        None,
+    );
+
+    let out = ctx.ingest_file(&pdf_path).await.unwrap();
+    let Outcome::Ingested(id) = out else {
+        panic!("expected Ingested, got {out:?}");
+    };
+    assert!(papers::get(&pool, &id).await.unwrap().is_some());
+    assert!(
+        pdf_path.exists(),
+        "the unarchived source stays in the inbox"
+    );
+}
+
+#[tokio::test]
 async fn reingesting_a_trashed_paper_reports_in_trash() {
     let dir = tempfile::tempdir().unwrap();
     let inbox = dir.path().join("inbox");
@@ -594,7 +652,9 @@ async fn reingesting_a_trashed_paper_reports_in_trash() {
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
     let mock = MockServer::start().await;
-    let resolver = Resolver::with_bases(None, mock.uri(), mock.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(mock.uri())
+        .with_crossref_base(mock.uri());
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
@@ -622,7 +682,7 @@ async fn same_doi_of_trashed_paper_reports_in_trash() {
     let library = dir.path().join("library");
     std::fs::create_dir_all(&inbox).unwrap();
 
-    let doi_line = "https://doi.org/10.1000/xyz123";
+    let doi_line = "https://doi.org/10.1145/3292500.3330701";
     let a = inbox.join("a.pdf");
     let b = inbox.join("b.pdf");
     support::write_test_pdf(&a, &["Paper A Title", doi_line]);
@@ -631,10 +691,17 @@ async fn same_doi_of_trashed_paper_reports_in_trash() {
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
     let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/works/10.1145/3292500.3330701"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
+        .mount(&mock)
+        .await;
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
-        Resolver::with_bases(None, mock.uri(), mock.uri()).unwrap(),
+        Resolver::offline()
+            .with_arxiv_base(mock.uri())
+            .with_crossref_base(mock.uri()),
         None,
     );
 
@@ -680,8 +747,9 @@ async fn wrapped_two_line_title_resolves_via_dblp() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),
-        Resolver::with_bases(None, server.uri(), server.uri())
-            .unwrap()
+        Resolver::offline()
+            .with_arxiv_base(server.uri())
+            .with_crossref_base(server.uri())
             .with_dblp_base(server.uri()),
         None,
     );
@@ -707,14 +775,8 @@ async fn ingest_with_hint_seeds_identifier() {
     let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = db::connect(&url).await.unwrap();
 
-    // Offline resolver: upstreams refuse instantly (degrades to needs_review).
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    // Offline resolver: every lookup misses (degrades to needs_review).
+    let resolver = Resolver::offline();
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library),

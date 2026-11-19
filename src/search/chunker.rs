@@ -16,27 +16,22 @@ pub(crate) struct Chunk {
     pub(crate) text: String,
 }
 
-pub(crate) fn chunk_paper(
-    title: Option<&str>,
-    abstract_text: Option<&str>,
-    body: &str,
-) -> Vec<Chunk> {
-    let mut out = Vec::new();
+/// The seq-0 chunk's text; `None` for a paper with neither title nor
+/// abstract.
+pub(crate) fn summary_text(title: Option<&str>, abstract_text: Option<&str>) -> Option<String> {
     let title = title.map(str::trim).filter(|s| !s.is_empty());
     let abstract_text = abstract_text.map(str::trim).filter(|s| !s.is_empty());
-    let summary = match (title, abstract_text) {
+    match (title, abstract_text) {
         (Some(t), Some(a)) => Some(format!("{t}\n{a}")),
         (Some(t), None) => Some(t.to_string()),
         (None, Some(a)) => Some(a.to_string()),
         (None, None) => None,
-    };
-    if let Some(text) = summary {
-        out.push(Chunk {
-            seq: 0,
-            page: None,
-            text,
-        });
     }
+}
+
+/// The body chunks of a paper's extracted text, numbered from seq 1.
+pub(crate) fn body_chunks(body: &str) -> Vec<Chunk> {
+    let mut out = Vec::new();
     let mut seq = 1;
     for (i, page) in body.split('\u{0c}').enumerate() {
         for text in chunk_page(page) {
@@ -120,23 +115,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seq0_is_title_plus_abstract() {
-        let out = chunk_paper(Some("A Title"), Some("An abstract."), "");
-        assert_eq!(out[0].seq, 0);
-        assert_eq!(out[0].page, None);
-        assert_eq!(out[0].text, "A Title\nAn abstract.");
-    }
-
-    #[test]
-    fn seq0_skipped_when_no_title_or_abstract() {
-        let out = chunk_paper(None, None, "some body text");
-        assert!(out.iter().all(|c| c.seq >= 1));
+    fn the_summary_is_title_plus_abstract() {
+        assert_eq!(
+            summary_text(Some(" A Title "), Some("An abstract.")).as_deref(),
+            Some("A Title\nAn abstract.")
+        );
+        assert_eq!(summary_text(Some("T"), Some("  ")).as_deref(), Some("T"));
+        assert_eq!(summary_text(None, Some("A")).as_deref(), Some("A"));
+        assert_eq!(summary_text(Some(""), None), None);
     }
 
     #[test]
     fn body_chunks_are_page_aware_and_sequential() {
         let body = "page one words\n\nmore text\u{0c}page two words";
-        let out = chunk_paper(None, None, body);
+        let out = body_chunks(body);
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].seq, out[0].page), (1, Some(1)));
         assert_eq!((out[1].seq, out[1].page), (2, Some(2)));
@@ -149,7 +141,7 @@ mod tests {
         // 5 paragraphs of ~400 chars force multiple chunks per page.
         let para = "x".repeat(395) + " end.";
         let body = vec![para.clone(); 5].join("\n\n");
-        let out = chunk_paper(None, None, &body);
+        let out = body_chunks(&body);
         assert!(
             out.len() >= 2,
             "expected multiple chunks, got {}",
@@ -171,7 +163,7 @@ mod tests {
     fn paragraph_longer_than_target_is_split_at_sentences() {
         let sentence = "This sentence is exactly some words long. ";
         let para = sentence.repeat(60); // ~2500 chars, no blank lines
-        let out = chunk_paper(None, None, &para);
+        let out = body_chunks(&para);
         assert!(out.len() >= 2);
         assert!(out
             .iter()
@@ -180,14 +172,14 @@ mod tests {
 
     #[test]
     fn empty_body_yields_nothing() {
-        assert!(chunk_paper(None, None, "").is_empty());
-        assert!(chunk_paper(None, None, "\u{0c}\u{0c}").is_empty());
+        assert!(body_chunks("").is_empty());
+        assert!(body_chunks("\u{0c}\u{0c}").is_empty());
     }
 
     #[test]
     fn multibyte_text_never_panics() {
         let body = "日本語のテキスト。".repeat(400);
-        let out = chunk_paper(Some("héllo"), None, &body);
+        let out = body_chunks(&body);
         assert!(!out.is_empty()); // no panic on char boundaries
     }
 }

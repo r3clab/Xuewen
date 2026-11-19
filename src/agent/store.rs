@@ -55,10 +55,9 @@ pub async fn get_paper_code(pool: &SqlitePool, paper_id: &str) -> Result<Option<
 }
 
 /// Attach (or re-attach) a repo: the row enters 'cloning' with outcome
-/// fields cleared; the background job resolves it to ready/error.
-/// Mark a paper's repo as (re)cloning and return the new `clone_gen`. Each
-/// call bumps the generation so a background clone can detect it has been
-/// superseded by a later attach (see `set_paper_code_ready`/`_error`).
+/// fields cleared, and the new `clone_gen` is returned. Each call bumps the
+/// generation so a background clone can detect it has been superseded by a
+/// later attach (see `set_paper_code_ready`/`_error`).
 pub async fn upsert_paper_code_cloning(
     pool: &SqlitePool,
     paper_id: &str,

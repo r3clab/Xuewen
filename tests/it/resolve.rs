@@ -20,10 +20,13 @@ async fn resolves_doi_via_crossref() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
     let res = resolver
-        .resolve(&Identifier::Doi(doi.to_string()), None)
-        .await;
+        .lookup(&Identifier::Doi(doi.to_string()))
+        .await
+        .unwrap();
 
     match res {
         Some(md) => {
@@ -50,10 +53,13 @@ async fn resolves_arxiv_via_api() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
     let res = resolver
-        .resolve(&Identifier::Arxiv(id.to_string()), None)
-        .await;
+        .lookup(&Identifier::Arxiv(id.to_string()))
+        .await
+        .unwrap();
 
     match res {
         Some(md) => {
@@ -77,10 +83,13 @@ async fn doi_with_fragment_char_reaches_crossref_percent_encoded() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
     let res = resolver
-        .resolve(&Identifier::Doi("10.7912/c2#abc".to_string()), None)
-        .await;
+        .lookup(&Identifier::Doi("10.7912/c2#abc".to_string()))
+        .await
+        .unwrap();
     assert!(res.is_some(), "encoded request must reach the mock");
 }
 
@@ -88,22 +97,24 @@ async fn doi_with_fragment_char_reaches_crossref_percent_encoded() {
 async fn http_error_degrades_to_unresolved() {
     // A server with no stubs returns 404 for everything.
     let server = MockServer::start().await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
     let res = resolver
-        .resolve(&Identifier::Doi("10.9999/nope".to_string()), None)
-        .await;
+        .lookup(&Identifier::Doi("10.9999/nope".to_string()))
+        .await
+        .unwrap();
     assert_eq!(res, None);
 }
 
 #[tokio::test]
 async fn none_identifier_is_unresolved() {
-    let resolver = Resolver::new(None).unwrap();
-    assert_eq!(resolver.resolve(&Identifier::None, None).await, None);
+    let resolver = Resolver::offline();
+    assert_eq!(resolver.lookup(&Identifier::None).await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn parse_error_degrades_to_unresolved() {
-    // Server returns 200 but a malformed body: fetch succeeds, parse fails -> Unresolved.
     let server = MockServer::start().await;
     let doi = "10.1234/malformed";
     Mock::given(method("GET"))
@@ -112,11 +123,12 @@ async fn parse_error_degrades_to_unresolved() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
-    let res = resolver
-        .resolve(&Identifier::Doi(doi.to_string()), None)
-        .await;
-    assert_eq!(res, None);
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
+    let ident = Identifier::Doi(doi.to_string());
+    assert!(resolver.lookup(&ident).await.is_err());
+    assert_eq!(resolver.lookup_or_skip(&ident).await, None);
 }
 
 const DBLP_FIXTURE: &str = support::fixture!("dblp_kgat.json");
@@ -133,12 +145,11 @@ async fn resolves_title_via_dblp() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(KGAT_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(KGAT_TITLE)).await;
 
     match res {
         Some(md) => {
@@ -168,12 +179,11 @@ async fn falls_back_to_crossref_search_when_dblp_empty() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(KGAT_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(KGAT_TITLE)).await;
 
     match res {
         Some(md) => {
@@ -201,12 +211,11 @@ async fn dblp_error_falls_back_to_crossref() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(KGAT_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(KGAT_TITLE)).await;
 
     match res {
         Some(md) => assert_eq!(md.source, "crossref"),
@@ -224,16 +233,14 @@ async fn low_similarity_title_is_unresolved() {
         .await;
     // Crossref search has no stub -> 404 -> None. So overall Unresolved.
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
     let res = resolver
-        .resolve(
-            &Identifier::None,
-            Some(TitleQuery::new(
-                "An Entirely Unrelated Paper Title About Frogs",
-            )),
-        )
+        .search_title(TitleQuery::new(
+            "An Entirely Unrelated Paper Title About Frogs",
+        ))
         .await;
     assert_eq!(res, None);
 }
@@ -255,10 +262,13 @@ async fn resolves_after_transient_429() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
     let res = resolver
-        .resolve(&Identifier::Doi(doi.to_string()), None)
-        .await;
+        .lookup(&Identifier::Doi(doi.to_string()))
+        .await
+        .unwrap();
 
     assert!(res.is_some());
 }
@@ -276,18 +286,22 @@ async fn search_candidates_merges_both_sources_ungated() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_SEARCH_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
 
     // A truncated query that the 0.85 gate would reject still yields the hit.
-    let cands = resolver.search_candidates("KGAT: Knowledge Graph").await;
+    let cands = resolver
+        .search_candidates("KGAT: Knowledge Graph")
+        .await
+        .unwrap();
     assert_eq!(cands.len(), 1, "same DOI from both sources dedups to one");
     assert_eq!(cands[0].source, "dblp"); // DBLP queried first, wins the dedup
     assert_eq!(cands[0].doi.as_deref(), Some("10.1145/3292500.3330701"));
 
     // Empty query short-circuits without network.
-    assert!(resolver.search_candidates("  ").await.is_empty());
+    assert!(resolver.search_candidates("  ").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -305,11 +319,15 @@ async fn search_candidates_degrades_when_one_source_fails() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_SEARCH_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
 
-    let cands = resolver.search_candidates("KGAT Knowledge Graph").await;
+    let cands = resolver
+        .search_candidates("KGAT Knowledge Graph")
+        .await
+        .unwrap();
     assert_eq!(cands.len(), 1, "surviving source still yields candidates");
     assert_eq!(cands[0].source, "crossref");
 }
@@ -349,16 +367,15 @@ async fn resolves_iclr_title_via_openreview_when_dblp_is_empty() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![
             format!("{}/api2", server.uri()),
             format!("{}/api1", server.uri()),
         ]);
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(ICLR_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(ICLR_TITLE)).await;
 
     match res {
         Some(md) => {
@@ -403,16 +420,15 @@ async fn openreview_host_failure_still_falls_through_to_crossref() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![
             format!("{}/api1", server.uri()),
             format!("{}/api2", server.uri()),
         ]);
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(KGAT_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(KGAT_TITLE)).await;
 
     assert_eq!(res.expect("expected Crossref fallback").source, "crossref");
 }
@@ -438,15 +454,17 @@ async fn search_candidates_includes_openreview() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![format!("{}/api2", server.uri())]);
 
     // A truncated query the 0.85 gate would reject still reaches the picker.
     let cands = resolver
         .search_candidates("Transformers are Inherently")
-        .await;
+        .await
+        .unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].source, "openreview");
     assert_eq!(
@@ -478,12 +496,13 @@ async fn openreview_venue_beats_a_dblp_corr_preprint() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![format!("{}/api2", server.uri())]);
     let md = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(ICLR_TITLE)))
+        .search_title(TitleQuery::new(ICLR_TITLE))
         .await
         .expect("expected Resolved");
 
@@ -522,12 +541,13 @@ async fn a_dblp_corr_preprint_survives_when_openreview_has_nothing() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![format!("{}/api2", server.uri())]);
     let md = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(ICLR_TITLE)))
+        .search_title(TitleQuery::new(ICLR_TITLE))
         .await
         .expect("expected the DBLP preprint");
 
@@ -564,12 +584,13 @@ async fn identifiers_are_not_grafted_across_different_papers() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri())
         .with_openreview_bases(vec![format!("{}/api2", server.uri())]);
     let md = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(query)))
+        .search_title(TitleQuery::new(query))
         .await
         .expect("expected the OpenReview record");
 
@@ -610,28 +631,24 @@ async fn a_same_titled_work_by_other_authors_is_rejected() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
 
     // The paper's own first page names none of the record's authors.
     let res = resolver
-        .resolve(
-            &Identifier::None,
-            Some(TitleQuery {
-                title: GPT3_TITLE,
-                text: GPT3_PAGE,
-            }),
-        )
+        .search_title(TitleQuery {
+            title: GPT3_TITLE,
+            text: GPT3_PAGE,
+        })
         .await;
     assert_eq!(res, None, "the impostor must not resolve");
 
     // Same fixture with nothing to corroborate against: the title gate alone
     // still accepts it, which is both the pre-fix behaviour and the documented
     // fail-open path for a PDF that extracts to nothing.
-    let res = resolver
-        .resolve(&Identifier::None, Some(TitleQuery::new(GPT3_TITLE)))
-        .await;
+    let res = resolver.search_title(TitleQuery::new(GPT3_TITLE)).await;
     assert_eq!(
         res.and_then(|md| md.doi).as_deref(),
         Some("10.65525/svup.9788199778009.2026.224-230"),
@@ -665,22 +682,58 @@ async fn a_book_chapter_the_paper_corroborates_still_resolves() {
         .mount(&server)
         .await;
 
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
     let res = resolver
-        .resolve(
-            &Identifier::None,
-            Some(TitleQuery {
-                title: "Microsoft COCO: Common Objects in Context",
-                // The diacritic survives neither pdftotext nor the record
-                // unchanged; both sides fold to the same "dollar".
-                text: "Microsoft COCO: Common Objects in Context\nTsung-Yi Lin, Piotr Dollár",
-            }),
-        )
+        .search_title(TitleQuery {
+            title: "Microsoft COCO: Common Objects in Context",
+            // The diacritic survives neither pdftotext nor the record
+            // unchanged; both sides fold to the same "dollar".
+            text: "Microsoft COCO: Common Objects in Context\nTsung-Yi Lin, Piotr Dollár",
+        })
         .await;
     assert_eq!(
         res.and_then(|md| md.doi).as_deref(),
         Some("10.1007/978-3-319-10602-1_48")
     );
+}
+
+#[tokio::test]
+async fn lookup_tells_a_missing_record_from_an_outage() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/works/10.1/missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/works/10.1/down"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let resolver = Resolver::offline().with_crossref_base(server.uri());
+
+    let missing = resolver
+        .lookup(&Identifier::Doi("10.1/missing".into()))
+        .await;
+    assert!(missing.unwrap().is_none());
+    let down = resolver.lookup(&Identifier::Doi("10.1/down".into())).await;
+    assert!(down.is_err());
+}
+
+#[tokio::test]
+async fn search_candidates_fails_only_when_every_source_does() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let resolver = Resolver::offline()
+        .with_crossref_base(server.uri())
+        .with_dblp_base(server.uri())
+        .with_openreview_bases(vec![format!("{}/api2", server.uri())]);
+
+    assert!(resolver.search_candidates("KGAT").await.is_err());
 }

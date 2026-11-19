@@ -91,7 +91,7 @@ impl TranslateService {
             }
         };
 
-        let deepl = tcfg.deepl.as_ref().map(deepl::DeeplTranslator::new);
+        let deepl = tcfg.deepl.as_ref().and_then(deepl::DeeplTranslator::new);
 
         if llm.is_none() && deepl.is_none() {
             return None;
@@ -234,13 +234,27 @@ mod tests {
         let cfg = cfg_from(
             "inbox_dir='/i'\nlibrary_root='/l'\ndatabase_url='sqlite::memory:'\n\
              [ai]\napi_key='k'\n[ai.translate]\nmodel='m'\n\
-             [translate]\nprovider='deepl'\n[translate.deepl]\napi_key_env='DEEPL_KEY_TEST_X'\n",
+             [translate]\nprovider='deepl'\n[translate.deepl]\napi_key='dk'\n",
         );
-        // The env var is unset, but availability is by config presence, not key.
         let svc = TranslateService::from_config(&cfg).unwrap();
         assert_eq!(svc.default_provider(), TranslateProvider::Deepl);
         let mut p = svc.providers();
         p.sort_by_key(|x| format!("{x:?}"));
         assert_eq!(p, vec![TranslateProvider::Deepl, TranslateProvider::Llm]);
+    }
+
+    #[test]
+    fn a_keyless_deepl_is_not_offered() {
+        let keyless = "[translate.deepl]\napi_key_env='XUEWEN_TEST_DEEPL_UNSET'\n";
+        let cfg = cfg_from(&format!(
+            "inbox_dir='/i'\nlibrary_root='/l'\ndatabase_url='sqlite::memory:'\n\
+             [ai]\napi_key='k'\n[ai.translate]\nmodel='m'\n{keyless}"
+        ));
+        let svc = TranslateService::from_config(&cfg).unwrap();
+        assert_eq!(svc.providers(), vec![TranslateProvider::Llm]);
+        let cfg = cfg_from(&format!(
+            "inbox_dir='/i'\nlibrary_root='/l'\ndatabase_url='sqlite::memory:'\n{keyless}"
+        ));
+        assert!(TranslateService::from_config(&cfg).is_none());
     }
 }

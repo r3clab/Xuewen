@@ -1,11 +1,11 @@
 //! Wire-level behaviour of the embedded-SPA handler.
 //!
-//! These only ever ask for `index.html`, directly or through the SPA fallback:
-//! `build.rs` writes a placeholder when `frontend/dist` is missing, so it is
-//! the one asset guaranteed to exist without a frontend build. The policy
-//! decisions the handler layers on top (which paths are immutable, which coding
-//! to negotiate, when compression is worth it) are unit-tested in
-//! `src/web/assets.rs`.
+//! These only ever ask for `index.html` (directly or through the SPA
+//! fallback) or for a file no build contains: `index.html` is the one page
+//! guaranteed to answer without a frontend build, which the handler then
+//! replaces with its own placeholder. The policy decisions
+//! the handler layers on top (which paths are immutable, which stored coding
+//! to negotiate) are unit-tested in `src/web/assets.rs`.
 
 use axum_test::TestServer;
 use xuewen::db;
@@ -29,9 +29,8 @@ async fn serves_the_shell_with_a_validator_and_a_revalidate_policy() {
     res.assert_status_ok();
     let etag = res.header("etag");
     let etag = etag.to_str().unwrap();
-    // Weak: the same resource ships as identity, gzip or br depending on what
-    // the client accepts, so the tag cannot promise byte equality.
-    assert!(etag.starts_with("W/\""), "expected a weak ETag, got {etag}");
+    // Strong: every stored coding of the asset carries a tag of its own.
+    assert!(etag.starts_with('"'), "expected a strong ETag, got {etag}");
     assert_eq!(res.header("cache-control"), "public, no-cache");
     // Shared caches must key on the coding, or a proxy could hand a br body to
     // a client that never asked for one.
@@ -112,29 +111,26 @@ async fn a_client_side_route_falls_back_to_the_shell() {
 
 #[tokio::test]
 async fn a_declared_coding_always_matches_the_bytes_sent() {
-    // The regression this pins: falling back to identity bytes while still
-    // announcing `content-encoding: br` makes the client decode garbage and end
-    // up with an empty response. Deterministic in both cache states — cold, the
-    // handler serves identity and must not claim a coding; warm, it serves
-    // genuinely compressed bytes, which cannot equal the identity body.
+    // The regression this pins: sending identity bytes while announcing
+    // `content-encoding: br` makes the client decode garbage and end up with an
+    // empty response. Holds with and without a frontend build — a built shell
+    // has compressed siblings to send, the placeholder has none.
     let (_dir, server) = server().await;
     let identity = server.get("/").await.as_bytes().to_vec();
     assert!(!identity.is_empty());
 
-    for _ in 0..2 {
-        let res = server
-            .get("/")
-            .add_header("accept-encoding", "br, gzip")
-            .await;
-        res.assert_status_ok();
-        let body = res.as_bytes().to_vec();
-        match res.headers().get("content-encoding") {
-            None => assert_eq!(body, identity, "no coding declared, so send it raw"),
-            Some(coding) => assert_ne!(
-                body, identity,
-                "declared {coding:?} but sent the identity bytes"
-            ),
-        }
+    let res = server
+        .get("/")
+        .add_header("accept-encoding", "br, gzip")
+        .await;
+    res.assert_status_ok();
+    let body = res.as_bytes().to_vec();
+    match res.headers().get("content-encoding") {
+        None => assert_eq!(body, identity, "no coding declared, so send it raw"),
+        Some(coding) => assert_ne!(
+            body, identity,
+            "declared {coding:?} but sent the identity bytes"
+        ),
     }
 }
 
@@ -152,4 +148,14 @@ async fn an_unacceptable_coding_is_served_identity() {
         res.headers().get("content-encoding").is_none(),
         "must not apply a coding the client did not offer"
     );
+}
+
+#[tokio::test]
+async fn a_missing_file_is_a_404_not_the_shell() {
+    let (_dir, server) = server().await;
+    server
+        .get("/assets/gone-1a2b3c.js")
+        .expect_failure()
+        .await
+        .assert_status_not_found();
 }

@@ -28,11 +28,7 @@ fn run() -> Result<()> {
     // Environment first, before any thread exists: the `env` file (API keys),
     // then PATH so the bundled pdftotext/node sidecars shadow system copies —
     // src/pdf.rs and src/agent resolve both via `Command::new("...")`.
-    if let Ok(text) = std::fs::read_to_string(dirs.env_file()) {
-        for (k, v) in bootstrap::parse_env_file(&text) {
-            std::env::set_var(k, v);
-        }
-    }
+    bootstrap::load_env_file(&dirs.env_file())?;
     let bundle = bundle::bundle_dirs();
     if let Some((macos_dir, _)) = &bundle {
         let path = std::env::var("PATH").ok();
@@ -60,7 +56,6 @@ fn run() -> Result<()> {
 
     let mut cfg = xuewen::config::Config::load(&cfg_path)
         .with_context(|| format!("config file: {}", cfg_path.display()))?;
-    bootstrap::default_vector_dir(&mut cfg, &dirs.data);
     if let Some((_, resources)) = &bundle {
         if cfg.ai.agent.runner.is_none() {
             // In-memory only — never written back to the user's config.

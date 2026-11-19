@@ -1,5 +1,6 @@
 import { titleCase } from 'title-case';
 import type { StructuredReference } from '$shared/api/generated/StructuredReference';
+import { safeHttpUrl } from '$shared/browser/url';
 
 /** Display title case for reference titles that arrive in sentence case.
  *  `title-case` preserves intentional casing (PGFUZZ, GPT-4, eBPF, iOS) and
@@ -20,16 +21,7 @@ export function refLinks(
 ): { label: string; href: string }[] {
   const out: { label: string; href: string }[] = [];
   const push = (label: string, href: string) => {
-    // Only web URLs may become links: `url` comes from LLM output (prompt
-    // contains raw PDF text) and `externalUrl` from raw PDF /URI actions —
-    // a javascript:/data: href here would run in the app origin.
-    try {
-      const proto = new URL(href).protocol;
-      if (proto !== 'http:' && proto !== 'https:') return;
-    } catch {
-      return; // unparseable → no link
-    }
-    if (!out.some((l) => l.href === href)) out.push({ label, href });
+    if (safeHttpUrl(href) && !out.some((l) => l.href === href)) out.push({ label, href });
   };
   if (s?.doi) push('doi.org', `https://doi.org/${s.doi}`);
   if (s?.arxiv_id) push('arXiv', `https://arxiv.org/abs/${s.arxiv_id}`);

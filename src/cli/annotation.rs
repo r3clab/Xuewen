@@ -26,11 +26,11 @@ pub(super) enum AnnotationCmd {
         #[arg(long)]
         quote: Option<String>,
         /// The note's color in the reader's panel.
-        #[arg(long, value_enum, default_value_t = ColorArg::Amber)]
-        color: ColorArg,
+        #[arg(long, value_enum, default_value_t = AnnotationColor::Amber)]
+        color: AnnotationColor,
         /// How the reader lists the note.
-        #[arg(long, value_enum, default_value_t = KindArg::TextComment)]
-        kind: KindArg,
+        #[arg(long, value_enum, default_value_t = AnnotationKind::TextComment)]
+        kind: AnnotationKind,
     },
     /// Delete one annotation by id.
     Rm { paper: String, id: String },
@@ -41,49 +41,6 @@ pub(super) enum AnnotationCmd {
         #[arg(long)]
         yes: bool,
     },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-pub(super) enum ColorArg {
-    Amber,
-    Rose,
-    Green,
-    Blue,
-    Violet,
-}
-
-impl From<ColorArg> for AnnotationColor {
-    fn from(c: ColorArg) -> Self {
-        match c {
-            ColorArg::Amber => Self::Amber,
-            ColorArg::Rose => Self::Rose,
-            ColorArg::Green => Self::Green,
-            ColorArg::Blue => Self::Blue,
-            ColorArg::Violet => Self::Violet,
-        }
-    }
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub(super) enum KindArg {
-    Highlight,
-    Underline,
-    Strikeout,
-    Squiggly,
-    TextComment,
-}
-
-impl From<KindArg> for AnnotationKind {
-    fn from(k: KindArg) -> Self {
-        match k {
-            KindArg::Highlight => Self::Highlight,
-            KindArg::Underline => Self::Underline,
-            KindArg::Strikeout => Self::Strikeout,
-            KindArg::Squiggly => Self::Squiggly,
-            KindArg::TextComment => Self::TextComment,
-        }
-    }
 }
 
 pub(super) async fn annotation(ctx: &Ctx, cmd: AnnotationCmd) -> Result<()> {
@@ -130,8 +87,8 @@ pub(super) async fn annotation(ctx: &Ctx, cmd: AnnotationCmd) -> Result<()> {
             let id = uuid::Uuid::now_v7().to_string();
             let new = NewAnnotation {
                 page_index: i64::from(page) - 1,
-                kind: kind.into(),
-                color: color.into(),
+                kind,
+                color,
                 quoted_text: quote,
                 note: Some(note),
                 payload: serde_json::json!({}),

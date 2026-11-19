@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, put};
@@ -9,7 +9,9 @@ use super::fetch_paper;
 use crate::app::{App, Trash};
 use crate::library::projects::{self, ProjectName};
 use crate::web::error::ApiError;
+use crate::web::extract::{ApiJson, ApiPath};
 use serde::Deserialize;
+use ts_rs::TS;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -24,12 +26,14 @@ pub(super) fn routes() -> Router<App> {
         )
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct CreateProjectBody {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct UpdateProjectBody {
     name: Option<String>,
 }
@@ -41,23 +45,17 @@ async fn list_projects(State(app): State<App>) -> Result<Response, ApiError> {
 
 async fn create_project(
     State(app): State<App>,
-    Json(body): Json<CreateProjectBody>,
+    ApiJson(body): ApiJson<CreateProjectBody>,
 ) -> Result<Response, ApiError> {
     let name = ProjectName::parse(&body.name)?;
-    match projects::create(app.pool(), &name).await {
-        Ok(project) => Ok((StatusCode::CREATED, Json(project)).into_response()),
-        Err(e) => Err(ApiError::conflict_or_internal(
-            e,
-            "create_project",
-            projects::NAME_TAKEN,
-        )),
-    }
+    let project = projects::create(app.pool(), &name).await?;
+    Ok((StatusCode::CREATED, Json(project)).into_response())
 }
 
 async fn update_project(
     State(app): State<App>,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateProjectBody>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<UpdateProjectBody>,
 ) -> Result<Response, ApiError> {
     // Merge: an omitted/blank name keeps the old one. Blankness is decided
     // by `ProjectName::parse` with `str::trim` (all Unicode whitespace), not
@@ -67,20 +65,15 @@ async fn update_project(
         .name
         .as_deref()
         .and_then(|n| ProjectName::parse(n).ok());
-    match projects::update(app.pool(), &id, name.as_ref()).await {
-        Ok(Some(p)) => Ok(Json(p).into_response()),
-        Ok(None) => Err(ApiError::NotFound),
-        Err(e) => Err(ApiError::conflict_or_internal(
-            e,
-            "update_project",
-            projects::NAME_TAKEN,
-        )),
-    }
+    let project = projects::update(app.pool(), &id, name.as_ref())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(project).into_response())
 }
 
 async fn delete_project(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     if !projects::delete(app.pool(), &id)
         .await
@@ -93,7 +86,7 @@ async fn delete_project(
 
 async fn add_paper_to_project(
     State(app): State<App>,
-    Path((paper_id, project_id)): Path<(String, String)>,
+    ApiPath((paper_id, project_id)): ApiPath<(String, String)>,
 ) -> Result<Response, ApiError> {
     // Pre-check both ids so a bad request is a clean 404 (not an FK error).
     fetch_paper(&app, &paper_id, Trash::Allow, "membership").await?;
@@ -109,7 +102,7 @@ async fn add_paper_to_project(
 
 async fn remove_paper_from_project(
     State(app): State<App>,
-    Path((paper_id, project_id)): Path<(String, String)>,
+    ApiPath((paper_id, project_id)): ApiPath<(String, String)>,
 ) -> Result<Response, ApiError> {
     if !projects::remove_paper(app.pool(), &paper_id, &project_id)
         .await

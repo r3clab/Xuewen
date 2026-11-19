@@ -1,6 +1,9 @@
 <script lang="ts">
   import { setPaperName } from '$app/actions';
   import { NAME_CHIP } from './nameChip';
+  import { errorMessage } from '$shared/errors';
+  import { escapeLayer } from '$shared/ui/escape';
+  import { focusOnMount } from '$shared/ui/focus';
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 
   let { d }: { d: PaperDetail } = $props();
@@ -16,11 +19,9 @@
     editing = true;
   }
 
-  // The input exists only in edit mode; focus and select it as it mounts so
-  // typing replaces the old value without an extra click.
-  function autofocus(el: HTMLInputElement) {
-    el.focus();
-    el.select();
+  function cancel() {
+    editing = false;
+    error = null;
   }
 
   async function commit() {
@@ -44,7 +45,7 @@
       await setPaperName(d.id, next);
       editing = false;
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'rename failed');
     } finally {
       busy = false;
     }
@@ -54,9 +55,6 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       void commit();
-    } else if (e.key === 'Escape') {
-      editing = false;
-      error = null;
     }
   }
 </script>
@@ -66,7 +64,8 @@
   {#if editing}
     <input
       bind:value={draft}
-      use:autofocus
+      {@attach focusOnMount}
+      {@attach escapeLayer(cancel)}
       disabled={busy}
       onblur={() => void commit()}
       onkeydown={onKeydown}

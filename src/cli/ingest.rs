@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use super::output::print_outcome;
 use super::signals::cancel_on_signal;
 use super::Ctx;
+use crate::app::error::Error;
+use crate::app::App;
 use crate::ingest::import::{ImportError, Imported};
 use crate::ingest::refresh::RefreshTarget;
-use crate::search::vector::OpenError;
-use crate::search::{indexer, SearchService, Semantic};
 
 #[derive(clap::Args)]
 pub(super) struct IngestArgs {
@@ -46,44 +46,21 @@ pub(super) async fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
                  and drop it in the inbox."
             )
         }
-        Err(ImportError::Unsupported) => {
+        Err(Error::Import(ImportError::Unsupported)) => {
             anyhow::bail!("could not recognize {input:?} as a URL, DOI, or arXiv id")
         }
-        Err(ImportError::CookieExpired) => anyhow::bail!(
+        Err(Error::Import(ImportError::CookieExpired)) => anyhow::bail!(
             "proxy session expired — refresh it: xuewen proxy-cookie --set '<cookie>'"
         ),
-        Err(ImportError::Network(e)) => Err(e.context("fetch failed")),
-        Err(ImportError::Ingest(e)) => Err(e),
-        Err(ImportError::Unavailable(m)) => Err(anyhow::Error::msg(m)),
-        Err(ImportError::Internal(e)) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 
 pub(super) async fn watch(ctx: &Ctx) -> Result<()> {
-    let app = &ctx.app;
-    let semantic = ctx.open_semantic().await?;
-    let vectors = semantic.store().cloned();
-    match semantic {
-        // The holder runs its own sweeps; a second Tantivy writer here would
-        // only fail every paper into backoff.
-        Semantic::Unavailable(e @ OpenError::Locked { .. }) => {
-            tracing::warn!("search indexing disabled: {e}")
-        }
-        semantic => match SearchService::open(ctx.pool.clone(), &ctx.cfg.search, semantic).await {
-            Ok(s) => {
-                if let Err(e) = indexer::spawn(app.tasks(), s, ctx.cfg.library_root.clone()).await {
-                    tracing::warn!("search indexing disabled: {e:#}");
-                }
-            }
-            Err(e) => tracing::warn!("search indexing disabled: {e}"),
-        },
-    }
+    let app = App::for_watch(&ctx.cfg, ctx.pool.clone()).await?;
     tokio::spawn(cancel_on_signal(app.tasks().token()));
     let watched = app.watch(&ctx.cfg.inbox_dir).await;
     app.shutdown().await;
-    if let Some(vectors) = vectors {
-        vectors.close_gracefully().await;
-    }
     Ok(watched?)
 }
 

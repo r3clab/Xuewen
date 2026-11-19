@@ -1,3 +1,3 @@
 pub(crate) mod identify;
-mod matching;
+pub(crate) mod matching;
 pub mod resolve;

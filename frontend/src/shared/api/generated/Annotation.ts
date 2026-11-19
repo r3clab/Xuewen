@@ -11,7 +11,7 @@ export type Annotation = { paper_id: string,
  */
 id: string, page_index: number, kind: AnnotationKind, color: AnnotationColor, quoted_text: string | null, note: string | null, 
 /**
- * Verbatim `AnnotationTransferItem`. `null` when the stored JSON failed
+ * Verbatim `{data: <annotation>}`. `null` when the stored JSON failed
  * to parse — the row still lists (its projection is intact) but the
  * reader skips redrawing it rather than crashing the whole document.
  */

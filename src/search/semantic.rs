@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -33,47 +32,12 @@ impl Semantic {
         ai: &AiConfig,
         mode: OpenMode,
     ) -> Result<Self> {
-        Self::open_waiting(pool, cfg, ai, mode, Duration::ZERO).await
-    }
-
-    /// `open`, but a lock whose holder publishes no server address is waited
-    /// out for up to `wait`: a CLI command's catch-up that overlaps a server
-    /// start would otherwise leave that server without semantic search until
-    /// it restarts.
-    pub(crate) async fn open_waiting(
-        pool: &SqlitePool,
-        cfg: &SearchConfig,
-        ai: &AiConfig,
-        mode: OpenMode,
-        wait: Duration,
-    ) -> Result<Self> {
-        let Some(e) = &ai.embedding else {
+        let Some((embedder, dims)) = embedder(ai) else {
             return Ok(Self::NotConfigured);
         };
-        let resolved = ai.resolve(&e.endpoint);
-        let Some(embedder) = Embedder::from_resolved(&resolved, &e.model(), e.dims) else {
-            return Ok(Self::NotConfigured);
-        };
-        let deadline = tokio::time::Instant::now() + wait;
-        let opened = loop {
-            match VectorStore::open(&cfg.vector_dir, e.dims, mode).await {
-                Err(OpenError::Locked { holder: None, .. })
-                    if tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-                opened => break opened,
-            }
-        };
-        match opened {
+        match VectorStore::open(&cfg.vector_dir, dims, mode).await {
             Ok((store, opened)) => {
-                if opened == Opened::Empty {
-                    tracing::info!(
-                        "vector store at {} is empty; the library will be re-embedded",
-                        cfg.vector_dir.display()
-                    );
-                    store::clear_stamps(pool, false, true).await?;
-                }
+                clear_stamps_if_empty(pool, opened).await?;
                 Ok(Self::Ready(SemanticTier { embedder, store }))
             }
             Err(err) => {
@@ -83,15 +47,73 @@ impl Semantic {
         }
     }
 
-    pub(crate) fn tier(&self) -> Option<&SemanticTier> {
-        match self {
-            Self::Ready(tier) => Some(tier),
-            Self::NotConfigured | Self::Unavailable(_) => None,
+    /// `open` for a long-running process: a store another process holds (a
+    /// CLI command's catch-up sweep can outlast any fixed wait) is taken
+    /// over by `acquire_waiting` once released, rather than leaving semantic
+    /// search off until a restart.
+    pub(crate) async fn open_deferred(
+        pool: &SqlitePool,
+        cfg: &SearchConfig,
+        ai: &AiConfig,
+    ) -> Result<Self> {
+        let Some((embedder, dims)) = embedder(ai) else {
+            return Ok(Self::NotConfigured);
+        };
+        match VectorStore::open(&cfg.vector_dir, dims, OpenMode::LoadOrCreate).await {
+            Ok((store, opened)) => {
+                clear_stamps_if_empty(pool, opened).await?;
+                Ok(Self::Ready(SemanticTier { embedder, store }))
+            }
+            Err(err @ OpenError::Locked { .. }) => {
+                tracing::warn!("semantic search waits: {err}");
+                Ok(Self::Ready(SemanticTier {
+                    embedder,
+                    store: VectorStore::waiting(&cfg.vector_dir, dims),
+                }))
+            }
+            Err(err) => {
+                tracing::warn!("semantic search disabled: {err}");
+                Ok(Self::Unavailable(err))
+            }
         }
     }
 
+    /// Try once to take over a store `open_deferred` found held; `true`
+    /// while it is still waiting for its holder.
+    pub(crate) async fn acquire_waiting(&self, pool: &SqlitePool) -> bool {
+        let Some(store) = self.store().filter(|s| s.is_waiting()) else {
+            return false;
+        };
+        match store.acquire().await {
+            Ok(None) => true,
+            Ok(Some(opened)) => {
+                tracing::info!("semantic search started: the vector store was released");
+                if let Err(e) = clear_stamps_if_empty(pool, opened).await {
+                    tracing::warn!("could not schedule re-embedding the library: {e:#}");
+                }
+                false
+            }
+            Err(e) => {
+                tracing::warn!("semantic search disabled: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// Only while its store is open.
+    pub(crate) fn tier(&self) -> Option<&SemanticTier> {
+        match self {
+            Self::Ready(tier) if tier.store.unavailable().is_none() => Some(tier),
+            Self::Ready(_) | Self::NotConfigured | Self::Unavailable(_) => None,
+        }
+    }
+
+    /// The store whatever its state, for the consumers that share it.
     pub(crate) fn store(&self) -> Option<&VectorStore> {
-        self.tier().map(|t| &t.store)
+        match self {
+            Self::Ready(tier) => Some(&tier.store),
+            Self::NotConfigured | Self::Unavailable(_) => None,
+        }
     }
 
     pub(crate) fn holder(&self) -> Option<SocketAddr> {
@@ -103,13 +125,31 @@ impl Semantic {
 
     pub(crate) fn reason(&self) -> Option<String> {
         match self {
-            Self::Ready(_) => None,
+            Self::Ready(tier) => tier.store.unavailable(),
             Self::NotConfigured => {
                 Some("embedding API not configured (set [ai.embedding] and an API key)".into())
             }
             Self::Unavailable(err) => Some(err.to_string()),
         }
     }
+}
+
+fn embedder(ai: &AiConfig) -> Option<(Embedder, usize)> {
+    let e = ai.embedding.as_ref()?;
+    let resolved = ai.resolve(&e.endpoint);
+    Some((
+        Embedder::from_resolved(&resolved, &e.model(), e.dims)?,
+        e.dims,
+    ))
+}
+
+/// An empty store means every vector stamp in SQLite is stale.
+async fn clear_stamps_if_empty(pool: &SqlitePool, opened: Opened) -> Result<()> {
+    if opened == Opened::Empty {
+        tracing::info!("the vector store is empty; the library will be re-embedded");
+        store::clear_stamps(pool, false, true).await?;
+    }
+    Ok(())
 }
 
 impl From<Option<SemanticTier>> for Semantic {
@@ -127,11 +167,15 @@ mod tests {
         crate::library::papers::insert(pool, &sample_paper("p1", "h1"))
             .await
             .unwrap();
-        store::replace_chunks(pool, "p1", &[], "h1", "mh")
+        store::replace_body(pool, "p1", &[], "h1").await.unwrap();
+        store::mark_fts_done(pool, &[("p1", "dh")]).await.unwrap();
+        mark_embedded(pool).await;
+    }
+
+    async fn mark_embedded(pool: &SqlitePool) {
+        store::mark_vectors_done(pool, "p1", None, store::VectorsDone::All { model: "m1" })
             .await
             .unwrap();
-        store::mark_fts_done(pool, "p1", "nh").await.unwrap();
-        store::mark_vectors_done(pool, "p1", "m1").await.unwrap();
     }
 
     async fn stamps(pool: &SqlitePool) -> (bool, bool) {
@@ -150,29 +194,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_waiting_outlasts_a_short_lived_holder() {
+    async fn a_deferred_open_takes_the_store_over_once_its_holder_lets_go() {
         let (_db, pool) = temp_pool().await;
         let dir = tempfile::tempdir().unwrap();
         let (cfg, ai) = (
             search_cfg(dir.path()),
             embedding_ai("http://127.0.0.1:1/v1", 4),
         );
+        indexed_paper(&pool).await;
         let (holder, _) = VectorStore::open(&cfg.vector_dir, 4, OpenMode::LoadOrCreate)
             .await
             .unwrap();
-        let open = |wait| Semantic::open_waiting(&pool, &cfg, &ai, OpenMode::LoadOrCreate, wait);
-        assert!(open(Duration::ZERO).await.unwrap().tier().is_none());
 
-        let released = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            holder.close().await.unwrap();
-        });
-        assert!(open(Duration::from_secs(10))
-            .await
-            .unwrap()
-            .tier()
-            .is_some());
-        released.await.unwrap();
+        let semantic = Semantic::open_deferred(&pool, &cfg, &ai).await.unwrap();
+        assert!(semantic.tier().is_none());
+        let reason = semantic.reason().unwrap();
+        assert!(reason.contains("in use"), "got: {reason}");
+        assert!(semantic.store().is_some(), "shared with daily and the app");
+        assert!(semantic.acquire_waiting(&pool).await, "still held");
+        assert_eq!(stamps(&pool).await, (true, true));
+
+        holder.close().await.unwrap();
+        assert!(!semantic.acquire_waiting(&pool).await);
+        assert!(semantic.tier().is_some() && semantic.reason().is_none());
+        assert_eq!(
+            stamps(&pool).await,
+            (true, false),
+            "an empty store re-embeds"
+        );
+        assert!(
+            !semantic.acquire_waiting(&pool).await,
+            "nothing left to wait for"
+        );
     }
 
     #[tokio::test]
@@ -197,7 +250,7 @@ mod tests {
             .unwrap();
         store.close().await.unwrap();
 
-        store::mark_vectors_done(&pool, "p1", "m1").await.unwrap();
+        mark_embedded(&pool).await;
         let semantic = Semantic::open(&pool, &cfg, &ai, OpenMode::LoadOrCreate)
             .await
             .unwrap();

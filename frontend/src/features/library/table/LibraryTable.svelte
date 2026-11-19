@@ -12,12 +12,9 @@
   import { addPapersToProject, addTagToPapers } from '$features/library/organization/actions';
   import { projects } from '$features/library/organization/state.svelte';
   import { setSortFilter } from '$features/library/search/actions';
-  import {
-    filters,
-    relevanceSearchActive,
-    searchMeta,
-  } from '$features/library/search/state.svelte';
+  import { filters, searchMeta } from '$features/library/search/state.svelte';
   import { openTab, selection, selectPaper } from '$features/reader/tabs/state.svelte';
+  import { errorMessage } from '$shared/errors';
   import { toast } from '$shared/ui/toasts.svelte';
   import { abbreviateVenue } from '$features/library/venue';
   import { fitToAvailable, measureColumnFromDom } from './columnAutoFit';
@@ -39,40 +36,35 @@
     type PinnedColumnKey,
   } from './columns';
   import type { PaperSummary } from '$shared/api/generated/PaperSummary';
-  import type { Sort } from '$features/library/search/types';
+  import type { Sort } from '$shared/api/generated/Sort';
 
   // Multi-select for bulk actions. Lives here (not in global state): it only
-  // means anything while the table is on screen, and pruning keeps it honest
-  // when a filter change or delete drops papers out of the list.
-  let selected = $state<string[]>([]);
+  // means anything while the table is on screen. What counts as selected is
+  // only what is still listed, so a filter change or delete that drops
+  // papers out of the list drops them from the selection too.
+  let picked = $state<string[]>([]);
   let confirmingDelete = $state(false);
   let tagDraft = $state('');
   let busy = $state(false);
 
-  // Memoized id sets: the prune effect re-runs on every selection change too,
-  // and each row's checkbox re-checks membership when `selected` changes —
-  // both stay O(1)-per-lookup instead of rescanning arrays.
+  // Memoized id sets: each row's checkbox re-checks membership when the
+  // selection changes, so lookups stay O(1) instead of rescanning arrays.
   const paperIds = $derived(new Set(library.papers.map((p) => p.id)));
+  const selected = $derived(picked.filter((id) => paperIds.has(id)));
   const selectedSet = $derived(new Set(selected));
-
-  $effect(() => {
-    if (selected.some((id) => !paperIds.has(id))) {
-      selected = selected.filter((id) => paperIds.has(id));
-    }
-  });
 
   const allSelected = $derived(
     library.papers.length > 0 && selected.length === library.papers.length,
   );
 
   function toggleOne(id: string) {
-    selected = selectedSet.has(id) ? selected.filter((x) => x !== id) : [...selected, id];
+    picked = selectedSet.has(id) ? selected.filter((x) => x !== id) : [...selected, id];
   }
   function toggleAll() {
-    selected = allSelected ? [] : library.papers.map((p) => p.id);
+    picked = allSelected ? [] : library.papers.map((p) => p.id);
   }
   function clearSelection() {
-    selected = [];
+    picked = [];
     confirmingDelete = false;
   }
 
@@ -83,7 +75,7 @@
   // While search terms are active the server ranks by relevance; sort headers
   // would lie, so they go inert (arrows off, buttons disabled, no aria-sort).
   // Qualifier-only queries (pills) still list in sort order.
-  const searching = $derived(relevanceSearchActive());
+  const searching = $derived(filters.searching);
 
   // One sort per header for Name/Title/Added; Year toggles between both
   // directions. The sortHeader snippet derives aria-sort, the arrow, and the
@@ -159,6 +151,10 @@
     e.preventDefault();
     headerMenu = { x: e.clientX, y: e.clientY };
   }
+  function openHeaderMenuFrom(trigger: HTMLElement) {
+    const r = trigger.getBoundingClientRect();
+    headerMenu = { x: r.left, y: r.bottom };
+  }
 
   // One shared formatter: constructing Intl.DateTimeFormat per row per render
   // (what toLocaleDateString with options does) is measurably expensive.
@@ -170,6 +166,12 @@
 
   function open(p: PaperSummary) {
     openTab(p);
+  }
+  // A click on a control inside the row belongs to that control; anywhere
+  // else on the row opens the paper.
+  function onRowClick(e: MouseEvent, p: PaperSummary) {
+    if (e.target instanceof Element && e.target.closest('button, a, input, select, label, [role="button"]')) return;
+    open(p);
   }
   function onRowContextMenu(e: MouseEvent, p: PaperSummary) {
     selectPaper(p.id);
@@ -184,7 +186,7 @@
     try {
       await fn();
     } catch (e) {
-      toast('error', (e as Error).message);
+      toast('error', errorMessage(e, 'bulk action failed'));
     } finally {
       busy = false;
     }
@@ -339,8 +341,9 @@
       </colgroup>
       <thead class="sticky top-0 z-10 bg-paper dark:bg-night">
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -- the
-             right-click column menu is a mouse convenience; resizing stays
-             keyboard-reachable through the focusable handles. -->
+             right-click column menu is a mouse shortcut; the keyboard reaches
+             the same menu through the Tags header's "Column options" button,
+             and resizing through the focusable handles. -->
         <tr
           class="border-b border-stone-200 dark:border-stone-800"
           oncontextmenu={onHeaderContextMenu}
@@ -370,7 +373,18 @@
             {@render resizeHandle('venue')}
           </th>
           {@render sortHeader('year', { label: 'Year', asc: 'year_asc', desc: 'year_desc' })}
-          <th class={th}>Tags</th>
+          <th class={th}>
+            Tags
+            <!-- Out of layout until keyboard-focused (the filter pills' "⋯"
+                 pattern): mouse users have the header's right-click. -->
+            <button
+              type="button"
+              aria-label="Column options"
+              aria-haspopup="menu"
+              onclick={(e) => openHeaderMenuFrom(e.currentTarget)}
+              class="sr-only rounded text-stone-400 focus-visible:not-sr-only dark:text-stone-500"
+            >⋯</button>
+          </th>
           <!-- Added's handle is left-edge: its right edge IS the table edge;
                the divider it owns is the Tags|Added boundary on its left. -->
           {@render sortHeader('added', { label: 'Added', sort: 'added_desc' }, 'left')}
@@ -383,30 +397,31 @@
                controls are the nested title button, star button, and checkbox. -->
           <tr
             data-cursor={selection.id === p.id ? 'true' : undefined}
-            onclick={() => open(p)}
+            onclick={(e) => onRowClick(e, p)}
             oncontextmenu={(e) => onRowContextMenu(e, p)}
             class={`cursor-pointer border-b border-stone-200/60 transition-colors hover:bg-parchment/70 dark:border-stone-800/60 dark:hover:bg-stone-800/40 ${
               selection.id === p.id ? 'bg-parchment dark:bg-stone-800/50' : ''
             }`}
           >
-            <td class={td} onclick={(e) => e.stopPropagation()}>
-              <input
-                type="checkbox"
-                aria-label={`Select ${p.title ?? p.id}`}
-                checked={selectedSet.has(p.id)}
-                onchange={() => toggleOne(p.id)}
-                class="accent-amber-700"
-              />
+            <!-- The label fills the cell, so a click near the checkbox
+                 toggles it rather than opening the paper. -->
+            <td class="p-0 align-top">
+              <label class="block px-3 py-1.5">
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${p.title ?? p.id}`}
+                  checked={selectedSet.has(p.id)}
+                  onchange={() => toggleOne(p.id)}
+                  class="accent-amber-700"
+                />
+              </label>
             </td>
             <td class={td}>
               <button
                 type="button"
                 aria-label={p.starred ? 'Unstar paper' : 'Star paper'}
                 aria-pressed={p.starred}
-                onclick={(e) => {
-                  e.stopPropagation();
-                  void toggleStar(p.id);
-                }}
+                onclick={() => void toggleStar(p.id)}
                 class={p.starred
                   ? 'text-orange-500'
                   : 'text-stone-300 hover:text-orange-400 dark:text-stone-600'}
@@ -431,10 +446,7 @@
               <button
                 type="button"
                 data-col="title"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  open(p);
-                }}
+                onclick={() => open(p)}
                 class="text-left font-serif font-medium text-ink hover:underline dark:text-stone-100"
               >
                 {p.title ?? '(untitled)'}
@@ -448,9 +460,8 @@
                   <span class="mr-1 rounded bg-parchment px-1 py-px font-mono text-chip uppercase tracking-wide text-stone-500 dark:bg-stone-800 dark:text-stone-400">
                     {m.field}{#if m.page != null}&nbsp;p.{m.page}{/if}
                   </span>
-                  <!-- SAFETY: the server HTML-escapes snippet text and emits only <mark> tags. -->
                   <span class="[&_mark]:rounded [&_mark]:bg-yellow-200 [&_mark]:px-0.5 dark:[&_mark]:bg-yellow-500/40">
-                    {@html m.snippet}
+                    {#each m.snippet as part, i (i)}{#if part.marked}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
                   </span>
                 </div>
               {/if}

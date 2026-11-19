@@ -105,9 +105,9 @@
         <Spinner label="Loading document…" />
       </div>
     {/snippet}
-    <!-- Same escape hatch as PdfTab's missing-PDF probe: a file that HEADs
-         fine but fails to parse, or wants a password the reader has no prompt
-         for, still deserves open/download links, not a dead-end message. -->
+    <!-- A file the engine can't open — missing, unparseable, or wanting a
+         password the reader has no prompt for — still deserves open/download
+         links, not a dead-end message. -->
     {#snippet error()}
       <PdfFallback id={documentId} />
     {/snippet}

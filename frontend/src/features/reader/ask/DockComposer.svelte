@@ -1,21 +1,23 @@
-<script module lang="ts">
-  /// The dock's single composer. `c` (and the rail's 問) focus it by id —
-  /// one dock, one live instance, so an id is enough and no ref has to be
-  /// threaded up through ReaderDock.
-  export const COMPOSER_ID = 'dock-composer';
-</script>
-
 <script lang="ts">
   import { Eraser, SendHorizontal, Square } from '@lucide/svelte';
   import { chat, clearChatThread, sendChatMessage, setChatModel, stopChatStream } from './chat.svelte';
+  import { composerFocus } from '$features/reader/dock/state.svelte';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
 
+  /// Called as the reader sends, before the exchange renders.
+  let { onsend }: { onsend?: () => void } = $props();
+
   let confirmingClear = $state(false);
+
+  function send() {
+    onsend?.();
+    void sendChatMessage();
+  }
 
   function onComposerKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void sendChatMessage();
+      send();
     }
   }
 </script>
@@ -60,7 +62,7 @@
 
   <div class="flex items-end gap-2">
     <textarea
-      id={COMPOSER_ID}
+      {@attach composerFocus.attach}
       bind:value={chat.draft}
       onkeydown={onComposerKeydown}
       rows="2"
@@ -78,7 +80,7 @@
     {:else}
       <button
         type="button"
-        onclick={() => void sendChatMessage()}
+        onclick={send}
         disabled={!chat.draft.trim()}
         class="inline-flex items-center gap-1.5 rounded-lg bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-800 disabled:opacity-50 dark:bg-amber-600 dark:hover:bg-amber-500"
       >

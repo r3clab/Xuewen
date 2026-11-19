@@ -24,8 +24,9 @@ vi.mock('@embedpdf/svelte/runtime', () => ({
 import AnnotationTools from './AnnotationTools.svelte';
 import { annotationTools } from './state.svelte';
 import { colorHex } from './palette';
+import { dismissTopLayer } from '$shared/ui/escape';
 
-const props = { onHoldChange: () => {} };
+const props = {};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -58,24 +59,27 @@ describe('the tool menu', () => {
     expect(screen.queryByRole('menuitemradio', { name: /ink|square|circle|free text/i })).toBeNull();
   });
 
-  it('holds the auto-hiding pill open while the menu is up', async () => {
-    const onHoldChange = vi.fn();
-    render(AnnotationTools, { props: { onHoldChange } });
-    expect(onHoldChange).toHaveBeenLastCalledWith(false);
-    await openMenu();
-    expect(onHoldChange).toHaveBeenLastCalledWith(true);
+  it('opens from the bound state the toolbar holds', () => {
+    render(AnnotationTools, { props: { menuOpen: true } });
+    expect(screen.getByRole('menu', { name: 'Annotation tools' })).toBeInTheDocument();
   });
 
-  it('closes on Escape without letting the global cascade see it', async () => {
-    const onKey = vi.fn();
-    document.addEventListener('keydown', onKey);
+  it('takes focus into the menu, and arrows move through its items', async () => {
+    render(AnnotationTools, { props });
+    await openMenu();
+    expect(screen.getByRole('menuitemradio', { name: 'Highlight' })).toHaveFocus();
+    await userEvent.keyboard('{ArrowDown}');
+    expect(screen.getByRole('menuitemradio', { name: 'Underline' })).toHaveFocus();
+  });
+
+  it('closes on Escape and hands focus back to its trigger', async () => {
+    window.addEventListener('keydown', dismissTopLayer);
     render(AnnotationTools, { props });
     await openMenu();
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('menu')).toBeNull();
-    // The reader's global Escape would exit zen or close the palette.
-    expect(onKey).not.toHaveBeenCalled();
-    document.removeEventListener('keydown', onKey);
+    expect(screen.getByRole('button', { name: /annotation tools/i })).toHaveFocus();
+    window.removeEventListener('keydown', dismissTopLayer);
   });
 });
 

@@ -2,7 +2,8 @@ import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PaperContextMenu from './PaperContextMenu.svelte';
-import { closeContextMenu, contextMenu } from './contextMenu.svelte';
+import { closeContextMenu, contextMenu, openContextMenu } from './contextMenu.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
 import { identifyState } from '$features/identify/state.svelte';
 import { library } from '$features/library/state.svelte';
 import { selection, viewer } from '$features/reader/tabs/state.svelte';
@@ -30,6 +31,15 @@ function stubFetch() {
   );
 }
 
+function openAt(target: PaperSummary, x = 10, y = 10): void {
+  openContextMenu(new MouseEvent('contextmenu', { clientX: x, clientY: y, cancelable: true }), target);
+}
+
+beforeEach(() => {
+  window.addEventListener('keydown', dismissTopLayer);
+  return () => window.removeEventListener('keydown', dismissTopLayer);
+});
+
 beforeEach(() => {
   toasts.items.length = 0;
   selection.id = null;
@@ -37,10 +47,7 @@ beforeEach(() => {
   identifyState.open = false;
   identifyState.paperId = null;
   library.papers = [paper];
-  contextMenu.open = true;
-  contextMenu.x = 10;
-  contextMenu.y = 10;
-  contextMenu.paper = paper;
+  openAt(paper);
   vi.unstubAllGlobals();
   stubFetch();
   vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async () => {}) } });
@@ -63,7 +70,7 @@ describe('PaperContextMenu', () => {
       );
     });
     expect(toasts.items.some((t) => t.kind === 'success')).toBe(true);
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
   });
 
   it('Identify opens the identify modal for the paper and closes the menu', async () => {
@@ -71,7 +78,7 @@ describe('PaperContextMenu', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: /identify/i }));
     expect(identifyState.open).toBe(true);
     expect(identifyState.paperId).toBe('p1');
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
   });
 
   it('Delete requires a confirm before hitting the API, then closes', async () => {
@@ -86,13 +93,27 @@ describe('PaperContextMenu', () => {
         true,
       );
     });
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
+  });
+
+  it('the delete confirm takes focus, so Enter confirms', async () => {
+    render(PaperContextMenu);
+    await userEvent.click(screen.getByRole('menuitem', { name: /delete/i }));
+    expect(screen.getByRole('button', { name: 'Delete' })).toHaveFocus();
+  });
+
+  it('a retarget mid-confirm lands on the action list, like a fresh open', async () => {
+    render(PaperContextMenu);
+    await userEvent.click(screen.getByRole('menuitem', { name: /delete/i }));
+    openAt({ ...paper, id: 'p2' }, 40, 40);
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: /copy bibtex/i })).toHaveFocus());
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
   });
 
   it('Escape closes the menu', async () => {
     render(PaperContextMenu);
     await userEvent.keyboard('{Escape}');
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
   });
 
   it('dismisses when a pane scrolls under it', async () => {
@@ -106,7 +127,7 @@ describe('PaperContextMenu', () => {
     const pane = document.createElement('div');
     document.body.appendChild(pane);
     pane.dispatchEvent(new Event('scroll'));
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
     pane.remove();
   });
 
@@ -151,18 +172,16 @@ describe('PaperContextMenu keyboard', () => {
     );
     await userEvent.keyboard('{ArrowDown}{Enter}'); // Identify…
     expect(identifyState.open).toBe(true);
-    expect(contextMenu.open).toBe(false);
+    expect(contextMenu.paper).toBeNull();
   });
 
   it('restores focus to the previously focused element on close', async () => {
-    contextMenu.open = false;
-    contextMenu.paper = null;
+    closeContextMenu();
     const outside = document.createElement('button');
     document.body.appendChild(outside);
     outside.focus();
     render(PaperContextMenu);
-    contextMenu.open = true;
-    contextMenu.paper = paper;
+    openAt(paper);
     await waitFor(() =>
       expect(screen.getByRole('menuitem', { name: /copy bibtex/i })).toHaveFocus(),
     );

@@ -1,4 +1,5 @@
 use crate::library::model::Identifier;
+use crate::metadata::identify::{extract_arxiv, extract_doi, is_arxiv_id};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -17,15 +18,6 @@ pub(crate) struct PdfTarget {
     pub(crate) requires_proxy: bool,
 }
 
-/// arXiv id preceded by an explicit "arXiv:" marker or an arxiv.org abs/pdf URL.
-/// The prefix is REQUIRED so a bare number sitting in prose (even prose that
-/// mentions "arxiv") is not misread as an id.
-static ARXIV_CONTEXT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/)(\d{4}\.\d{4,5}(?:v\d+)?)").unwrap()
-});
-/// A bare arXiv id occupying the whole (trimmed) input.
-static ARXIV_BARE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\d{4}\.\d{4,5}(?:v\d+)?$").unwrap());
 static IEEE_DOC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)ieeexplore\.ieee\.org/document/(\d+)").unwrap());
 
@@ -39,29 +31,26 @@ pub(crate) fn parse_source(input: &str) -> Option<Source> {
     if let Some(c) = IEEE_DOC_RE.captures(t) {
         return Some(Source::IeeeDocument(c[1].to_string()));
     }
-    // A DOI anywhere (including doi.org / dl.acm.org URLs). Reuse identify's
-    // extractor so the DOI pattern stays defined in one place.
-    if let Some(doi) = crate::metadata::identify::extract_doi(t) {
+    // A DOI anywhere (including doi.org / dl.acm.org URLs).
+    if let Some(doi) = extract_doi(t) {
         return Some(Source::Doi(doi));
     }
     // arXiv: an explicit "arXiv:"/arxiv.org context, else a bare id that is the
     // entire input (tolerating trailing punctuation from a paste).
-    if let Some(c) = ARXIV_CONTEXT_RE.captures(t) {
-        return Some(Source::Arxiv(c[1].to_string()));
+    if let Some(id) = extract_arxiv(t) {
+        return Some(Source::Arxiv(id));
     }
     let bare = t.trim_end_matches(['.', ',', ';']);
-    if ARXIV_BARE_RE.is_match(bare) {
-        return Some(Source::Arxiv(bare.to_string()));
-    }
-    None
+    is_arxiv_id(bare).then(|| Source::Arxiv(bare.to_string()))
 }
 
 /// Map a source to its PDF URL, or `None` when no publisher PDF URL is
 /// constructible (unknown publisher, or an IEEE DOI without an arnumber).
-pub(crate) fn pdf_target(src: &Source) -> Option<PdfTarget> {
+/// arXiv PDFs are served from `arxiv_pdf_base`.
+pub(crate) fn pdf_target(src: &Source, arxiv_pdf_base: &str) -> Option<PdfTarget> {
     match src {
         Source::Arxiv(id) => Some(PdfTarget {
-            url: format!("https://arxiv.org/pdf/{id}"),
+            url: format!("{arxiv_pdf_base}/{id}"),
             requires_proxy: false,
         }),
         Source::Doi(doi) if doi.starts_with("10.1145/") => Some(PdfTarget {
@@ -142,23 +131,29 @@ mod parse_tests {
         assert_eq!(parse_source("https://example.com/thing"), None);
     }
 
+    use crate::library::model::ARXIV_PDF_BASE;
+
     #[test]
     fn pdf_target_arxiv_is_open() {
-        let t = pdf_target(&Source::Arxiv("1706.03762".into())).unwrap();
+        let t = pdf_target(&Source::Arxiv("1706.03762".into()), ARXIV_PDF_BASE).unwrap();
         assert_eq!(t.url, "https://arxiv.org/pdf/1706.03762");
         assert!(!t.requires_proxy);
     }
 
     #[test]
     fn pdf_target_acm_needs_proxy() {
-        let t = pdf_target(&Source::Doi("10.1145/3292500.3330701".into())).unwrap();
+        let t = pdf_target(
+            &Source::Doi("10.1145/3292500.3330701".into()),
+            ARXIV_PDF_BASE,
+        )
+        .unwrap();
         assert_eq!(t.url, "https://dl.acm.org/doi/pdf/10.1145/3292500.3330701");
         assert!(t.requires_proxy);
     }
 
     #[test]
     fn pdf_target_ieee_document_needs_proxy() {
-        let t = pdf_target(&Source::IeeeDocument("8835311".into())).unwrap();
+        let t = pdf_target(&Source::IeeeDocument("8835311".into()), ARXIV_PDF_BASE).unwrap();
         assert_eq!(
             t.url,
             "https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8835311"
@@ -169,8 +164,8 @@ mod parse_tests {
     #[test]
     fn pdf_target_unknown_doi_is_none() {
         // A non-ACM/IEEE DOI has no constructible publisher PDF URL.
-        assert!(pdf_target(&Source::Doi("10.1109/5.771073".into())).is_none()); // IEEE DOI: no arnumber
-        assert!(pdf_target(&Source::Doi("10.1000/xyz".into())).is_none());
+        assert!(pdf_target(&Source::Doi("10.1109/5.771073".into()), ARXIV_PDF_BASE).is_none()); // IEEE DOI: no arnumber
+        assert!(pdf_target(&Source::Doi("10.1000/xyz".into()), ARXIV_PDF_BASE).is_none());
     }
 
     #[test]

@@ -1,10 +1,11 @@
 import { translateText } from './api';
 import { appSettings } from '$shared/api/settings.svelte';
+import { errorMessage } from '$shared/errors';
 import type { TranslateProvider } from '$shared/api/generated/TranslateProvider';
 
 /// Shared state for the single app-level translate popover. Only one
 /// translation is ever in flight/shown, so a lone `$state` record drives the
-/// root-mounted `TranslatePopover.svelte` (Task 6) the same way `contextMenu`
+/// root-mounted `TranslatePopover.svelte` the same way `contextMenu`
 /// drives `PaperContextMenu.svelte`.
 export const translateBox = $state<{
   open: boolean;
@@ -51,16 +52,13 @@ export async function requestTranslate(text: string, at: { x: number; y: number 
   translateBox.loading = true;
   translateBox.error = null;
   try {
-    const r = await translateText(text, {
-      provider,
-      targetLang: appSettings.translate.target_lang,
-    });
+    const r = await translateText({ text, provider, target_lang: appSettings.translate.target_lang });
     if (my !== seq) return; // superseded by a newer request
     translateBox.translation = r.translation;
     translateBox.sourceLang = r.source_lang;
     translateBox.provider = r.provider;
   } catch (e) {
-    if (my === seq) translateBox.error = (e as Error).message;
+    if (my === seq) translateBox.error = errorMessage(e, 'translate failed');
   } finally {
     if (my === seq) translateBox.loading = false;
   }

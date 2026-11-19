@@ -23,7 +23,6 @@ import { viewer } from '$features/reader/tabs/state.svelte';
 beforeEach(() => {
   vi.clearAllMocks();
   filters.q = '';
-  filters.status = 'all';
   stats.value = { total: 9, resolved: 8, needs_review: 1 };
   viewer.tabs = [];
   viewer.activeId = null;

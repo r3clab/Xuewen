@@ -1,23 +1,14 @@
 /// Auto-fit width math for the library table. The allocation logic is pure,
-/// and the text measurer is injectable, so tests (jsdom has no canvas 2D
-/// context and no layout) can supply a deterministic fake.
+/// and the text measurer is injectable, so tests can supply a deterministic
+/// fake.
 
 export type TextMeasurer = (text: string, font: string) => number;
 
-let ctx: CanvasRenderingContext2D | null | undefined;
+let ctx: CanvasRenderingContext2D | undefined;
 
-/// Measures with a lazily created detached canvas. Without a 2D context
-/// (jsdom) it falls back to a rough per-character estimate — approximate is
-/// fine here, auto-fit is a convenience, not a layout guarantee.
+/// Measures with a lazily created detached canvas.
 export const canvasMeasurer: TextMeasurer = (text, font) => {
-  if (ctx === undefined) {
-    try {
-      ctx = document.createElement('canvas').getContext('2d');
-    } catch {
-      ctx = null;
-    }
-  }
-  if (!ctx) return text.length * 7;
+  ctx ??= document.createElement('canvas').getContext('2d')!;
   ctx.font = font;
   return ctx.measureText(text).width;
 };

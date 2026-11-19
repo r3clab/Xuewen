@@ -53,10 +53,6 @@ describe('width budget', () => {
     expect(dragCeiling('title', widths, 300)).toBe(PINNED_COLUMNS.title.minWidth);
   });
 
-  it('dragCeiling falls back to the static cap without layout (jsdom)', () => {
-    expect(dragCeiling('title', defaults(), 0)).toBe(PINNED_COLUMNS.title.maxWidth);
-  });
-
   it('autoFitBudget reserves the chrome and the comfortable Tags strip', () => {
     expect(autoFitBudget(1000)).toBe(1000 - chromePx() - TAGS_TARGET_PX);
   });

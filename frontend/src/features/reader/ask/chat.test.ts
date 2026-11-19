@@ -77,9 +77,9 @@ describe('sendChatMessage', () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(
         sseBody(
-          'event: delta\ndata: {"text":"Hel"}\n\n' +
-            'event: delta\ndata: {"text":"lo"}\n\n' +
-            'event: done\ndata: {"id":7}\n\n',
+          'data: {"type":"delta","text":"Hel"}\n\n' +
+            'data: {"type":"delta","text":"lo"}\n\n' +
+            'data: {"type":"done","id":7}\n\n',
         ),
         { status: 200 },
       ),
@@ -100,9 +100,9 @@ describe('sendChatMessage', () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(
         sseBody(
-          'event: tool\ndata: {"name":"Read","detail":"paper.txt"}\n\n' +
-            'event: delta\ndata: {"text":"grounded."}\n\n' +
-            'event: done\ndata: {"id":7}\n\n',
+          'data: {"type":"tool","name":"Read","detail":"paper.txt"}\n\n' +
+            'data: {"type":"delta","text":"grounded."}\n\n' +
+            'data: {"type":"done","id":7}\n\n',
         ),
         { status: 200 },
       ),
@@ -120,7 +120,7 @@ describe('sendChatMessage', () => {
 
   it('restores the draft and shows an inline error on failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(sseBody('event: error\ndata: {"message":"upstream 401"}\n\n'), { status: 200 }),
+      new Response(sseBody('data: {"type":"error","message":"upstream 401"}\n\n'), { status: 200 }),
     ));
     chat.draft = 'hi';
     await sendChatMessage();
@@ -132,7 +132,7 @@ describe('sendChatMessage', () => {
 
   it('treats a stream that ends without done as interrupted', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(sseBody('event: delta\ndata: {"text":"He"}\n\n'), { status: 200 }),
+      new Response(sseBody('data: {"type":"delta","text":"He"}\n\n'), { status: 200 }),
     ));
     chat.draft = 'hi';
     await sendChatMessage();
@@ -144,7 +144,7 @@ describe('sendChatMessage', () => {
     const enc = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
       start(c) {
-        c.enqueue(enc.encode('event: delta\ndata: {"text":"Hi"}\n\nevent: done\ndata: {"id":3}\n\n'));
+        c.enqueue(enc.encode('data: {"type":"delta","text":"Hi"}\n\ndata: {"type":"done","id":3}\n\n'));
       },
       pull() {
         return Promise.reject(new DOMException('aborted', 'AbortError'));

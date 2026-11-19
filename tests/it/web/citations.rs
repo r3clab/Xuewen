@@ -11,7 +11,7 @@ fn chat_reply(text: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn parses_references_heuristically_without_llm() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     // Plain router: no LLM anywhere - heuristics answer.
     let server = TestServer::new(support::router(pool, root));
     let body = json!({"references": [
@@ -38,7 +38,7 @@ async fn parses_leftovers_via_llm_and_caches() {
         .mount(&upstream)
         .await;
 
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let svc = xuewen::citations::CitationsService::for_tests(pool.clone(), &upstream.uri(), "m");
     let server = {
         let app = xuewen::app::App::builder(pool, root).citations(svc).build();
@@ -58,7 +58,7 @@ async fn parses_leftovers_via_llm_and_caches() {
 
 #[tokio::test]
 async fn unknown_paper_is_404() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(support::router(pool, root));
     let resp = server
         .post("/api/papers/nope/citations")
@@ -70,7 +70,7 @@ async fn unknown_paper_is_404() {
 #[tokio::test]
 async fn empty_references_is_bad_request() {
     let upstream = MockServer::start().await;
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let svc = xuewen::citations::CitationsService::for_tests(pool.clone(), &upstream.uri(), "m");
     let server = {
         let app = xuewen::app::App::builder(pool, root).citations(svc).build();
@@ -82,4 +82,54 @@ async fn empty_references_is_bad_request() {
         .json(&json!({"references": []}))
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn matches_references_against_the_library() {
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
+    xuewen::library::papers::insert(
+        &pool,
+        &xuewen::testutil::paper(
+            "adam",
+            "Adam: A Method for Stochastic Optimization",
+            xuewen::library::model::PaperStatus::Resolved,
+        ),
+    )
+    .await
+    .unwrap();
+    xuewen::library::tags::add_paper(
+        &pool,
+        "adam",
+        &xuewen::library::tags::TagName::parse("optim").unwrap(),
+    )
+    .await
+    .unwrap();
+    let server = TestServer::new(support::router(pool, root));
+    let resp = server
+        .post("/api/citations/match")
+        .json(&json!({"references": [
+            {"text": "[1] Some Unrelated Paper About Frogs. Nature 2001."},
+            {"text": "[2] D. Kingma, J. Ba. Adam: a method for stochastic optimization. ICLR 2015."},
+            {"text": "[3] Kingma and Ba, ICLR 2015", "title": "Adam: A Method for Stochastic Optimization"},
+        ]}))
+        .await;
+    resp.assert_status_ok();
+    let v: serde_json::Value = resp.json();
+    let matches = v["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3);
+    assert!(matches[0].is_null());
+    assert_eq!(matches[1]["id"], "adam");
+    assert_eq!(matches[1]["tags"][0]["name"], "optim");
+    assert_eq!(matches[2]["id"], "adam");
+}
+
+#[tokio::test]
+async fn matching_no_references_is_bad_request() {
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
+    let server = TestServer::new(support::router(pool, root));
+    server
+        .post("/api/citations/match")
+        .json(&json!({"references": []}))
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
 }

@@ -3,6 +3,12 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import ShortcutHelp from './ShortcutHelp.svelte';
 import { shell } from './shell.svelte';
+import { handleKeydown } from '$app/keys/shortcuts';
+
+beforeEach(() => {
+  window.addEventListener('keydown', handleKeydown);
+  return () => window.removeEventListener('keydown', handleKeydown);
+});
 
 beforeEach(() => {
   shell.helpOpen = true;

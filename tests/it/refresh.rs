@@ -69,7 +69,9 @@ async fn needs_review_reresolves_and_refiles() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let ctx = IngestCtx::new(
         pool.clone(),
@@ -89,6 +91,49 @@ async fn needs_review_reresolves_and_refiles() {
     assert_eq!(got.rel_path, "wang2019kgat.pdf");
     assert!(library.join("wang2019kgat.pdf").exists());
     assert!(!unsorted.exists());
+}
+
+#[tokio::test]
+async fn reresolve_looks_up_the_stored_identifier() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    // The PDF prints no identifier: only the stored DOI can find the record.
+    support::write_test_pdf(&library.join("p.pdf"), &["Some Header"]);
+
+    let url = format!("sqlite:{}", dir.path().join("library.db").display());
+    let pool = db::connect(&url).await.unwrap();
+    let doi = "10.1145/3292500.3330701";
+    let mut p = seed_paper(
+        "01890000-0000-7000-8000-0000000000a1",
+        "h",
+        "p.pdf",
+        PaperStatus::NeedsReview,
+    );
+    p.meta.doi = Some(doi.into());
+    papers::insert(&pool, &p).await.unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path(format!("/works/{doi}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
+        .mount(&server)
+        .await;
+    let ctx = IngestCtx::new(
+        pool.clone(),
+        Libraries::under(dir.path(), &library),
+        Resolver::offline().with_crossref_base(server.uri()),
+        None,
+    );
+    let summary = refresh::run(&ctx, RefreshTarget::NeedsReview)
+        .await
+        .unwrap();
+    assert_eq!(summary.reresolved, 1);
+
+    let got = papers::get(&pool, &p.id).await.unwrap().unwrap();
+    assert_eq!(got.meta.status, PaperStatus::Resolved);
+    assert_eq!(got.meta.doi.as_deref(), Some(doi));
+    assert_eq!(got.cite_key.as_deref(), Some("wang2019kgat"));
 }
 
 #[tokio::test]
@@ -115,13 +160,8 @@ async fn resolved_paper_refiles_without_reresolving() {
     p.meta.source = Some("crossref".into());
     papers::insert(&pool, &p).await.unwrap();
 
-    // Unreachable resolver: a resolved paper must NOT be re-resolved, so no HTTP happens.
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".into(),
-        "http://127.0.0.1:1".into(),
-    )
-    .unwrap();
+    // A resolved paper must NOT be re-resolved, so the resolver is never asked.
+    let resolver = Resolver::offline();
 
     let ctx = IngestCtx::new(
         pool.clone(),
@@ -177,7 +217,9 @@ async fn all_does_not_downgrade_resolved_on_failed_reresolve() {
 
     // Reachable mock with no mounts → every lookup 404 → Unresolved.
     let server = MockServer::start().await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let ctx = IngestCtx::new(
         pool.clone(),
@@ -242,7 +284,9 @@ async fn refresh_by_id_prefix_targets_one() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let ctx = IngestCtx::new(
         pool.clone(),
@@ -301,7 +345,9 @@ async fn all_reresolves_resolved_paper() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&server)
         .await;
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri()).unwrap();
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri());
 
     let ctx = IngestCtx::new(
         pool.clone(),
@@ -369,13 +415,8 @@ async fn refiles_two_same_base_papers_with_distinct_keys() {
     papers::insert(&pool, &p2).await.unwrap();
 
     // Resolved papers under the default target are re-filed but not re-resolved,
-    // so the (unreachable) resolver is never called.
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".into(),
-        "http://127.0.0.1:1".into(),
-    )
-    .unwrap();
+    // so the resolver is never called.
+    let resolver = Resolver::offline();
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(dir.path(), &library),
@@ -422,12 +463,7 @@ async fn refresh_skips_a_trashed_paper() {
     trash::soft_delete(&pool, &p.id).await.unwrap();
 
     // Explicitly refreshing a trashed paper is a no-op (frozen); its file is not moved.
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".into(),
-        "http://127.0.0.1:1".into(),
-    )
-    .unwrap();
+    let resolver = Resolver::offline();
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(dir.path(), &library),
@@ -475,7 +511,9 @@ async fn refile_copy_failure_keeps_db_and_file_consistent() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(dir.path(), &library),
-        Resolver::with_bases(None, server.uri(), server.uri()).unwrap(),
+        Resolver::offline()
+            .with_arxiv_base(server.uri())
+            .with_crossref_base(server.uri()),
         None,
     );
 
@@ -535,7 +573,9 @@ async fn refile_rolls_back_copy_when_update_fails() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(dir.path(), &library),
-        Resolver::with_bases(None, server.uri(), server.uri()).unwrap(),
+        Resolver::offline()
+            .with_arxiv_base(server.uri())
+            .with_crossref_base(server.uri()),
         None,
     );
 

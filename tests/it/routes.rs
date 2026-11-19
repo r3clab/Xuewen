@@ -5,14 +5,16 @@ use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use axum_test::multipart::{MultipartForm, Part};
 use axum_test::TestServer;
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::support;
 
 const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/health"),
     ("GET", "/api/papers"),
     ("POST", "/api/papers"),
-    ("GET", "/api/papers/export"),
+    ("POST", "/api/papers/export"),
     ("GET", "/api/papers/p"),
     ("DELETE", "/api/papers/p"),
     ("POST", "/api/papers/p/restore"),
@@ -50,6 +52,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/papers/p/chat"),
     ("DELETE", "/api/papers/p/chat"),
     ("POST", "/api/papers/p/citations"),
+    ("POST", "/api/citations/match"),
     ("GET", "/api/papers/p/annotations"),
     ("DELETE", "/api/papers/p/annotations"),
     ("PUT", "/api/papers/p/annotations/a"),
@@ -59,6 +62,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/papers/p/code"),
     ("POST", "/api/translate"),
 ];
+
+const UNROUTED: &str = "no such endpoint";
 
 async fn base_router() -> (tempfile::TempDir, Router) {
     let (dir, pool) = support::temp_pool().await;
@@ -78,9 +83,10 @@ async fn send(router: &Router, method: &str, path: &str) -> (StatusCode, HeaderM
     (parts.status, parts.headers, bytes.to_vec())
 }
 
-/// Whether a handler answered: the static fallback serves the SPA shell
-/// (`text/html`) or a bare-text 404, and a method miss on a routed path is a
-/// 405, while every handler 404 carries the API's `{"error": ...}` body.
+/// Whether a handler answered: a method miss on a routed path is a 405, and
+/// the fallback answers an API path with the "no such endpoint" 404 (any
+/// other path with the SPA shell), while a handler's own 404 names what is
+/// missing.
 async fn routed(router: &Router, method: &str, path: &str) -> Result<(), String> {
     let (status, headers, body) = send(router, method, path).await;
     let content_type = headers
@@ -97,8 +103,9 @@ async fn routed(router: &Router, method: &str, path: &str) -> Result<(), String>
         let error = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error").cloned());
-        if error.is_none() {
-            return Err(format!("{method} {path}: unrouted 404"));
+        match error {
+            Some(e) if e != UNROUTED => {}
+            _ => return Err(format!("{method} {path}: unrouted 404")),
         }
     }
     Ok(())
@@ -150,6 +157,83 @@ async fn unrouted_requests_fail_the_check() {
 }
 
 #[tokio::test]
+async fn health_answers_without_the_database() {
+    let (dir, pool) = support::temp_pool().await;
+    let router = support::router(pool.clone(), dir.path().join("library"));
+    pool.close().await;
+    let (status, _, body) = send(&router, "GET", "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"status": "ok"})
+    );
+}
+
+#[tokio::test]
+async fn unknown_api_paths_answer_json_and_the_rest_get_the_spa() {
+    let (_dir, router) = base_router().await;
+    for path in [
+        "/api",
+        "/api/paperz",
+        "/api/papers/p/nope",
+        "/papers/p/nope",
+    ] {
+        let (status, headers, body) = send(&router, "GET", path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json", "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], UNROUTED, "{path}");
+    }
+    for path in ["/", "/library", "/apiary"] {
+        let (status, headers, _) = send(&router, "GET", path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let content_type = headers[header::CONTENT_TYPE].to_str().unwrap();
+        assert!(
+            content_type.starts_with("text/html"),
+            "{path}: {content_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_requests_answer_in_the_api_error_shape() {
+    let (_dir, router) = base_router().await;
+    let json_post = |body: &'static str| {
+        Request::post("/api/projects")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let get = |uri: &str| Request::get(uri).body(Body::empty()).unwrap();
+    let cases = [
+        (json_post("{"), StatusCode::BAD_REQUEST),
+        (
+            json_post(r#"{"name": 1}"#),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Request::post("/api/projects")
+                .body(Body::from(r#"{"name": "x"}"#))
+                .unwrap(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (get("/papers/p/preview/first"), StatusCode::BAD_REQUEST),
+        (
+            get("/api/papers/p/export?format=ris"),
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (req, expected) in cases {
+        let what = format!("{} {}", req.method(), req.uri());
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), expected, "{what}");
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"].is_string(), "{what}: {body}");
+    }
+}
+
+#[tokio::test]
 async fn upload_route_accepts_bodies_over_the_default_limit() {
     let dir = tempfile::tempdir().unwrap();
     let inbox = dir.path().join("inbox");
@@ -160,7 +244,7 @@ async fn upload_route_accepts_bodies_over_the_default_limit() {
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
-        support::offline_resolver(),
+        xuewen::metadata::resolve::Resolver::offline(),
         xuewen::ingest::fetch::Fetcher::new(None).unwrap(),
     );
     let app = xuewen::app::App::builder(pool, library)

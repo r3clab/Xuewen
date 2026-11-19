@@ -1,21 +1,25 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use sqlx::{QueryBuilder, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::now_rfc3339;
 use crate::library::model::Paper;
 use crate::library::papers::{push_paper_filters, PaperFilter};
-use crate::search::chunker::Chunk;
+use crate::search::chunker::{self, Chunk};
 
 /// State of a paper's derived search indexes. May outlive its paper (tombstone).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct IndexRow {
     pub(crate) paper_id: String,
+    /// The PDF content the stored body chunks were extracted from.
     pub(crate) content_hash: String,
-    pub(crate) meta_hash: String,
-    /// Hash of the annotation notes that went into the Tantivy doc, stamped
-    /// together with `fts_indexed_at`. Only the FTS tier carries notes.
-    pub(crate) notes_hash: String,
+    /// `summary_hash` of the seq-0 text the vector tier last embedded.
+    pub(crate) summary_hash: String,
+    /// `doc_hash` of the metadata and notes in the Tantivy doc, stamped
+    /// together with `fts_indexed_at`.
+    pub(crate) doc_hash: String,
     pub(crate) fts_indexed_at: Option<String>,
     pub(crate) vectors_indexed_at: Option<String>,
     pub(crate) embed_model: Option<String>,
@@ -40,43 +44,38 @@ pub(crate) enum ErrorTier {
     Both,
 }
 
-/// Hash of the metadata that feeds the search indexes. Comparing this against
-/// the stored value is how identify/refresh edits are detected without any
-/// event plumbing in the mutation paths.
-pub(crate) fn meta_hash(p: &Paper) -> String {
+fn digest(parts: &[&str]) -> String {
     let mut h = Sha256::new();
-    for part in [
-        p.meta.title.as_deref().unwrap_or(""),
-        p.meta.abstract_text.as_deref().unwrap_or(""),
-        p.meta.venue.as_deref().unwrap_or(""),
-    ] {
+    for part in parts {
         h.update(part.as_bytes());
         h.update([0x1f]);
     }
-    h.update(
-        p.meta
-            .year
-            .map(|y| y.to_string())
-            .unwrap_or_default()
-            .as_bytes(),
-    );
-    h.update([0x1f]);
-    h.update(
-        serde_json::to_string(&p.meta.authors)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
     hex::encode(h.finalize())
 }
 
-/// Hash of a paper's joined annotation notes. Empty in, empty out: "no notes"
-/// is the empty stamp, which is also the column default, so a paper nobody has
-/// annotated never looks stale.
-pub(crate) fn notes_hash(blob: &str) -> String {
-    if blob.is_empty() {
-        return String::new();
-    }
-    hex::encode(Sha256::digest(blob.as_bytes()))
+fn summary_digest(summary: Option<&str>) -> String {
+    digest(&[summary.unwrap_or("")])
+}
+
+/// Hash of the seq-0 (title + abstract) text, the only metadata the vector
+/// tier embeds. Comparing hashes against the stamps is how identify/refresh
+/// edits are detected without any event plumbing in the mutation paths.
+pub(crate) fn summary_hash(p: &Paper) -> String {
+    summary_digest(
+        chunker::summary_text(p.meta.title.as_deref(), p.meta.abstract_text.as_deref()).as_deref(),
+    )
+}
+
+/// Hash of everything in a paper's Tantivy doc except the body, which
+/// `content_hash` covers.
+pub(crate) fn doc_hash(p: &Paper, notes: &str) -> String {
+    digest(&[
+        p.meta.title.as_deref().unwrap_or(""),
+        &p.meta.authors.0.join(" ; "),
+        p.meta.venue.as_deref().unwrap_or(""),
+        p.meta.abstract_text.as_deref().unwrap_or(""),
+        notes,
+    ])
 }
 
 pub(crate) async fn all_index_rows(pool: &SqlitePool) -> Result<Vec<IndexRow>> {
@@ -86,117 +85,189 @@ pub(crate) async fn all_index_rows(pool: &SqlitePool) -> Result<Vec<IndexRow>> {
     Ok(rows)
 }
 
-/// Replace a paper's chunks and reset its index row (stamps cleared: both
-/// tiers must re-index the new content). One transaction.
-pub(crate) async fn replace_chunks(
+/// Replace a paper's body chunks (seq ≥ 1) with ones extracted from
+/// `content_hash`. The FTS stamp always clears, since the doc must be
+/// rewritten from them; the vector stamp only when the body actually changed,
+/// so re-extracting identical text re-embeds nothing. Returns whether it
+/// changed. One transaction.
+pub(crate) async fn replace_body(
     pool: &SqlitePool,
     paper_id: &str,
     chunks: &[Chunk],
     content_hash: &str,
-    meta_hash: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM chunks WHERE paper_id = ?")
-        .bind(paper_id)
-        .execute(&mut *tx)
-        .await?;
-    for c in chunks {
-        sqlx::query("INSERT INTO chunks (paper_id, seq, page, text) VALUES (?,?,?,?)")
+    let stored: Vec<(i64, Option<i64>, String)> = sqlx::query_as(
+        "SELECT seq, page, text FROM chunks WHERE paper_id = ? AND seq >= 1 ORDER BY seq",
+    )
+    .bind(paper_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let changed = !stored
+        .into_iter()
+        .map(|(seq, page, text)| Chunk { seq, page, text })
+        .eq(chunks.iter().cloned());
+    if changed {
+        sqlx::query("DELETE FROM chunks WHERE paper_id = ? AND seq >= 1")
             .bind(paper_id)
-            .bind(c.seq)
-            .bind(c.page)
-            .bind(&c.text)
             .execute(&mut *tx)
             .await?;
+        for c in chunks {
+            sqlx::query("INSERT INTO chunks (paper_id, seq, page, text) VALUES (?,?,?,?)")
+                .bind(paper_id)
+                .bind(c.seq)
+                .bind(c.page)
+                .bind(&c.text)
+                .execute(&mut *tx)
+                .await?;
+        }
     }
     sqlx::query(
-        "INSERT INTO search_index (paper_id, content_hash, meta_hash, chunk_count) \
-         VALUES (?,?,?,?) \
+        "INSERT INTO search_index (paper_id, content_hash) VALUES (?, ?) \
          ON CONFLICT(paper_id) DO UPDATE SET \
-           content_hash = excluded.content_hash, meta_hash = excluded.meta_hash, \
-           chunk_count = excluded.chunk_count, \
-           fts_indexed_at = NULL, vectors_indexed_at = NULL",
+           content_hash = excluded.content_hash, fts_indexed_at = NULL, \
+           vectors_indexed_at = CASE WHEN ? THEN NULL ELSE vectors_indexed_at END",
     )
     .bind(paper_id)
     .bind(content_hash)
-    .bind(meta_hash)
-    .bind(chunks.len() as i64)
+    .bind(changed)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(changed)
 }
 
-pub(crate) async fn chunks_for_paper(pool: &SqlitePool, paper_id: &str) -> Result<Vec<Chunk>> {
-    let rows: Vec<(i64, Option<i64>, String)> =
-        sqlx::query_as("SELECT seq, page, text FROM chunks WHERE paper_id = ? ORDER BY seq")
-            .bind(paper_id)
-            .fetch_all(pool)
-            .await?;
+pub(crate) async fn body_chunks(pool: &SqlitePool, paper_id: &str) -> Result<Vec<Chunk>> {
+    let rows: Vec<(i64, Option<i64>, String)> = sqlx::query_as(
+        "SELECT seq, page, text FROM chunks WHERE paper_id = ? AND seq >= 1 ORDER BY seq",
+    )
+    .bind(paper_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|(seq, page, text)| Chunk { seq, page, text })
         .collect())
 }
 
-pub(crate) async fn chunk_text(
-    pool: &SqlitePool,
-    paper_id: &str,
-    seq: i64,
-) -> Result<Option<Chunk>> {
-    let row: Option<(i64, Option<i64>, String)> =
-        sqlx::query_as("SELECT seq, page, text FROM chunks WHERE paper_id = ? AND seq = ?")
+/// The seq-0 text the vector tier last embedded.
+pub(crate) async fn embedded_summary(pool: &SqlitePool, paper_id: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT text FROM chunks WHERE paper_id = ? AND seq = 0")
             .bind(paper_id)
-            .bind(seq)
             .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(seq, page, text)| Chunk { seq, page, text }))
+            .await?,
+    )
 }
 
-/// Stamp the FTS tier. `notes_hash` is the hash of the notes blob that was
-/// actually written into the Tantivy doc — not of whatever is in the table
-/// now — so a note edited mid-sweep still reads as stale on the next pass.
-/// Resets only this tier's failure state: a successful FTS write must not
-/// wipe the vector tier's backoff.
-pub(crate) async fn mark_fts_done(
+/// Chunk texts by `(paper_id, seq)`, in one query; missing chunks are absent.
+pub(crate) async fn chunk_texts(
     pool: &SqlitePool,
-    paper_id: &str,
-    notes_hash: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE search_index SET fts_indexed_at = ?, notes_hash = ?, \
-         fts_attempts = 0, fts_last_error = NULL WHERE paper_id = ?",
-    )
-    .bind(now_rfc3339())
-    .bind(notes_hash)
-    .bind(paper_id)
-    .execute(pool)
-    .await?;
+    keys: &[(String, i64)],
+) -> Result<HashMap<(String, i64), String>> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new("SELECT paper_id, seq, text FROM chunks WHERE (paper_id, seq) IN (");
+    qb.push_values(keys, |mut row, (paper_id, seq)| {
+        row.push_bind(paper_id).push_bind(seq);
+    });
+    qb.push(")");
+    let rows: Vec<(String, i64, String)> = qb.build_query_as().fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(paper_id, seq, text)| ((paper_id, seq), text))
+        .collect())
+}
+
+/// Stamp the FTS tier for docs a commit just made durable. Each `doc_hash`
+/// is of what was actually written into the doc — not of whatever is in the
+/// tables now — so an edit made mid-sweep still reads as stale on the next
+/// pass. Resets only this tier's failure state: a successful FTS write must
+/// not wipe the vector tier's backoff.
+pub(crate) async fn mark_fts_done(pool: &SqlitePool, docs: &[(&str, &str)]) -> Result<()> {
+    let now = now_rfc3339();
+    let mut tx = pool.begin().await?;
+    for (paper_id, doc_hash) in docs {
+        sqlx::query(
+            "UPDATE search_index SET fts_indexed_at = ?, doc_hash = ?, \
+             fts_attempts = 0, fts_last_error = NULL WHERE paper_id = ?",
+        )
+        .bind(&now)
+        .bind(doc_hash)
+        .bind(paper_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
+/// What a successful vector pass rewrote.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VectorsDone<'a> {
+    /// Every point, embedded with this model.
+    All { model: &'a str },
+    /// The seq-0 point alone.
+    Summary,
+}
+
+/// Stamp the vector tier. `summary` is the seq-0 text now embedded; it is
+/// stored as chunk 0 together with its hash, which is how a later pass knows
+/// what the seq-0 point holds. Resets only this tier's failure state.
 pub(crate) async fn mark_vectors_done(
     pool: &SqlitePool,
     paper_id: &str,
-    model: &str,
+    summary: Option<&str>,
+    done: VectorsDone<'_>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    match summary {
+        Some(text) => {
+            sqlx::query(
+                "INSERT INTO chunks (paper_id, seq, page, text) VALUES (?, 0, NULL, ?) \
+                 ON CONFLICT(paper_id, seq) DO UPDATE SET text = excluded.text",
+            )
+            .bind(paper_id)
+            .bind(text)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM chunks WHERE paper_id = ? AND seq = 0")
+                .bind(paper_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     sqlx::query(
-        "UPDATE search_index SET vectors_indexed_at = ?, embed_model = ?, \
-         vec_attempts = 0, vec_last_error = NULL WHERE paper_id = ?",
+        "UPDATE search_index SET summary_hash = ?, vec_attempts = 0, vec_last_error = NULL \
+         WHERE paper_id = ?",
     )
-    .bind(now_rfc3339())
-    .bind(model)
+    .bind(summary_digest(summary))
     .bind(paper_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if let VectorsDone::All { model } = done {
+        sqlx::query(
+            "UPDATE search_index SET vectors_indexed_at = ?, embed_model = ? WHERE paper_id = ?",
+        )
+        .bind(now_rfc3339())
+        .bind(model)
+        .bind(paper_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
 /// Record an indexing failure against `tier`, upserting the row if one
 /// doesn't exist yet (e.g. a brand-new paper whose PDF extraction fails
-/// before `replace_chunks` ever runs). The placeholder empty hashes never
-/// match a real paper's content/meta hash, so the planner still schedules
-/// the work once backoff elapses.
+/// before `replace_body` ever runs). The placeholder empty hashes never match
+/// a real paper's, so the planner still schedules the work once backoff
+/// elapses.
 pub(crate) async fn record_error(
     pool: &SqlitePool,
     paper_id: &str,
@@ -206,7 +277,7 @@ pub(crate) async fn record_error(
     let now = now_rfc3339();
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO search_index (paper_id, content_hash, meta_hash) VALUES (?, '', '') \
+        "INSERT INTO search_index (paper_id, content_hash) VALUES (?, '') \
          ON CONFLICT(paper_id) DO NOTHING",
     )
     .bind(paper_id)
@@ -323,14 +394,6 @@ mod tests {
     use crate::library::model::{Authors, PaperMeta, PaperStatus};
     use crate::search::chunker::Chunk;
 
-    async fn pool() -> sqlx::SqlitePool {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", dir.path().join("t.db").display());
-        let p = crate::db::connect(&url).await.unwrap();
-        std::mem::forget(dir); // keep the tempdir alive for the test process
-        p
-    }
-
     fn paper(id: &str, hash: &str, title: &str) -> Paper {
         Paper {
             id: id.into(),
@@ -357,81 +420,178 @@ mod tests {
         }
     }
 
-    fn two_chunks() -> Vec<Chunk> {
-        vec![
-            Chunk {
-                seq: 0,
-                page: None,
-                text: "T\nA".into(),
-            },
-            Chunk {
-                seq: 1,
+    fn body(texts: &[&str]) -> Vec<Chunk> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Chunk {
+                seq: i as i64 + 1,
                 page: Some(1),
-                text: "body".into(),
-            },
-        ]
+                text: t.to_string(),
+            })
+            .collect()
+    }
+
+    async fn mark_all_done(pool: &SqlitePool, paper_id: &str) {
+        mark_fts_done(pool, &[(paper_id, "d")]).await.unwrap();
+        mark_vectors_done(pool, paper_id, Some("T"), VectorsDone::All { model: "m" })
+            .await
+            .unwrap();
     }
 
     #[test]
-    fn meta_hash_changes_with_metadata_only() {
+    fn each_hash_covers_only_what_its_tier_consumes() {
         let a = paper("p1", "h1", "Title One");
-        let mut b = paper("p1", "h1", "Title One");
-        assert_eq!(meta_hash(&a), meta_hash(&b));
-        b.meta.title = Some("Title Two".into());
-        assert_ne!(meta_hash(&a), meta_hash(&b));
+        let edited = |f: fn(&mut Paper)| {
+            let mut b = a.clone();
+            f(&mut b);
+            b
+        };
+        let retitled = edited(|p| p.meta.title = Some("Title Two".into()));
+        let reauthored = edited(|p| p.meta.authors = Authors(vec!["Ada Lovelace".into()]));
+        let revenued = edited(|p| p.meta.venue = Some("KDD".into()));
+        let redated = edited(|p| p.meta.year = Some(1999));
+
+        assert_ne!(summary_hash(&a), summary_hash(&retitled));
+        for same in [&reauthored, &revenued, &redated] {
+            assert_eq!(summary_hash(&a), summary_hash(same));
+        }
+        for changed in [&retitled, &reauthored, &revenued] {
+            assert_ne!(doc_hash(&a, ""), doc_hash(changed, ""));
+        }
+        assert_eq!(
+            doc_hash(&a, ""),
+            doc_hash(&redated, ""),
+            "year is indexed nowhere"
+        );
+        assert_ne!(doc_hash(&a, ""), doc_hash(&a, "a note"));
     }
 
     #[tokio::test]
-    async fn replace_chunks_roundtrip_and_stamp_lifecycle() {
-        let pool = pool().await;
-        let p = paper("p1", "h1", "T");
-        crate::library::papers::insert(&pool, &p).await.unwrap();
-
-        replace_chunks(&pool, "p1", &two_chunks(), "h1", &meta_hash(&p))
+    async fn replace_body_roundtrip_and_stamp_lifecycle() {
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        crate::library::papers::insert(&pool, &paper("p1", "h1", "T"))
             .await
             .unwrap();
-        let got = chunks_for_paper(&pool, "p1").await.unwrap();
-        assert_eq!(got, two_chunks());
-        assert_eq!(
-            chunk_text(&pool, "p1", 1).await.unwrap().unwrap().text,
-            "body"
-        );
 
-        let chunk_count: i64 =
-            sqlx::query_scalar("SELECT chunk_count FROM search_index WHERE paper_id = 'p1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(chunk_count, 2);
+        assert!(replace_body(&pool, "p1", &body(&["one", "two"]), "h1")
+            .await
+            .unwrap());
+        assert_eq!(
+            body_chunks(&pool, "p1").await.unwrap(),
+            body(&["one", "two"])
+        );
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_none());
 
-        mark_fts_done(&pool, "p1", "").await.unwrap();
-        mark_vectors_done(&pool, "p1", "text-embedding-3-small")
-            .await
-            .unwrap();
+        mark_all_done(&pool, "p1").await;
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert!(row.fts_indexed_at.is_some() && row.vectors_indexed_at.is_some());
-        assert_eq!(row.embed_model.as_deref(), Some("text-embedding-3-small"));
-        assert_eq!(row.fts_attempts, 0);
-        assert_eq!(row.vec_attempts, 0);
-        assert!(row.fts_last_error.is_none() && row.vec_last_error.is_none());
+        assert_eq!(row.embed_model.as_deref(), Some("m"));
+        assert_eq!(row.doc_hash, "d");
+        assert_eq!(row.summary_hash, summary_digest(Some("T")));
+        assert_eq!(
+            embedded_summary(&pool, "p1").await.unwrap().as_deref(),
+            Some("T")
+        );
+        assert_eq!(
+            body_chunks(&pool, "p1").await.unwrap().len(),
+            2,
+            "chunk 0 is not body"
+        );
 
-        // Replacing chunks again clears the stamps (fresh index required).
-        replace_chunks(&pool, "p1", &two_chunks(), "h2", &meta_hash(&p))
+        // Re-extracting the same text rewrites the doc but keeps the vectors.
+        assert!(!replace_body(&pool, "p1", &body(&["one", "two"]), "h2")
+            .await
+            .unwrap());
+        let row = &all_index_rows(&pool).await.unwrap()[0];
+        assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_some());
+        assert_eq!(row.content_hash, "h2");
+
+        // A different body invalidates both; chunk 0 belongs to the vector tier.
+        mark_all_done(&pool, "p1").await;
+        assert!(replace_body(&pool, "p1", &body(&["three"]), "h3")
+            .await
+            .unwrap());
+        let row = &all_index_rows(&pool).await.unwrap()[0];
+        assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_none());
+        assert_eq!(body_chunks(&pool, "p1").await.unwrap(), body(&["three"]));
+        assert_eq!(
+            embedded_summary(&pool, "p1").await.unwrap().as_deref(),
+            Some("T")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_summary_only_pass_stamps_the_summary_and_nothing_else() {
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        crate::library::papers::insert(&pool, &paper("p1", "h1", "T"))
+            .await
+            .unwrap();
+        replace_body(&pool, "p1", &body(&["one"]), "h1")
+            .await
+            .unwrap();
+        record_error(&pool, "p1", "embed down", ErrorTier::Vectors)
+            .await
+            .unwrap();
+
+        mark_vectors_done(&pool, "p1", Some("New"), VectorsDone::Summary)
             .await
             .unwrap();
         let row = &all_index_rows(&pool).await.unwrap()[0];
-        assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_none());
-        assert_eq!(row.content_hash, "h2");
+        assert_eq!(row.summary_hash, summary_digest(Some("New")));
+        assert!(
+            row.vectors_indexed_at.is_none(),
+            "the body was never embedded"
+        );
+        assert_eq!(row.vec_attempts, 0);
+        assert_eq!(
+            embedded_summary(&pool, "p1").await.unwrap().as_deref(),
+            Some("New")
+        );
+
+        mark_vectors_done(&pool, "p1", None, VectorsDone::Summary)
+            .await
+            .unwrap();
+        assert_eq!(embedded_summary(&pool, "p1").await.unwrap(), None);
+        assert_eq!(body_chunks(&pool, "p1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn chunk_texts_fetches_every_requested_chunk_that_exists() {
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        for id in ["p1", "p2"] {
+            crate::library::papers::insert(&pool, &paper(id, id, "T"))
+                .await
+                .unwrap();
+            replace_body(
+                &pool,
+                id,
+                &body(&[&format!("{id} one"), &format!("{id} two")]),
+                id,
+            )
+            .await
+            .unwrap();
+        }
+        let keys = [
+            ("p1".to_string(), 2),
+            ("p2".to_string(), 1),
+            ("p2".to_string(), 9),
+        ];
+        let got = chunk_texts(&pool, &keys).await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&("p1".to_string(), 2)], "p1 two");
+        assert_eq!(got[&("p2".to_string(), 1)], "p2 one");
+        assert!(chunk_texts(&pool, &[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn record_error_increments_only_its_tier_and_marks_reset_only_theirs() {
-        let pool = pool().await;
-        let p = paper("p1", "h1", "T");
-        crate::library::papers::insert(&pool, &p).await.unwrap();
-        replace_chunks(&pool, "p1", &two_chunks(), "h1", &meta_hash(&p))
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        crate::library::papers::insert(&pool, &paper("p1", "h1", "T"))
+            .await
+            .unwrap();
+        replace_body(&pool, "p1", &body(&["one"]), "h1")
             .await
             .unwrap();
 
@@ -453,14 +613,16 @@ mod tests {
 
         // A successful FTS write resets only the FTS tier's backoff: the
         // broken embedder must keep backing off, not retry every sweep.
-        mark_fts_done(&pool, "p1", "").await.unwrap();
+        mark_fts_done(&pool, &[("p1", "d")]).await.unwrap();
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert_eq!(row.fts_attempts, 0);
         assert!(row.fts_last_error.is_none());
         assert_eq!(row.vec_attempts, 1);
         assert_eq!(row.vec_last_error.as_deref(), Some("embed down"));
 
-        mark_vectors_done(&pool, "p1", "m").await.unwrap();
+        mark_vectors_done(&pool, "p1", None, VectorsDone::All { model: "m" })
+            .await
+            .unwrap();
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert_eq!(row.vec_attempts, 0);
         assert!(row.vec_last_error.is_none());
@@ -468,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_error_without_prior_row_creates_one() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         let p = paper("p1", "h1", "T");
         crate::library::papers::insert(&pool, &p).await.unwrap();
         // No replace_chunks call: no search_index row exists yet (mirrors a
@@ -485,7 +647,7 @@ mod tests {
         assert_eq!(rows[0].fts_last_error.as_deref(), Some("extraction failed"));
         assert_eq!(rows[0].vec_last_error.as_deref(), Some("extraction failed"));
         assert_eq!(rows[0].content_hash, "");
-        assert_eq!(rows[0].meta_hash, "");
+        assert_eq!(rows[0].summary_hash, "");
 
         record_error(&pool, "p1", "extraction failed again", ErrorTier::Both)
             .await
@@ -502,14 +664,14 @@ mod tests {
 
     #[tokio::test]
     async fn remove_and_clear_stamps() {
-        let pool = pool().await;
-        let p = paper("p1", "h1", "T");
-        crate::library::papers::insert(&pool, &p).await.unwrap();
-        replace_chunks(&pool, "p1", &two_chunks(), "h1", &meta_hash(&p))
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        crate::library::papers::insert(&pool, &paper("p1", "h1", "T"))
             .await
             .unwrap();
-        mark_fts_done(&pool, "p1", "").await.unwrap();
-        mark_vectors_done(&pool, "p1", "m").await.unwrap();
+        replace_body(&pool, "p1", &body(&["one"]), "h1")
+            .await
+            .unwrap();
+        mark_all_done(&pool, "p1").await;
         record_error(&pool, "p1", "boom", ErrorTier::Both)
             .await
             .unwrap();
@@ -526,12 +688,13 @@ mod tests {
 
         remove_index_entry(&pool, "p1").await.unwrap();
         assert!(all_index_rows(&pool).await.unwrap().is_empty());
-        assert!(chunks_for_paper(&pool, "p1").await.unwrap().is_empty());
+        assert!(body_chunks(&pool, "p1").await.unwrap().is_empty());
+        assert_eq!(embedded_summary(&pool, "p1").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn papers_by_ids_ordered_preserves_order_and_drops_trashed() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         for (id, hash, title) in [("a", "h1", "A"), ("b", "h2", "B"), ("c", "h3", "C")] {
             crate::library::papers::insert(&pool, &paper(id, hash, title))
                 .await
@@ -554,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn filtered_paper_ids_applies_tag_prefix_starred_and_trash() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("a", "h1", "A"))
             .await
             .unwrap();

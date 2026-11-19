@@ -5,37 +5,41 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Cargo, Node and poppler all come from the flake's dev shell, so CI builds
+  # with the toolchain rust-toolchain.toml pins and the nixpkgs flake.lock pins.
   backend:
     name: Backend (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/devshell.nix', 'nix/lib/**', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          workspaces: ". -> target"
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # pdftotext (poppler) and node back the ingest/pdf and agent stub-runner
-      # tests; git is preinstalled on the runner. build.rs writes a placeholder
-      # frontend/dist/index.html, so no frontend build is needed here.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Install poppler-utils (pdftotext)
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
-
+      # Without a frontend build the server answers with a placeholder page, so
+      # none is needed here.
       - name: Format
-        run: cargo fmt --all --check
+        run: nix develop -c cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
       # ts-rs never deletes stale bindings, so the export tests in `cargo test`
       # regenerate the directory from scratch for the drift check below.
       - name: Remove generated TS bindings
@@ -43,7 +47,7 @@ jobs:
       # Plain `cargo test` builds only the root package; the desktop crate needs
       # macOS frameworks + sidecars and is covered by the `desktop` job instead.
       - name: Test
-        run: cargo test
+        run: nix develop -c cargo test --locked
       - name: Generated TS bindings are current
         run: |
           git diff --exit-code -- frontend/src/shared/api/generated
@@ -53,58 +57,54 @@ jobs:
     name: Frontend (check, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          node-version: 24
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/devshell.nix', 'nix/lib/**', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
       - name: Install deps
-        run: npm --prefix frontend ci
+        run: nix develop -c npm --prefix frontend ci
       - name: Type-check (svelte-check)
-        run: npm --prefix frontend run check
+        run: nix develop -c npm --prefix frontend run check
       - name: Test (vitest)
-        run: npm --prefix frontend test
+        run: nix develop -c npm --prefix frontend test
 
+  # Xcode's toolchain links the app (a Nix-linked binary would reference the
+  # store), so this job takes Rust from rustup, which reads the same
+  # rust-toolchain.toml.
   desktop:
     name: Desktop (clippy, test)
     runs-on: macos-14 # arm64
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target"
-
-      # tauri-build validates the externalBin paths AND the binaries/libs
-      # resources entry at compile time; the real sidecars are gitignored and
-      # nothing here ever execs them, so empty-ish stand-ins suffice.
-      - name: Stub the gitignored sidecar binaries
-        run: |
-          mkdir -p desktop/binaries/libs
-          cp /usr/bin/true desktop/binaries/pdftotext-aarch64-apple-darwin
-          cp /usr/bin/true desktop/binaries/node-aarch64-apple-darwin
-
+      - name: Stub the sidecars and resources tauri-build checks for
+        run: bash desktop/scripts/prepare-sidecars.sh --stub
       - name: Clippy
-        run: cargo clippy -p xuewen-desktop --all-targets -- -D warnings
+        run: cargo clippy --locked -p xuewen-desktop --all-targets -- -D warnings
       - name: Test
-        run: cargo test -p xuewen-desktop
+        run: cargo test --locked -p xuewen-desktop
 
-  # Cheap hash-drift canaries: both packages pin an npmDepsHash that goes
-  # stale silently whenever the matching package-lock.json changes, and only
-  # a Nix build notices.
   nix:
-    name: Nix (npm-locked packages)
+    name: Nix (format, evaluation, Home Manager module)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - name: Build frontend + agent-runner
-        run: nix build .#frontend .#agent-runner
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-checks-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/**', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-checks-${{ runner.os }}-
+      - name: Evaluate every output on every system
+        run: nix flake check --no-build --all-systems
       # The pre-commit hook only runs inside the dev shell.
-      - name: treefmt
-        run: nix build .#checks.x86_64-linux.pkgs-formatter-check
+      - name: treefmt and the Home Manager module
+        run: nix build .#checks.x86_64-linux.pkgs-formatter-check .#checks.x86_64-linux.home-module
 
   # The expensive half: the release-mode backend build re-runs the whole test
   # suite in the sandbox, and the VM check is the only end-to-end test of the
@@ -116,16 +116,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      # The VM test needs /dev/kvm usable by the nix build users.
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The installer also makes /dev/kvm usable for the VM test.
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-full-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/**', 'rust-toolchain.toml', 'Cargo.lock', '**/package-lock.json') }}
+          restore-prefixes-first-match: nix-full-${{ runner.os }}-
       - name: Build xuewen (runs the full test suite in release mode)
-        run: nix build .#xuewen
+        run: nix build .#xuewen -L
       - name: NixOS module VM test
         run: nix build .#checks.x86_64-linux.nixos-module -L

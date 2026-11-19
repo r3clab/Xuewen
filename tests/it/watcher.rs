@@ -1,10 +1,13 @@
 use crate::support;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use xuewen::db;
 use xuewen::ingest::pipeline::{IngestCtx, Libraries};
+use xuewen::metadata::resolve::Resolver;
 
 #[tokio::test]
 async fn watcher_catches_up_and_watches_new_files() {
@@ -22,6 +25,8 @@ async fn watcher_catches_up_and_watches_new_files() {
     let db_url = url.clone();
     let cancel = CancellationToken::new();
     let watch_cancel = cancel.clone();
+    let changes = Arc::new(AtomicUsize::new(0));
+    let changed = Arc::clone(&changes);
     let handle = tokio::spawn(async move {
         let pool = db::connect(&db_url).await.unwrap();
         let ctx = IngestCtx::new(
@@ -30,10 +35,13 @@ async fn watcher_catches_up_and_watches_new_files() {
                 &inbox_for_task,
                 &inbox_for_task.parent().unwrap().join("library"),
             ),
-            support::offline_resolver(),
+            Resolver::offline(),
             None,
         );
-        xuewen::ingest::watcher::run(&ctx, &inbox_for_task, watch_cancel).await
+        let library_changed = move || {
+            changed.fetch_add(1, Ordering::SeqCst);
+        };
+        xuewen::ingest::watcher::run(&ctx, &inbox_for_task, watch_cancel, &library_changed).await
     });
 
     // The watch is registered before catch-up, so once the existing file is
@@ -59,6 +67,11 @@ async fn watcher_catches_up_and_watches_new_files() {
         .unwrap();
 
     assert!(dropped_ok, "live-dropped file was not ingested");
+    assert_eq!(
+        changes.load(Ordering::SeqCst),
+        2,
+        "every ingest announces the library change"
+    );
 
     // Both are recorded.
     let pool = db::connect(&url).await.unwrap();

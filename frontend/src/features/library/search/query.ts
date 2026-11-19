@@ -1,14 +1,17 @@
-/// TS mirror of the canonical Rust parser (src/search/query.rs). The two
-/// share fixture cases — change one, change both.
+/// The search box's own parse, which the UI needs synchronously while typing
+/// (pill state, field toggles, list-or-search). It mirrors the canonical Rust
+/// parser in src/search/query.rs; query_cases.json is the one spec both test
+/// suites run, so the two cannot drift apart unnoticed.
 
 import type { PaperStatus } from '$shared/api/generated/PaperStatus';
 
 export type FieldKey = 'title' | 'authors' | 'abstract' | 'body' | 'notes';
 export const FIELD_KEYS: readonly FieldKey[] = ['title', 'authors', 'abstract', 'body', 'notes'];
 
-/// Fields the vector tier actually holds. Mirrors `FieldSel::semantic_applicable`
-/// in src/search/fts.rs: `authors` and `notes` are never chunked or embedded, so a
-/// query scoped to them alone has nothing for semantic search to match.
+/// Fields the vector tier actually holds (`FieldSel::semantic_applicable` in
+/// src/search/fts.rs, pinned by query_cases.json): `authors` and `notes` are
+/// never chunked or embedded, so a query scoped to them alone has nothing for
+/// semantic search to match.
 export const SEMANTIC_FIELD_KEYS: readonly FieldKey[] = ['title', 'abstract', 'body'];
 
 export interface ParsedQuery {

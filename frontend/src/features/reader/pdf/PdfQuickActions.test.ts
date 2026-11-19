@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import PdfQuickActions from './PdfQuickActions.svelte';
 import { chat } from '$features/reader/ask/chat.svelte';
 import { viewer } from '$features/reader/tabs/state.svelte';
-import { dock } from '$features/reader/dock/state.svelte';
+import { composerFocus, dock } from '$features/reader/dock/state.svelte';
 import type { PillHide } from './pillHide.svelte';
 
 /// A plain fake matching the real `PillHide` interface (see
@@ -15,8 +15,7 @@ function makePill(): PillHide {
   return {
     visible: true,
     toolbarVisible: true,
-    setHost() {},
-    setExtraHold() {},
+    host: () => {},
     onWindowMove() {},
     onScroll() {},
     onScrollJump() {},
@@ -30,7 +29,6 @@ function makePill(): PillHide {
 beforeEach(() => {
   viewer.activeId = 'p1';
   dock.open = false;
-  dock.entry = null;
   viewer.zen = false;
   chat.available = true;
   localStorage.clear();
@@ -51,24 +49,28 @@ describe('PdfQuickActions seals', () => {
     expect(screen.getByRole('button', { name: 'Paper panel' })).toHaveTextContent('詳');
   });
 
-  it('the seal opens the dock on the composer, or on the record without chat', async () => {
+  it('the seal opens the dock on the composer', async () => {
+    const composer = document.createElement('textarea');
+    document.body.append(composer);
+    const detach = composerFocus.attach(composer);
     render(PdfQuickActions, { props: { pill: makePill() } });
     await userEvent.click(screen.getByRole('button', { name: 'Paper panel' }));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('ask');
+    expect(document.activeElement).toBe(composer);
+    detach();
+    composer.remove();
+  });
 
-    dock.open = false;
-    dock.entry = null;
+  it('without chat the seal opens the record', async () => {
     chat.available = false;
     render(PdfQuickActions, { props: { pill: makePill() } });
-    await userEvent.click(screen.getAllByRole('button', { name: 'Paper panel' })[1]);
+    await userEvent.click(screen.getByRole('button', { name: 'Paper panel' }));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('record');
   });
 
   it('the pill yields while the dock is open', () => {
     dock.open = true;
     render(PdfQuickActions, { props: { pill: makePill() } });
-    expect(screen.getByRole('toolbar', { name: 'Reader quick actions' }).className).toContain('opacity-0');
+    expect(screen.getByRole('group', { name: 'Reader quick actions' }).className).toContain('opacity-0');
   });
 });

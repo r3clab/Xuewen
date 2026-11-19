@@ -13,6 +13,7 @@ mod http;
 pub mod ingest;
 pub mod library;
 pub mod llm;
+mod locks;
 pub mod metadata;
 mod pdf;
 pub mod preview;

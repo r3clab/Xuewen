@@ -18,6 +18,7 @@
 import type { AnnotationBundle, AnnotationDraft, AnnotationRef } from '@embedpdf/svelte/annotation';
 import { annotationKey, type PageRef } from '@embedpdf/svelte/runtime';
 import type { Quad } from '$features/reader/pdf/pageText';
+import { errorMessage } from '$shared/errors';
 import {
   RESTORE_OPTIONS,
   kindOf,
@@ -107,7 +108,7 @@ export function createAnnotationSync(opts: AnnotationSyncOptions): AnnotationSyn
   function report(e: unknown): void {
     if (reportedError) return;
     reportedError = true;
-    opts.onError?.(e instanceof Error ? e.message : String(e));
+    opts.onError?.(errorMessage(e, 'the server did not answer'));
   }
 
   function track(annotation: MarkData): void {

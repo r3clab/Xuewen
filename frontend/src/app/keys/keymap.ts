@@ -1,12 +1,13 @@
-import { tick } from 'svelte';
+import { flushSync } from 'svelte';
 import { annotationSelectionActive, deleteSelectedAnnotations } from '$features/reader/annotations/commands';
 import { chat } from '$features/reader/ask/chat.svelte';
 import { library } from '$features/library/state.svelte';
 import { toggleAnnotationsPanel } from '$features/reader/state.svelte';
 import { closeTab, openTab, selectPaper, selection, toggleZen, viewer } from '$features/reader/tabs/state.svelte';
 import { shell } from '$app/shell.svelte';
-import { toggleDock } from '$features/reader/dock/state.svelte';
-import { finder } from '$features/library/search/state.svelte';
+import { askInDock, toggleDock } from '$features/reader/dock/state.svelte';
+import { finder, searchFocus } from '$features/library/search/state.svelte';
+import { readerHasKeys, SCROLL_KEYS, scrollReader, type ScrollKey } from '$features/reader/scroll';
 
 function moveSelection(delta: number): void {
   const papers = library.papers;
@@ -17,19 +18,17 @@ function moveSelection(delta: number): void {
 }
 
 /// Enter's action — the binding itself stays bespoke in shortcuts.ts because
-/// its focused-control guard needs the event's composed-path target.
+/// its focused-control guard needs the event's target.
 export function openSelected(): void {
   const p = library.papers.find((x) => x.id === selection.id);
   if (p) openTab(p);
 }
 
-/// Zen unmounts the top bar the search box lives in, so `/` leaves zen first
-/// and focuses once it is back.
+/// Zen unmounts the top bar the search box lives in, so `/` leaves zen first.
 function focusSearch(): void {
   viewer.zen = false;
-  void tick().then(() => {
-    document.querySelector<HTMLInputElement>('[data-search-input]')?.focus();
-  });
+  flushSync();
+  searchFocus.focus();
 }
 
 export interface KeyBinding {
@@ -54,6 +53,17 @@ const deleteMark = {
   run: deleteSelectedAnnotations,
 };
 
+const SCROLL_LABELS: Record<ScrollKey, string> = {
+  ArrowDown: 'Scroll',
+  ArrowUp: 'Scroll',
+  ArrowRight: 'Scroll',
+  ArrowLeft: 'Scroll',
+  PageDown: 'Scroll a screen',
+  PageUp: 'Scroll a screen',
+  Home: 'First / last page',
+  End: 'First / last page',
+};
+
 /// The single-key map as data — the one source shared by the dispatcher
 /// (shortcuts.ts) and the `?` help overlay (SHORTCUT_GROUPS below), so a
 /// binding can't drift between behavior and display. Multi-key sequences
@@ -63,8 +73,8 @@ const deleteMark = {
 export const SINGLE_KEYS: readonly KeyBinding[] = [
   { key: '/', label: 'Search library', preventDefault: true, run: focusSearch },
   { key: '?', label: 'Keyboard shortcuts', preventDefault: true, run: () => (shell.helpOpen = true) },
-  { key: 'c', label: 'Paper panel · ask', when: () => chat.available, run: () => toggleDock('ask') },
-  { key: 'i', label: 'Paper panel', run: () => toggleDock('record') },
+  { key: 'c', label: 'Paper panel · ask', when: () => chat.available, run: askInDock },
+  { key: 'i', label: 'Paper panel', run: toggleDock },
   {
     key: 'a',
     label: 'Annotations panel',
@@ -79,6 +89,14 @@ export const SINGLE_KEYS: readonly KeyBinding[] = [
   { key: 'k', label: 'Previous paper', run: () => moveSelection(-1) },
   { key: 'Delete', ...deleteMark },
   { key: 'Backspace', ...deleteMark },
+  // Space would be the browser's page key too, but it is the leader.
+  ...SCROLL_KEYS.map((key) => ({
+    key,
+    label: SCROLL_LABELS[key],
+    when: readerHasKeys,
+    preventDefault: true,
+    run: () => scrollReader(key),
+  })),
 ];
 
 /// A multi-key sequence, Helix-style: `Space f` is `[' ', 'f']`. The whole
@@ -155,6 +173,10 @@ export const SHORTCUT_GROUPS: ReadonlyArray<{ title: string; items: ShortcutItem
       fromKey('a'),
       fromKey('z'),
       fromKey('x'),
+      // Paired keys, one display row each — the j/k rule again.
+      { keys: '↑ ↓ ← →', label: fromKey('ArrowDown').label },
+      { keys: 'PgUp / PgDn', label: fromKey('PageDown').label },
+      { keys: 'Home / End', label: fromKey('Home').label },
       { keys: '⌘F', label: 'Find in PDF' },
       { keys: '⌘C', label: 'Copy selected text' },
       // Two bindings, one display row — the j/k pairing rule again.

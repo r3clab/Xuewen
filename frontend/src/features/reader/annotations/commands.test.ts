@@ -7,48 +7,32 @@ import {
   redoAnnotation,
   registerAnnotationCommands,
   undoAnnotation,
-  unregisterAnnotationCommands,
   type AnnotationCommands,
   type HistoryScopeLike,
   type MarkScope,
 } from './commands';
 
 /// The two capabilities, faked. `notReady` makes them null, as the kernel
-/// answers for a document still opening; `refuses` makes every call throw, as
-/// a capability does once its document has closed under it.
+/// answers for a document that is not open and ready.
 function harness() {
   let selected: string[] = [];
   let canUndo = false;
   let canRedo = false;
   let notReady = false;
-  let refuses = false;
   let activeId: string | null = 'p1';
-
-  function guard(): void {
-    if (refuses) throw new Error('not-ready');
-  }
 
   const marks: MarkScope = {
     selection: {
-      getSelected: vi.fn(() => {
-        guard();
-        return selected;
-      }),
-      clear: vi.fn(() => guard()),
-      delete: vi.fn(async () => guard()),
+      getSelected: vi.fn(() => selected),
+      clear: vi.fn(),
+      delete: vi.fn(async () => {}),
     },
   };
   const history: HistoryScopeLike = {
-    undo: vi.fn(() => guard()),
-    redo: vi.fn(() => guard()),
-    canUndo: vi.fn(() => {
-      guard();
-      return canUndo;
-    }),
-    canRedo: vi.fn(() => {
-      guard();
-      return canRedo;
-    }),
+    undo: vi.fn(),
+    redo: vi.fn(),
+    canUndo: vi.fn(() => canUndo),
+    canRedo: vi.fn(() => canRedo),
   };
 
   const forMarks = vi.fn(() => (notReady ? null : marks));
@@ -70,7 +54,6 @@ function harness() {
       canRedo = flags.canRedo ?? false;
     },
     notReady: () => (notReady = true),
-    refuses: () => (refuses = true),
     activeTab: (id: string | null) => (activeId = id),
   };
 }
@@ -175,20 +158,6 @@ describe('a tab whose document is not ready', () => {
     expect(h.commands.undo()).toBe(false);
     expect(h.commands.redo()).toBe(false);
   });
-
-  // An exception here would abort the rest of handleKeydown.
-  it('answers false everywhere instead of throwing once they refuse', () => {
-    const h = harness();
-    h.select('a1');
-    h.stack({ canUndo: true, canRedo: true });
-    h.refuses();
-    expect(() => h.commands.hasSelection()).not.toThrow();
-    expect(h.commands.hasSelection()).toBe(false);
-    expect(h.commands.deleteSelection()).toBe(false);
-    expect(h.commands.clearSelection()).toBe(false);
-    expect(h.commands.undo()).toBe(false);
-    expect(h.commands.redo()).toBe(false);
-  });
 });
 
 describe('the module-level registration', () => {
@@ -203,7 +172,6 @@ describe('the module-level registration', () => {
 
   beforeEach(() => {
     calls.length = 0;
-    registerAnnotationCommands(null);
   });
 
   it('is inert with no reader mounted — the library view, and every other test file', () => {
@@ -215,31 +183,31 @@ describe('the module-level registration', () => {
   });
 
   it('forwards to the registered commands, and stops when they are cleared', () => {
-    registerAnnotationCommands(spy);
+    const unregister = registerAnnotationCommands(spy);
     expect(annotationSelectionActive()).toBe(true);
     deleteSelectedAnnotations();
     clearAnnotationSelection();
     undoAnnotation();
     redoAnnotation();
     expect(calls).toEqual(['delete', 'clear', 'undo', 'redo']);
-    registerAnnotationCommands(null);
+    unregister();
     expect(deleteSelectedAnnotations()).toBe(false);
     expect(calls).toHaveLength(4);
   });
 
   // If a replacement ever registers before the old instance tears down, the
   // old one's cleanup must not take the live commands with it.
-  it('unregisters by identity, so a replacement survives the old teardown', () => {
+  it('withdraws only its own registration, so a replacement survives the old teardown', () => {
     const replacement: AnnotationCommands = {
       ...spy,
       deleteSelection: () => (calls.push('new'), true),
     };
-    registerAnnotationCommands(spy);
-    registerAnnotationCommands(replacement);
-    unregisterAnnotationCommands(spy); // the outgoing instance's cleanup
+    const unregisterOld = registerAnnotationCommands(spy);
+    const unregisterNew = registerAnnotationCommands(replacement);
+    unregisterOld();
     expect(deleteSelectedAnnotations()).toBe(true);
     expect(calls).toEqual(['new']);
-    unregisterAnnotationCommands(replacement);
+    unregisterNew();
     expect(deleteSelectedAnnotations()).toBe(false);
   });
 });

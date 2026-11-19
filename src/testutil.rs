@@ -5,9 +5,41 @@
 
 use crate::library::model::{Authors, Paper, PaperMeta, PaperStatus};
 
+/// Write a PDF with one page per entry of `pages`, each showing that line in
+/// Helvetica near the top. Unit tests only: `printpdf` is a dev-dependency.
+#[cfg(test)]
+pub(crate) fn write_pdf(path: &std::path::Path, pages: &[&str]) {
+    use printpdf::*;
+    let pages = pages
+        .iter()
+        .map(|line| {
+            let ops = vec![
+                Op::StartTextSection,
+                Op::SetFont {
+                    font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
+                    size: Pt(12.0),
+                },
+                Op::SetTextCursor {
+                    pos: Point::new(Mm(15.0), Mm(280.0)),
+                },
+                Op::ShowText {
+                    items: vec![TextItem::Text(line.to_string())],
+                },
+                Op::EndTextSection,
+            ];
+            PdfPage::new(Mm(210.0), Mm(297.0), ops)
+        })
+        .collect();
+    let mut doc = PdfDocument::new("t");
+    let bytes = doc
+        .with_pages(pages)
+        .save(&PdfSaveOptions::default(), &mut Vec::new());
+    std::fs::write(path, bytes).unwrap();
+}
+
 pub async fn temp_pool() -> (tempfile::TempDir, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().unwrap();
-    let url = format!("sqlite:{}", dir.path().join("t.db").display());
+    let url = format!("sqlite:{}", dir.path().join("library.db").display());
     let pool = crate::db::connect(&url).await.unwrap();
     (dir, pool)
 }
@@ -90,15 +122,14 @@ pub async fn insert_test_paper(pool: &sqlx::SqlitePool) -> String {
     id
 }
 
-/// Leaks its temp dir, like `pool_with_paper`.
-pub async fn temp_vectors(dims: usize) -> crate::search::vector::VectorStore {
+/// A fresh store; the `TempDir` holds its directory for the test's duration.
+pub async fn temp_vectors(dims: usize) -> (tempfile::TempDir, crate::search::vector::VectorStore) {
     use crate::search::vector::{OpenMode, VectorStore};
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = VectorStore::open(&dir.path().join("vectors"), dims, OpenMode::LoadOrCreate)
         .await
         .unwrap();
-    std::mem::forget(dir);
-    store
+    (dir, store)
 }
 
 #[cfg(test)]
@@ -120,13 +151,14 @@ pub(crate) fn chunk(
 pub(crate) async fn tier(
     base_url: &str,
     seeds: Vec<crate::search::vector::ChunkPoint>,
-) -> crate::search::SemanticTier {
-    let store = temp_vectors(4).await;
+) -> (tempfile::TempDir, crate::search::SemanticTier) {
+    let (dir, store) = temp_vectors(4).await;
     store.upsert(seeds).await.unwrap();
-    crate::search::SemanticTier {
+    let tier = crate::search::SemanticTier {
         embedder: crate::search::embedder::Embedder::for_tests(base_url, "m1", 4),
         store,
-    }
+    };
+    (dir, tier)
 }
 
 pub fn embedding_ai(base_url: &str, dims: usize) -> crate::config::AiConfig {

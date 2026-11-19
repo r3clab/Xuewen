@@ -1,11 +1,8 @@
-use std::collections::{HashMap, HashSet};
-use std::io::Write;
-use std::sync::{LazyLock, Mutex, RwLock};
-
 use axum::body::{Body, Bytes};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::{EmbeddedFile, RustEmbed};
+use sha2::{Digest, Sha256};
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -24,163 +21,145 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// bodiless 304.
 const REVALIDATE: &str = "public, no-cache";
 
-/// Below this, compression framing costs more than it saves.
-const MIN_COMPRESS_BYTES: usize = 256;
+/// The shell of a binary built without the frontend: the API works, and the
+/// page says how to get the real UI.
+const PLACEHOLDER: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Xuewen</title></head><body style=\"font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem\">\
+<h1>Xuewen</h1><p>The API is running. The web UI has not been built yet — run \
+<code>npm --prefix frontend run build</code> and rebuild.</p>\
+<p>Try <a href=\"/api/stats\">/api/stats</a>.</p></body></html>";
 
-/// Content codings we negotiate, best first.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Encoding {
+/// The content codings the frontend build stores beside an asset
+/// (`frontend/vite.config.ts` writes `<file>.br` and `<file>.gz`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Coding {
     Br,
     Gzip,
-    Identity,
 }
 
-impl Encoding {
-    fn name(self) -> Option<&'static str> {
+impl Coding {
+    fn token(self) -> &'static str {
         match self {
-            Encoding::Br => Some("br"),
-            Encoding::Gzip => Some("gzip"),
-            Encoding::Identity => None,
+            Coding::Br => "br",
+            Coding::Gzip => "gzip",
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Coding::Br => ".br",
+            Coding::Gzip => ".gz",
         }
     }
 }
 
-/// Compressed bodies, keyed by path + coding and tagged with the content hash
-/// they were produced from.
-///
-/// Compressing the 4.6 MB PDFium wasm costs ~100 ms of CPU while the loopback
-/// transfer it saves costs ~40 ms, so doing it per request would be a net loss
-/// for the local case and only pay off over a real network. Doing it once and
-/// keeping the bytes wins in both. The stored hash is what keeps debug builds
-/// honest: there rust-embed re-reads `frontend/dist` from disk on every request
-/// (that is how a frontend rebuild is served without a Rust recompile), so a
-/// rebuilt asset hashes differently and misses this cache rather than being
-/// served stale.
-static COMPRESSED: LazyLock<RwLock<CompressionCache>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-type CompressionCache = HashMap<(String, Encoding), Cached>;
-
-/// The outcome of compressing one asset, tagged with the content hash it was
-/// produced from. `body: None` records "compressing this made it bigger" so the
-/// answer is remembered instead of being recomputed on every request.
-struct Cached {
-    hash: String,
-    body: Option<Bytes>,
+/// One stored form of an asset: its bytes as sent, and the coding they carry.
+struct Representation {
+    body: Bytes,
+    hash: [u8; 32],
+    coding: Option<Coding>,
 }
 
-/// Keys with a warm pass already in flight, so N concurrent requests for a cold
-/// asset queue one compression rather than N.
-static WARMING: LazyLock<Mutex<HashSet<(String, Encoding)>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+impl Representation {
+    fn embedded(file: EmbeddedFile, coding: Option<Coding>) -> Self {
+        let body = match file.data {
+            // Release bakes the bytes into the binary, so this is a `&'static
+            // [u8]` and the response body is a refcount bump rather than a
+            // 4.6 MB copy.
+            std::borrow::Cow::Borrowed(b) => Bytes::from_static(b),
+            std::borrow::Cow::Owned(v) => Bytes::from(v),
+        };
+        Self {
+            body,
+            hash: file.metadata.sha256_hash(),
+            coding,
+        }
+    }
+
+    fn placeholder() -> Self {
+        Self {
+            body: Bytes::from_static(PLACEHOLDER.as_bytes()),
+            hash: Sha256::digest(PLACEHOLDER).into(),
+            coding: None,
+        }
+    }
+}
 
 /// Serve an embedded SPA asset by path, falling back to `index.html` for
 /// client-side routes (so deep links work).
 pub(crate) async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-    match Assets::get(path) {
-        Some(content) => respond(path, content, &headers),
+    let accept = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok());
+    let path = match uri.path().trim_start_matches('/') {
+        "" => "index.html",
+        path => path,
+    };
+    let find = |path| pick(path, accept, Assets::get).map(|(f, c)| Representation::embedded(f, c));
+    match find(path) {
+        Some(found) => respond(path, found, &headers),
+        None if names_a_file(path) => StatusCode::NOT_FOUND.into_response(),
         // A client-side route: hand back the SPA shell under its own name, so
         // it gets index.html's revalidate policy rather than the deep link's.
-        None => match Assets::get("index.html") {
-            Some(index) => respond("index.html", index, &headers),
-            None => (StatusCode::NOT_FOUND, "not found").into_response(),
-        },
+        None => {
+            let shell = find("index.html").unwrap_or_else(Representation::placeholder);
+            respond("index.html", shell, &headers)
+        }
     }
 }
 
-fn respond(path: &str, file: EmbeddedFile, req: &HeaderMap) -> Response {
-    let hash = hex::encode(file.metadata.sha256_hash());
-    // Weak, deliberately: the same resource is served as identity, gzip or br
-    // depending on what the client accepts, and a strong ETag would be claiming
-    // those byte streams are identical. Weak comparison is what `If-None-Match`
-    // revalidation uses anyway.
-    let etag = format!("W/\"{}\"", &hash[..32]);
-    let cache_control = cache_control_for(path);
+/// Client-side routes are extensionless; a missing `app-1a2b.js` is a stale
+/// or broken build, and answering it with the HTML shell would only surface
+/// as a MIME-type error in the browser.
+fn names_a_file(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'))
+}
 
+/// The stored form of `path` to send: the client's most preferred coding
+/// that has a sibling, else the file itself. Siblings are looked up first so
+/// a compressed hit never reads the identity bytes too (debug builds read
+/// every lookup from disk).
+fn pick<T>(
+    path: &str,
+    accept: Option<&str>,
+    get: impl Fn(&str) -> Option<T>,
+) -> Option<(T, Option<Coding>)> {
+    acceptable(accept)
+        .into_iter()
+        .find_map(|c| get(&format!("{path}{}", c.suffix())).map(|f| (f, Some(c))))
+        .or_else(|| get(path).map(|f| (f, None)))
+}
+
+fn respond(path: &str, repr: Representation, req: &HeaderMap) -> Response {
+    // Strong and per representation: each coding is its own byte stream with
+    // its own hash, so a cached br body can never validate a gzip one.
+    let etag = format!("\"{}\"", hex::encode(&repr.hash[..16]));
+    let res = Response::builder()
+        // Every representation of this URL varies by what the client accepts,
+        // so shared caches must key on it — including on the 304, or a proxy
+        // could hand a br body to a client that never asked for one.
+        .header(header::VARY, "accept-encoding")
+        .header(header::ETAG, &etag)
+        .header(header::CACHE_CONTROL, cache_control_for(path));
     let known = req
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|inm| matches_etag(inm, &etag));
-    if known {
-        return build(StatusCode::NOT_MODIFIED, None, None, &etag, cache_control);
-    }
-
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let mime = mime.as_ref();
-    let raw = match file.data {
-        // Release bakes the bytes into the binary, so this is a `&'static [u8]`
-        // and the response body is a refcount bump rather than a 4.6 MB copy.
-        std::borrow::Cow::Borrowed(b) => Bytes::from_static(b),
-        std::borrow::Cow::Owned(v) => Bytes::from(v),
-    };
-
-    let wanted = if compressible(mime) && raw.len() >= MIN_COMPRESS_BYTES {
-        negotiate(
-            req.get(header::ACCEPT_ENCODING)
-                .and_then(|v| v.to_str().ok()),
-        )
+    let res = if known {
+        res.status(StatusCode::NOT_MODIFIED).body(Body::empty())
     } else {
-        Encoding::Identity
-    };
-    // Label the response with the coding actually applied, never with the one
-    // that was merely wanted. Falling back to identity bytes while still
-    // announcing `content-encoding: br` makes the client decode garbage — it
-    // ends up with nothing at all, which is how an asset that simply refused to
-    // shrink would take the whole page down.
-    let (coding, body) = match wanted {
-        Encoding::Identity => (Encoding::Identity, raw),
-        c => match encoded(path, &hash, c, &raw) {
-            Some(compressed) => (c, compressed),
-            None => (Encoding::Identity, raw),
-        },
-    };
-
-    build(
-        StatusCode::OK,
-        Some((mime, body)),
-        coding.name(),
-        &etag,
-        cache_control,
-    )
-}
-
-fn build(
-    status: StatusCode,
-    body: Option<(&str, Bytes)>,
-    coding: Option<&str>,
-    etag: &str,
-    cache_control: &str,
-) -> Response {
-    let mut res = Response::builder().status(status);
-    let headers = res.headers_mut().expect("a freshly built response builder");
-    // Every representation of this URL varies by what the client accepts, so
-    // shared caches must key on it — including on the 304, or a proxy could
-    // hand a br body to a client that never asked for one.
-    headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-    if let Ok(v) = HeaderValue::from_str(etag) {
-        headers.insert(header::ETAG, v);
-    }
-    if let Ok(v) = HeaderValue::from_str(cache_control) {
-        headers.insert(header::CACHE_CONTROL, v);
-    }
-    if let Some(coding) = coding {
-        headers.insert(
-            header::CONTENT_ENCODING,
-            HeaderValue::from_str(coding).expect("a static coding token"),
-        );
-    }
-    match body {
-        Some((mime, bytes)) => {
-            if let Ok(v) = HeaderValue::from_str(mime) {
-                headers.insert(header::CONTENT_TYPE, v);
-            }
-            res.body(Body::from(bytes))
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let res = res.header(header::CONTENT_TYPE, mime.as_ref());
+        match repr.coding {
+            Some(c) => res.header(header::CONTENT_ENCODING, c.token()),
+            None => res,
         }
-        None => res.body(Body::empty()),
-    }
-    .expect("a response with a valid status and headers")
+        .body(Body::from(repr.body))
+    };
+    res.expect("static headers, a hex ETag and a guessed MIME type are all valid")
 }
 
 /// Only Vite's fingerprinted output can be cached without revalidation: its
@@ -194,27 +173,12 @@ fn cache_control_for(path: &str) -> &'static str {
     }
 }
 
-/// True when the body is worth compressing. An allowlist rather than a
-/// denylist: guessing wrong here wastes CPU on bytes that are already
-/// compressed (woff2, png) for no gain.
-fn compressible(mime: &str) -> bool {
-    mime.starts_with("text/")
-        || matches!(
-            mime,
-            "application/javascript"
-                | "text/javascript"
-                | "application/json"
-                | "application/wasm"
-                | "application/xml"
-                | "image/svg+xml"
-        )
-}
-
-/// Pick the best coding the client will take. Honours q-values, including the
-/// `q=0` that spells "not this one" and a `*` fallback.
-fn negotiate(accept: Option<&str>) -> Encoding {
+/// The stored codings the client accepts, most preferred first (brotli on a
+/// tie). Honours q-values, including the `q=0` that spells "not this one" and
+/// a `*` fallback.
+fn acceptable(accept: Option<&str>) -> Vec<Coding> {
     let Some(accept) = accept else {
-        return Encoding::Identity;
+        return Vec::new();
     };
     let (mut br, mut gzip, mut star) = (None, None, None);
     for part in accept.split(',') {
@@ -239,91 +203,13 @@ fn negotiate(accept: Option<&str>) -> Encoding {
             _ => {}
         }
     }
-    let br = br.or(star).unwrap_or(0.0);
-    let gzip = gzip.or(star).unwrap_or(0.0);
-    if br > 0.0 && br >= gzip {
-        Encoding::Br
-    } else if gzip > 0.0 {
-        Encoding::Gzip
-    } else {
-        Encoding::Identity
-    }
-}
-
-/// The cached compressed body for this exact content, compressing on first ask.
-/// `None` means "serve it uncompressed" — either the codec failed or it made
-/// the body bigger.
-fn encoded(path: &str, hash: &str, coding: Encoding, raw: &Bytes) -> Option<Bytes> {
-    let key = (path.to_string(), coding);
-    if let Ok(cache) = COMPRESSED.read() {
-        if let Some(cached) = cache.get(&key) {
-            if cached.hash == hash {
-                return cached.body.clone();
-            }
-        }
-    }
-    // Cold. Compress off the request path and serve identity meanwhile: brotli
-    // on the 4.6 MB wasm takes ~550 ms, and doing that inline blocks a runtime
-    // worker — with a handful of concurrent cold requests it starved unrelated
-    // API calls from 0.7 ms to 523 ms. Nobody should ever wait for compression;
-    // the next request gets the small body.
-    warm(key, hash.to_string(), coding, raw.clone());
-    None
-}
-
-/// Compress on the blocking pool, once per key. Silently does nothing outside a
-/// Tokio runtime (unit tests call `warm_now` directly).
-fn warm(key: (String, Encoding), hash: String, coding: Encoding, raw: Bytes) {
-    {
-        let Ok(mut inflight) = WARMING.lock() else {
-            return;
-        };
-        // Already queued by another request for the same cold asset.
-        if !inflight.insert(key.clone()) {
-            return;
-        }
-    }
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        if let Ok(mut inflight) = WARMING.lock() {
-            inflight.remove(&key);
-        }
-        return;
-    };
-    handle.spawn_blocking(move || {
-        warm_now(&key, hash, coding, &raw);
-        if let Ok(mut inflight) = WARMING.lock() {
-            inflight.remove(&key);
-        }
-    });
-}
-
-/// Compress and record the result — including the negative result, so an asset
-/// that refuses to shrink is not recompressed on every request forever.
-fn warm_now(key: &(String, Encoding), hash: String, coding: Encoding, raw: &[u8]) {
-    let body = compress(coding, raw).filter(|out| out.len() < raw.len());
-    if let Ok(mut cache) = COMPRESSED.write() {
-        cache.insert(key.clone(), Cached { hash, body });
-    }
-}
-
-fn compress(coding: Encoding, raw: &[u8]) -> Option<Bytes> {
-    match coding {
-        Encoding::Gzip => {
-            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
-            enc.write_all(raw).ok()?;
-            Some(Bytes::from(enc.finish().ok()?))
-        }
-        // Quality 5, not brotli's maximum 11: on the 4.6 MB wasm, 11 takes tens
-        // of seconds and the first client to ask would wear all of it, while 5
-        // lands within a few percent of the same size in well under a second.
-        Encoding::Br => {
-            let mut out = Vec::new();
-            let mut reader = brotli::CompressorReader::new(raw, 4096, 5, 22);
-            std::io::copy(&mut reader, &mut out).ok()?;
-            Some(Bytes::from(out))
-        }
-        Encoding::Identity => None,
-    }
+    let mut ranked: Vec<(f32, Coding)> = [(br, Coding::Br), (gzip, Coding::Gzip)]
+        .into_iter()
+        .map(|(q, c)| (q.or(star).unwrap_or(0.0), c))
+        .filter(|(q, _)| *q > 0.0)
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.into_iter().map(|(_, c)| c).collect()
 }
 
 /// RFC 9110 `If-None-Match`: a comma-separated list, `*` matching anything, and
@@ -345,29 +231,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn negotiates_the_best_offered_coding() {
-        assert_eq!(negotiate(Some("gzip, deflate, br")), Encoding::Br);
-        assert_eq!(negotiate(Some("gzip, deflate")), Encoding::Gzip);
-        assert_eq!(negotiate(Some("deflate")), Encoding::Identity);
-        assert_eq!(negotiate(None), Encoding::Identity);
+    fn ranks_the_offered_codings() {
+        assert_eq!(
+            acceptable(Some("gzip, deflate, br")),
+            [Coding::Br, Coding::Gzip]
+        );
+        assert_eq!(acceptable(Some("gzip, deflate")), [Coding::Gzip]);
+        assert!(acceptable(Some("deflate")).is_empty());
+        assert!(acceptable(None).is_empty());
     }
 
     #[test]
     fn honours_q_values() {
         // q=0 is a refusal, not a weak preference.
-        assert_eq!(negotiate(Some("br;q=0, gzip")), Encoding::Gzip);
-        assert_eq!(negotiate(Some("br;q=0.1, gzip;q=0.9")), Encoding::Gzip);
-        assert_eq!(negotiate(Some("br;q=0.9, gzip;q=0.1")), Encoding::Br);
-        assert_eq!(negotiate(Some("*")), Encoding::Br);
-        assert_eq!(negotiate(Some("gzip, *;q=0")), Encoding::Gzip);
+        assert_eq!(acceptable(Some("br;q=0, gzip")), [Coding::Gzip]);
+        assert_eq!(
+            acceptable(Some("br;q=0.1, gzip;q=0.9")),
+            [Coding::Gzip, Coding::Br]
+        );
+        assert_eq!(
+            acceptable(Some("br;q=0.9, gzip;q=0.1")),
+            [Coding::Br, Coding::Gzip]
+        );
+        assert_eq!(acceptable(Some("*")), [Coding::Br, Coding::Gzip]);
+        assert_eq!(acceptable(Some("gzip, *;q=0")), [Coding::Gzip]);
+    }
+
+    #[test]
+    fn picks_the_most_preferred_stored_sibling() {
+        let stored = ["app.js", "app.js.gz", "font.woff2"];
+        let get = |p: &str| stored.contains(&p).then(|| p.to_string());
+
+        // No br sibling: the next acceptable coding that has one wins.
+        assert_eq!(
+            pick("app.js", Some("br, gzip"), get),
+            Some(("app.js.gz".into(), Some(Coding::Gzip)))
+        );
+        assert_eq!(
+            pick("app.js", Some("br"), get),
+            Some(("app.js".into(), None))
+        );
+        assert_eq!(pick("app.js", None, get), Some(("app.js".into(), None)));
+        // Nothing stored beside it (already compressed, or too small).
+        assert_eq!(
+            pick("font.woff2", Some("br, gzip"), get),
+            Some(("font.woff2".into(), None))
+        );
+        assert_eq!(pick("missing.js", Some("gzip"), get), None);
     }
 
     #[test]
     fn etag_comparison_is_weak_and_list_aware() {
-        let etag = "W/\"abc\"";
-        assert!(matches_etag("W/\"abc\"", etag));
-        // A client may echo the tag without the weakness prefix.
+        let etag = "\"abc\"";
         assert!(matches_etag("\"abc\"", etag));
+        // Weak comparison: the weakness prefix is ignored.
+        assert!(matches_etag("W/\"abc\"", etag));
         assert!(matches_etag("*", etag));
         assert!(matches_etag("\"zzz\", W/\"abc\"", etag));
         assert!(!matches_etag("\"zzz\"", etag));
@@ -381,78 +299,5 @@ mod tests {
         // Stable URLs: a deploy has to be able to change what they mean.
         assert_eq!(cache_control_for("index.html"), REVALIDATE);
         assert_eq!(cache_control_for("favicon.svg"), REVALIDATE);
-    }
-
-    #[test]
-    fn only_compresses_what_benefits() {
-        assert!(compressible("application/wasm"));
-        assert!(compressible("text/javascript"));
-        assert!(compressible("image/svg+xml"));
-        assert!(!compressible("font/woff2"));
-        assert!(!compressible("image/png"));
-    }
-
-    #[test]
-    fn round_trips_both_codings() {
-        let raw = "xuewen ".repeat(500).into_bytes();
-        let gz = compress(Encoding::Gzip, &raw).unwrap();
-        let br = compress(Encoding::Br, &raw).unwrap();
-        assert!(gz.len() < raw.len());
-        assert!(br.len() < raw.len());
-
-        let mut out = Vec::new();
-        let mut dec = flate2::read::GzDecoder::new(&gz[..]);
-        std::io::copy(&mut dec, &mut out).unwrap();
-        assert_eq!(out, raw);
-
-        let mut out = Vec::new();
-        let mut dec = brotli::Decompressor::new(&br[..], 4096);
-        std::io::copy(&mut dec, &mut out).unwrap();
-        assert_eq!(out, raw);
-    }
-
-    #[test]
-    fn a_cold_asset_serves_identity_and_the_warm_pass_fills_the_cache() {
-        let key = ("cold.js".to_string(), Encoding::Gzip);
-        let raw = Bytes::from("a".repeat(4096));
-
-        // Cold: nothing compressed yet, so the caller serves identity instead
-        // of blocking the request on compression.
-        assert!(encoded("cold.js", "hash-one", Encoding::Gzip, &raw).is_none());
-
-        warm_now(&key, "hash-one".into(), Encoding::Gzip, &raw);
-        let warmed = encoded("cold.js", "hash-one", Encoding::Gzip, &raw).unwrap();
-        assert!(warmed.len() < raw.len());
-
-        // A rebuilt asset hashes differently and must not be served stale —
-        // this is what keeps debug builds' live reload honest.
-        let changed = Bytes::from("b".repeat(4096));
-        assert!(encoded("cold.js", "hash-two", Encoding::Gzip, &changed).is_none());
-        warm_now(&key, "hash-two".into(), Encoding::Gzip, &changed);
-        let after = encoded("cold.js", "hash-two", Encoding::Gzip, &changed).unwrap();
-
-        let mut out = Vec::new();
-        let mut dec = flate2::read::GzDecoder::new(&after[..]);
-        std::io::copy(&mut dec, &mut out).unwrap();
-        assert_eq!(out, changed);
-    }
-
-    #[test]
-    fn input_that_refuses_to_shrink_is_remembered_as_identity() {
-        // Random-ish bytes gzip larger than they started. The negative result
-        // must be recorded, or every request recompresses it forever — and the
-        // caller must then serve identity, never identity bytes labelled gzip.
-        let key = ("noise.bin".to_string(), Encoding::Gzip);
-        let raw: Bytes = (0..512u32)
-            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
-            .collect::<Vec<u8>>()
-            .into();
-
-        warm_now(&key, "h".into(), Encoding::Gzip, &raw);
-        assert!(encoded("noise.bin", "h", Encoding::Gzip, &raw).is_none());
-        let cache = COMPRESSED.read().unwrap();
-        let cached = cache.get(&key).expect("the negative result is recorded");
-        assert_eq!(cached.hash, "h");
-        assert!(cached.body.is_none());
     }
 }

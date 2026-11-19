@@ -6,14 +6,16 @@ import { translateBox, closeTranslate } from './state.svelte';
 import { appSettings } from '$shared/api/settings.svelte';
 import { dock } from '$features/reader/dock/state.svelte';
 import { chat } from '$features/reader/ask/chat.svelte';
+import { viewer } from '$features/reader/tabs/state.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
 
 beforeEach(() => {
   closeTranslate();
   appSettings.translate = { enabled: true, providers: ['llm', 'deepl'], default_provider: 'llm', target_lang: 'zh', trigger: 'auto' };
   dock.open = false;
-  dock.entry = null;
   chat.draft = '';
   chat.available = true;
+  viewer.activeId = 'p1';
   vi.unstubAllGlobals();
   vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async () => {}) } });
 });
@@ -50,8 +52,29 @@ describe('TranslatePopover', () => {
     render(TranslatePopover);
     await userEvent.click(screen.getByRole('button', { name: /ask about this/i }));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('ask');
     expect(chat.draft).toContain('hello world');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('Esc closes the popover and nothing under it', async () => {
+    window.addEventListener('keydown', dismissTopLayer);
+    openBox();
+    dock.open = true;
+    render(TranslatePopover);
+    await userEvent.keyboard('{Escape}');
+    expect(translateBox.open).toBe(false);
+    expect(dock.open).toBe(true);
+    window.removeEventListener('keydown', dismissTopLayer);
+  });
+
+  it('closes when an inner pane scrolls under it', () => {
+    openBox();
+    render(TranslatePopover);
+    const pane = document.createElement('div');
+    document.body.append(pane);
+    pane.dispatchEvent(new Event('scroll'));
+    expect(translateBox.open).toBe(false);
+    pane.remove();
   });
 
   it('renders nothing when closed', () => {

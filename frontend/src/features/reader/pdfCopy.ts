@@ -246,16 +246,13 @@ export function createPdfCopy(opts: PdfCopyOptions): PdfCopy {
 // openFind, which the keymap calls into rather than reaching into the reader.
 let current: PdfCopy | null = null;
 
-export function registerPdfCopy(copier: PdfCopy | null): void {
+/// Publish the live copier; the returned function withdraws exactly this one,
+/// never a copier registered after it.
+export function registerPdfCopy(copier: PdfCopy): () => void {
   current = copier;
-}
-
-/// Clear on teardown by identity, not blindly, exactly as
-/// unregisterAnnotationCommands does: should a replacement PdfDeck ever mount
-/// before the outgoing one tears down, a blind clear would unregister the live
-/// copier and leave ⌘C silently dead over the reader.
-export function unregisterPdfCopy(copier: PdfCopy): void {
-  if (current === copier) current = null;
+  return () => {
+    if (current === copier) current = null;
+  };
 }
 
 /// Called by a document's view once its selection is ready. PdfDeck registers

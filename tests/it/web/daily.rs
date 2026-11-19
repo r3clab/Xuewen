@@ -22,19 +22,21 @@ fn daily_cfg() -> DailyConfig {
 
 /// A DailyService whose remote endpoints are all dead — fine for GET tests,
 /// which never call out.
-async fn dead_service(pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
-    DailyService::for_tests(
+async fn dead_service(pool: sqlx::SqlitePool) -> (tempfile::TempDir, std::sync::Arc<DailyService>) {
+    let (dir, vectors) = xuewen::testutil::temp_vectors(4).await;
+    let svc = DailyService::for_tests(
         daily_cfg(),
         pool,
         Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-        xuewen::testutil::temp_vectors(4).await,
+        vectors,
         LlmClient::new("http://127.0.0.1:1/v1", "m", None),
         "http://127.0.0.1:1/atom",
         "http://127.0.0.1:1/pdf",
-    )
+    );
+    (dir, svc)
 }
 
-fn batch_paper(date: &str, rank: i64, id: &str, tldr: Option<&str>) -> store::DailyPaper {
+fn batch_paper(date: &str, rank: i64, id: &str) -> store::DailyPaper {
     store::DailyPaper {
         batch_date: date.into(),
         rank,
@@ -44,7 +46,6 @@ fn batch_paper(date: &str, rank: i64, id: &str, tldr: Option<&str>) -> store::Da
         abstract_text: "An abstract.".into(),
         categories: vec!["cs.AI".into()],
         score: 0.9,
-        tldr: tldr.map(String::from),
         abs_url: format!("https://arxiv.org/abs/{id}"),
         pdf_url: format!("https://arxiv.org/pdf/{id}"),
         summary: None,
@@ -58,11 +59,11 @@ async fn get_daily_returns_latest_batch() {
     store::replace_batch(
         &pool,
         "2026-07-09",
-        &[batch_paper("2026-07-09", 1, "2507.1", None)],
+        &[batch_paper("2026-07-09", 1, "2507.1")],
     )
     .await
     .unwrap();
-    let mut rich = batch_paper("2026-07-10", 1, "2507.2", Some("Short."));
+    let mut rich = batch_paper("2026-07-10", 1, "2507.2");
     rich.summary = Some(xuewen::summary::Summary {
         tldr: "Short.".into(),
         problem: "Gap.".into(),
@@ -74,11 +75,11 @@ async fn get_daily_returns_latest_batch() {
     store::replace_batch(
         &pool,
         "2026-07-10",
-        &[rich, batch_paper("2026-07-10", 2, "2507.3", None)],
+        &[rich, batch_paper("2026-07-10", 2, "2507.3")],
     )
     .await
     .unwrap();
-    let daily = dead_service(pool.clone()).await;
+    let (_vectors, daily) = dead_service(pool.clone()).await;
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
@@ -105,7 +106,7 @@ async fn get_daily_returns_latest_batch() {
 #[tokio::test]
 async fn get_daily_empty_state_is_200_with_null_date() {
     let (dir, pool) = support::temp_pool().await;
-    let daily = dead_service(pool.clone()).await;
+    let (_vectors, daily) = dead_service(pool.clone()).await;
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
@@ -129,24 +130,19 @@ async fn daily_routes_503_when_unconfigured() {
 #[tokio::test]
 async fn post_run_starts_then_conflicts_while_running() {
     let (dir, pool) = support::temp_pool().await;
-    // Feed answers slowly so the first run stays in flight for the 409 check.
+    let (release, held) = std::sync::mpsc::channel();
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
         .and(wm_path("/atom/cs.AI"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(
-                    r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>ok</title></feed>"#,
-                )
-                .set_delay(std::time::Duration::from_secs(2)),
-        )
+        .respond_with(HeldFeed(std::sync::Mutex::new(held)))
         .mount(&mock)
         .await;
+    let (_vectors_dir, vectors) = xuewen::testutil::temp_vectors(4).await;
     let daily = DailyService::for_tests(
         daily_cfg(),
         pool.clone(),
         Embedder::for_tests("http://127.0.0.1:1/v1", "m", 4),
-        xuewen::testutil::temp_vectors(4).await,
+        vectors,
         LlmClient::new("http://127.0.0.1:1/v1", "m", None),
         &format!("{}/atom", mock.uri()),
         "http://127.0.0.1:1/pdf",
@@ -159,5 +155,19 @@ async fn post_run_starts_then_conflicts_while_running() {
 
     assert_eq!(server.post("/api/daily/run").await.status_code(), 202);
     assert_eq!(server.post("/api/daily/run").await.status_code(), 409);
+    drop(release);
     tasks.drain().await;
+}
+
+/// An empty feed that is only served once the test drops the channel's
+/// sender, keeping the run that fetches it in flight until then.
+struct HeldFeed(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+
+impl wiremock::Respond for HeldFeed {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let _ = self.0.lock().unwrap().recv();
+        ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>ok</title></feed>"#,
+        )
+    }
 }

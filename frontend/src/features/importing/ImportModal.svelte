@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { Check, CircleExclamationPoint, Copy, FileExclamationPoint, Link, Loader, Upload } from '@lucide/svelte';
+  import { ArchiveArrowUp, Check, CircleExclamationPoint, Copy, FileExclamationPoint, Link, Loader, Trash, Upload } from '@lucide/svelte';
   import { clearProxyCookie, setProxyCookie } from './api';
   import {
     closeImport,
     enqueueFiles,
     enqueueUrl,
     importState,
-    type ImportItem,
+    restoreTrashed,
+    type ImportState,
   } from './queue.svelte';
   import { appSettings, loadSettings } from '$shared/api/settings.svelte';
+  import { errorMessage } from '$shared/errors';
   import Modal from '$shared/ui/Modal.svelte';
 
   let dragging = $state(false);
@@ -54,7 +56,7 @@
       cookieInput = '';
       await loadSettings();
     } catch (e) {
-      cookieError = (e as Error).message;
+      cookieError = errorMessage(e, 'cookie update failed');
     } finally {
       cookieBusy = false;
     }
@@ -67,7 +69,7 @@
       await clearProxyCookie();
       await loadSettings();
     } catch (e) {
-      cookieError = (e as Error).message;
+      cookieError = errorMessage(e, 'cookie update failed');
     } finally {
       cookieBusy = false;
     }
@@ -78,70 +80,50 @@
     void loadSettings();
   });
 
-  // Every per-status decision (icon, summary bucket, row label) in ONE
-  // table, keyed by the full status union — a new import outcome is one
-  // record entry here, and the Record type makes missing one a type error
-  // instead of a silent fall-through to the queued styling. The 'ingested'
-  // row's message + needs-review badge layout stays in the markup below;
-  // its label entry exists only to satisfy exhaustiveness.
-  const STATUS_META: Record<
-    ImportItem['status'],
-    {
-      icon: typeof Check | null;
-      iconClass: string;
-      bucket: 'ingested' | 'skipped' | 'failed' | 'pending';
-      label: (item: ImportItem) => string;
-    }
+  // Icon and summary bucket per outcome; the Record type makes a new outcome
+  // a type error here instead of a silent fall-through to the queued styling.
+  const ROW_STYLE: Record<
+    ImportState['outcome'],
+    { icon: typeof Check | null; iconClass: string; bucket: 'ingested' | 'skipped' | 'failed' | 'pending' }
   > = {
-    queued: { icon: null, iconClass: '', bucket: 'pending', label: () => 'queued' },
-    importing: {
-      icon: Loader,
-      iconClass: 'shrink-0 animate-spin text-amber-600',
-      bucket: 'pending',
-      label: () => 'importing…',
-    },
-    ingested: {
-      icon: Check,
-      iconClass: 'shrink-0 text-lime-600',
-      bucket: 'ingested',
-      label: (i) => i.message ?? '',
-    },
-    duplicate: {
-      icon: Copy,
-      iconClass: 'shrink-0 text-stone-400',
-      bucket: 'skipped',
-      label: () => 'duplicate',
-    },
-    'same-work': {
-      icon: Copy,
-      iconClass: 'shrink-0 text-stone-400',
-      bucket: 'skipped',
-      label: () => 'already in library',
-    },
-    'in-trash': {
-      icon: Copy,
-      iconClass: 'shrink-0 text-stone-400',
-      bucket: 'skipped',
-      label: (i) => `in trash — run: xuewen restore ${i.message}`,
-    },
-    unfetched: {
-      icon: FileExclamationPoint,
-      iconClass: 'shrink-0 text-yellow-600',
-      bucket: 'skipped',
-      label: () => 'no PDF — download & drop in inbox',
-    },
-    failed: {
-      icon: CircleExclamationPoint,
-      iconClass: 'shrink-0 text-red-500',
-      bucket: 'failed',
-      label: (i) => i.message ?? '',
-    },
+    queued: { icon: null, iconClass: '', bucket: 'pending' },
+    importing: { icon: Loader, iconClass: 'shrink-0 animate-spin text-amber-600', bucket: 'pending' },
+    ingested: { icon: Check, iconClass: 'shrink-0 text-lime-600', bucket: 'ingested' },
+    duplicate: { icon: Copy, iconClass: 'shrink-0 text-stone-400', bucket: 'skipped' },
+    same_work: { icon: Copy, iconClass: 'shrink-0 text-stone-400', bucket: 'skipped' },
+    in_trash: { icon: Trash, iconClass: 'shrink-0 text-stone-400', bucket: 'skipped' },
+    restored: { icon: ArchiveArrowUp, iconClass: 'shrink-0 text-lime-600', bucket: 'skipped' },
+    unfetched: { icon: FileExclamationPoint, iconClass: 'shrink-0 text-yellow-600', bucket: 'skipped' },
+    failed: { icon: CircleExclamationPoint, iconClass: 'shrink-0 text-red-500', bucket: 'failed' },
   };
+
+  function detail(state: ImportState): string {
+    switch (state.outcome) {
+      case 'queued':
+        return 'queued';
+      case 'importing':
+        return 'importing…';
+      case 'ingested':
+        return state.title ?? '(untitled)';
+      case 'duplicate':
+        return 'duplicate';
+      case 'same_work':
+        return 'already in library';
+      case 'in_trash':
+        return 'in trash';
+      case 'restored':
+        return 'restored from trash';
+      case 'unfetched':
+        return `no PDF — download & drop in inbox: ${state.title ?? '(untitled)'}`;
+      case 'failed':
+        return state.message;
+    }
+  }
 
   const summary = $derived.by(() => {
     const c = { ingested: 0, skipped: 0, failed: 0 };
     for (const i of importState.items) {
-      const bucket = STATUS_META[i.status].bucket;
+      const bucket = ROW_STYLE[i.state.outcome].bucket;
       if (bucket !== 'pending') c[bucket]++;
     }
     return c;
@@ -211,27 +193,28 @@
   {#if importState.items.length}
     <ul class="mt-4 space-y-1">
       {#each importState.items as item, i (i)}
-        {@const meta = STATUS_META[item.status]}
+        {@const progress = item.state}
+        {@const look = ROW_STYLE[progress.outcome]}
         <li class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm">
-          {#if meta.icon}
-            <meta.icon size={14} class={meta.iconClass} />
+          {#if look.icon}
+            <look.icon size={14} class={look.iconClass} />
           {:else}
             <span class="h-3.5 w-3.5 shrink-0 rounded-full border border-stone-300 dark:border-stone-600"></span>
           {/if}
           <span class="min-w-0 flex-1 truncate text-stone-700 dark:text-stone-200">{item.name}</span>
-          {#if item.status === 'ingested'}
-            <span class="flex max-w-[55%] shrink-0 items-center justify-end gap-1.5 text-xs">
-              {#if item.needsReview}
-                <span class="shrink-0 rounded bg-yellow-100 px-1.5 py-0.5 font-medium text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-400">needs review</span>
-              {/if}
-              <span class="truncate text-stone-500 dark:text-stone-400" title={item.message}>{item.message}</span>
-            </span>
-          {:else}
-            <span
-              class="max-w-[45%] shrink-0 truncate text-right text-xs text-stone-500 dark:text-stone-400"
-              title={item.message}
-            >{meta.label(item)}</span>
-          {/if}
+          <span class="flex max-w-[55%] shrink-0 items-center justify-end gap-1.5 text-xs">
+            {#if progress.outcome === 'ingested' && progress.status === 'needs_review'}
+              <span class="shrink-0 rounded bg-yellow-100 px-1.5 py-0.5 font-medium text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-400">needs review</span>
+            {/if}
+            <span class="truncate text-stone-500 dark:text-stone-400" title={detail(progress)}>{detail(progress)}</span>
+            {#if progress.outcome === 'in_trash'}
+              <button
+                type="button"
+                onclick={() => void restoreTrashed(item)}
+                class="shrink-0 rounded px-1.5 py-0.5 font-medium text-amber-700 hover:bg-amber-700/10 dark:text-amber-400 dark:hover:bg-amber-400/10"
+              >Restore</button>
+            {/if}
+          </span>
         </li>
       {/each}
     </ul>

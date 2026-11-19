@@ -22,14 +22,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   library.papers = [];
   projects.items = [];
-  Object.assign(filters, {
-    q: '',
-    status: 'all',
-    sort: 'year_desc',
-    project: 'all',
-    tag: undefined,
-    starred: undefined,
-  });
+  filters.q = '';
+  filters.sort = 'year_desc';
 });
 
 describe('Welcome', () => {
@@ -39,7 +33,7 @@ describe('Welcome', () => {
   });
 
   it('does not claim the library is empty when a filter is the cause', () => {
-    filters.tag = 'os/rtos';
+    filters.q = 'tag:os/rtos';
     render(Welcome);
     expect(screen.queryByText(/library is empty/i)).not.toBeInTheDocument();
     expect(screen.getByText(/No papers match/)).toBeInTheDocument();
@@ -64,7 +58,7 @@ describe('Welcome', () => {
   it('shows an add-papers tip when an empty project is selected', () => {
     library.papers = [];
     projects.items = [{ id: 'pr1', name: 'RTOS Fuzzing', paper_count: 0, created_at: '' }];
-    filters.project = 'pr1';
+    filters.q = 'project:"RTOS Fuzzing"';
     render(Welcome);
     expect(screen.getByText(/This project is empty/)).toBeInTheDocument();
   });

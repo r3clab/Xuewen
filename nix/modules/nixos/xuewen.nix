@@ -18,6 +18,7 @@ let
     inherit lib pkgs;
     modules = "nixosModules";
     environmentFileExample = "/run/secrets/xuewen.env";
+    dataDirDefault.default = "/var/lib/xuewen";
   };
   xw = shared.mkXuewen cfg;
 in
@@ -27,15 +28,6 @@ in
       type = lib.types.bool;
       default = false;
       description = "Open {option}`services.xuewen.port` in the firewall.";
-    };
-
-    dataDir = lib.mkOption {
-      type = lib.types.path;
-      default = "/var/lib/xuewen";
-      description = ''
-        State directory holding the inbox, library, SQLite database, search
-        index and vector store. Created automatically with the right ownership.
-      '';
     };
 
     user = lib.mkOption {
@@ -99,11 +91,28 @@ in
         ProtectControlGroups = true;
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
+        ProtectKernelLogs = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectProc = "invisible";
+        ProcSubset = "pid";
+        PrivateUsers = true;
+        CapabilityBoundingSet = "";
         RestrictNamespaces = true;
         RestrictRealtime = true;
+        RemoveIPC = true;
         LockPersonality = true;
         MemoryDenyWriteExecute = !xw.agentConfigured;
+        UMask = "0077";
         SystemCallArchitectures = "native";
+        # Codex sandboxes the commands it runs with Landlock and seccomp, the
+        # calls in @sandbox.
+        SystemCallFilter = [
+          "@system-service"
+        ]
+        ++ lib.optional xw.agentConfigured "@sandbox"
+        ++ [ "~@privileged" ];
+        SystemCallErrorNumber = "EPERM";
         RestrictAddressFamilies = [
           "AF_INET"
           "AF_INET6"

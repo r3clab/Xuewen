@@ -1,8 +1,22 @@
 use super::naming;
-use crate::library::model::Paper;
+use crate::library::model::{Paper, ARXIV_ABS_BASE};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Debug,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    clap::ValueEnum,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub(crate) enum BibFormat {
+    #[default]
     Bibtex,
     Biblatex,
 }
@@ -46,7 +60,7 @@ pub(crate) fn format_entry(p: &Paper, fmt: BibFormat) -> String {
 
     let mut out = format!("@{kind}{{{key},\n");
     for (name, value) in &fields {
-        out.push_str(&format!("  {name} = {{{}}},\n", escape(value)));
+        out.push_str(&format!("  {name} = {{{}}},\n", field_value(name, value)));
     }
     out.push('}');
     out
@@ -125,7 +139,21 @@ fn entry_url(p: &Paper) -> Option<String> {
     p.meta
         .arxiv_id
         .as_deref()
-        .map(|a| format!("https://arxiv.org/abs/{a}"))
+        .map(|a| format!("{ARXIV_ABS_BASE}/{a}"))
+}
+
+/// Fields biblatex reads verbatim and BibTeX styles hand to `\url`/`\doi`:
+/// LaTeX-escaped, `%20` or `_` would reach the link as `\%20` or `\_`.
+const VERBATIM_FIELDS: [&str; 3] = ["doi", "eprint", "url"];
+
+fn field_value(name: &str, value: &str) -> String {
+    if VERBATIM_FIELDS.contains(&name) {
+        // Verbatim still has to keep the entry's own braces balanced;
+        // percent-encoding them is what any resolver or browser undoes.
+        value.replace('{', "%7B").replace('}', "%7D")
+    } else {
+        escape(value)
+    }
 }
 
 /// Escape LaTeX-special characters in a field value.
@@ -253,6 +281,24 @@ mod tests {
         p.meta.year = None;
         assert!(format_entry(&p, BibFormat::Bibtex)
             .starts_with("@inproceedings{01890000-0000-7000-8000-000000000001,"));
+    }
+
+    #[test]
+    fn link_fields_stay_verbatim() {
+        let mut p = paper();
+        p.meta.doi = Some("10.1002/(SICI)1097-4628_x%y".into());
+        p.meta.url = Some("https://example.org/a_b%20c#sec{1}".into());
+        p.meta.arxiv_id = Some("1706.03762".into());
+        let out = format_entry(&p, BibFormat::Biblatex);
+        assert!(
+            out.contains("doi = {10.1002/(SICI)1097-4628_x%y},\n"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("url = {https://example.org/a_b%20c#sec%7B1%7D},\n"),
+            "got: {out}"
+        );
+        assert!(out.contains("eprint = {1706.03762},\n"), "got: {out}");
     }
 
     #[test]

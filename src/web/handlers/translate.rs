@@ -7,6 +7,7 @@ use crate::app::App;
 use crate::config::TranslateProvider;
 use crate::translate::TranslateError;
 use crate::web::error::ApiError;
+use crate::web::extract::ApiJson;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -35,38 +36,31 @@ impl From<crate::translate::Translated> for TranslationDto {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct TranslateBody {
     text: String,
     #[serde(default)]
+    #[ts(optional)]
     target_lang: Option<String>,
     #[serde(default)]
-    provider: Option<String>,
+    #[ts(optional)]
+    provider: Option<TranslateProvider>,
 }
 
 /// Translate arbitrary text via the configured provider. 503 when
-/// translate-on-selection isn't configured; 400 on empty text or an unknown
-/// provider name; 502 when the upstream provider call fails.
+/// translate-on-selection isn't configured; 400 on empty text; 502 when the upstream provider call fails.
 async fn translate(
     State(app): State<App>,
-    Json(body): Json<TranslateBody>,
+    ApiJson(body): ApiJson<TranslateBody>,
 ) -> Result<Response, ApiError> {
     let svc = app.translate()?;
-    let provider = body
-        .provider
-        .as_deref()
-        .map(str::parse::<TranslateProvider>)
-        .transpose()
-        .map_err(ApiError::BadRequest)?;
     match svc
-        .translate(&body.text, body.target_lang.as_deref(), provider)
+        .translate(&body.text, body.target_lang.as_deref(), body.provider)
         .await
     {
         Ok(t) => Ok(Json(TranslationDto::from(t)).into_response()),
         Err(TranslateError::Empty) => Err(ApiError::BadRequest("empty text".into())),
-        Err(TranslateError::Failed(e)) => {
-            tracing::error!("translate: {e}");
-            Err(ApiError::BadGateway("translation failed"))
-        }
+        Err(TranslateError::Failed(e)) => Err(ApiError::bad_gateway("translation failed", e)),
     }
 }

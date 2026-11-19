@@ -39,6 +39,7 @@ impl Tasks {
         });
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub async fn drain(&self) {
         self.tracker.close();

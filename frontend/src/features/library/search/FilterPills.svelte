@@ -43,24 +43,22 @@
     }`;
   }
 
-  function onProjectPill(id: string) {
-    void setProjectFilter(filters.project === id ? 'all' : id);
+  function onProjectPill(id: string, name: string) {
+    void setProjectFilter(filters.project?.id === id ? null : name);
   }
   function onStarPill() {
-    void setStarFilter(filters.starred !== true);
+    void setStarFilter(!filters.starred);
   }
   function onTagPill(name: string) {
-    void setTagFilter(filters.tag === name ? undefined : name);
+    void setTagFilter(filters.tag === name ? null : name);
   }
 
   // --- per-pill context menu (rename / delete) ---
   // Opens on right-click on the pill itself, mirroring the paper rows'
-  // PaperContextMenu: one cursor-anchored, viewport-clamped instance.
-  // (Task 14's hover "⋯" sibling reserved layout space next to every pill —
-  // opacity-0 keeps the box — which read as `pill … pill …` gaps.) macOS has
-  // no Menu key and Shift+F10 doesn't reliably fire contextmenu, so each
+  // PaperContextMenu: one cursor-anchored, viewport-clamped instance. macOS
+  // has no Menu key and Shift+F10 doesn't reliably fire contextmenu, so each
   // pill also keeps an "⋯" trigger that is sr-only until keyboard-focused —
-  // mouse users never see it and the bar stays gap-free.
+  // mouse users never see it, and it takes no room in the bar.
   type PillKind = 'project' | 'tag';
   let openMenu = $state<{ kind: PillKind; id: string; name: string } | null>(null);
   let menuX = $state(0);
@@ -158,10 +156,10 @@
         id: p.id,
         name: p.name,
         count: p.paper_count,
-        active: filters.project === p.id,
+        active: filters.project?.id === p.id,
         palette: projectPillClasses,
         icon: Bookmark,
-        onToggle: () => onProjectPill(p.id),
+        onToggle: () => onProjectPill(p.id, p.name),
       })}
     {/each}
     <NewProjectInput
@@ -172,9 +170,9 @@
   {:else}
     <button
       type="button"
-      aria-pressed={filters.starred === true}
+      aria-pressed={filters.starred}
       onclick={onStarPill}
-      class={starPillClasses(filters.starred === true)}
+      class={starPillClasses(filters.starred)}
     >
       <Star size={11} fill="currentColor" />
       <span>Starred</span>

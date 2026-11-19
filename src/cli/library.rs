@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use super::browse::FilterArgs;
 use super::output::{self, confirm};
 use super::Ctx;
+use crate::library::export::BibFormat;
 use crate::library::papers::{self, PaperName};
 use crate::library::trash;
 
@@ -56,7 +57,7 @@ pub(super) struct NameArgs {
 #[derive(clap::Args)]
 pub(super) struct ExportArgs {
     /// Paper id (exact or unique prefix) for a single entry.
-    #[arg(conflicts_with_all = ["all", "project", "tag", "starred"])]
+    #[arg(conflicts_with_all = ["all", "project", "tag", "starred", "query", "status"])]
     id: Option<String>,
     /// Export the whole (non-trashed) library.
     #[arg(long, conflicts_with = "project")]
@@ -64,26 +65,11 @@ pub(super) struct ExportArgs {
     #[command(flatten)]
     filters: FilterArgs,
     /// Output format.
-    #[arg(long, value_enum, default_value_t = BibFormatArg::Bibtex)]
-    format: BibFormatArg,
+    #[arg(long, value_enum, default_value_t = BibFormat::Bibtex)]
+    format: BibFormat,
     /// Write to this file instead of stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum BibFormatArg {
-    Bibtex,
-    Biblatex,
-}
-
-impl From<BibFormatArg> for crate::library::export::BibFormat {
-    fn from(a: BibFormatArg) -> Self {
-        match a {
-            BibFormatArg::Bibtex => crate::library::export::BibFormat::Bibtex,
-            BibFormatArg::Biblatex => crate::library::export::BibFormat::Biblatex,
-        }
-    }
 }
 
 pub(super) async fn delete(ctx: &Ctx, args: DeleteArgs) -> Result<()> {
@@ -192,19 +178,24 @@ pub(super) async fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
         format,
         output,
     } = args;
-    let fmt = crate::library::export::BibFormat::from(format);
     let text = if let Some(id) = id {
         let paper = papers::find_one(&ctx.pool, &id).await?;
-        crate::library::export::format_entry(&paper, fmt)
+        crate::library::export::format_entry(&paper, format)
     } else {
-        if !all && filters.project.is_none() && filters.tag.is_none() && !filters.starred {
+        if !all && filters.is_empty() {
             anyhow::bail!(
-                "specify a paper id, --all, --project <name>, --tag <name>, or --starred"
+                "specify a paper id, --all, or a filter (--project, --tag, --starred, --query, --status)"
             );
         }
         let filter = filters.resolve(&ctx.pool).await?;
-        let papers = papers::list(&ctx.pool, filters.query.as_deref(), None, &filter).await?;
-        crate::library::export::format_entries(&papers, fmt)
+        let papers = papers::list(
+            &ctx.pool,
+            filters.query.as_deref(),
+            papers::Sort::default(),
+            &filter,
+        )
+        .await?;
+        crate::library::export::format_entries(&papers, format)
     };
     // Normalize to exactly one trailing newline so single-entry output
     // (which has none) doesn't abut the shell prompt; batch output is

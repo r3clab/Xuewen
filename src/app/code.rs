@@ -10,22 +10,24 @@ pub(crate) enum CloneMode {
 }
 
 impl App {
+    /// Refused unless Agent Ask is configured: a checkout serves nothing else.
     pub(crate) async fn attach_code(
         &self,
         paper: &Paper,
         repo_url: &str,
         mode: CloneMode,
     ) -> Result<Option<PaperCode>, Error> {
-        code::validate_repo_url(repo_url, &self.inner.clone_allowed_hosts)
+        self.agent()?;
+        let url = code::validate_repo_url(repo_url, &self.inner.clone_allowed_hosts)
             .map_err(Error::Unprocessable)?;
-        let repo_url = repo_url.trim();
-        let clone_gen = store::upsert_paper_code_cloning(self.pool(), &paper.id, repo_url).await?;
+        let clone_gen =
+            store::upsert_paper_code_cloning(self.pool(), &paper.id, url.as_str()).await?;
         let job = code::run_clone(
             self.pool().clone(),
             self.library_root().to_path_buf(),
             paper.id.clone(),
-            repo_url.to_string(),
-            self.inner.max_repo_mb,
+            url,
+            self.inner.clone_limits,
             clone_gen,
         );
         match mode {
@@ -36,8 +38,7 @@ impl App {
     }
 
     pub(crate) async fn detach_code(&self, paper: &Paper) -> Result<(), Error> {
-        code::remove_checkout(self.library_root(), &paper.id).await;
-        store::delete_paper_code(self.pool(), &paper.id).await?;
+        code::detach(self.pool(), self.library_root(), &paper.id).await?;
         Ok(())
     }
 }

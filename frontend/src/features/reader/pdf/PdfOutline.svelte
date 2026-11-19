@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChevronRight } from '@lucide/svelte';
-  import { onMount, tick, untrack } from 'svelte';
+  import { flushSync, onMount } from 'svelte';
   import { useOutline, useOutlineState, type OutlineItem } from '@embedpdf/svelte/outline';
   import { useStage } from '@embedpdf/svelte/stage';
 
@@ -11,33 +11,33 @@
   // A failed read shows the same quiet empty state as a PDF without one.
   const loading = $derived(tree.status === 'idle' || tree.status === 'loading');
 
-  onMount(() => void outline.ensureLoaded().catch(() => {}));
-
   /// Only in-document jumps are offered: a URI, remote or launch entry is
   /// shown but inert, and none goes through the plugin's own activation.
-  function pageOf(item: OutlineItem) {
-    return item.target?.kind === 'goto' ? item.target.destination.page : null;
+  function destinationOf(item: OutlineItem) {
+    return item.target?.kind === 'goto' ? item.target.destination : null;
   }
 
-  // Every section starts open, whatever the file's `/Count` says, then the
-  // current one is revealed ONCE when the outline view opens (the view is
-  // {#if}-gated, so mount = activation): never afterwards — auto-scrolling
-  // while the user browses would fight them.
-  let listEl = $state<HTMLDivElement>();
-  let revealed = false;
-  $effect(() => {
-    if (revealed || tree.status !== 'ready') return;
-    revealed = true;
-    untrack(() => {
-      outline.expandAll();
-      const current = tree.current;
-      if (!current) return;
-      void tick().then(() => {
-        listEl
-          ?.querySelector(`[data-outline-item="${current.objectNumber}"]`)
-          ?.scrollIntoView({ block: 'nearest' });
-      });
-    });
+  // The first read folds the outline to its top level, whatever the file's
+  // `/Count` says; after that what is expanded is the reader's, kept per
+  // document by the plugin. Each time the view opens (it is {#if}-gated, so
+  // mount = activation) the current section is revealed once, never
+  // afterwards: auto-scrolling while the reader browses would fight them.
+  let listEl: HTMLDivElement;
+  onMount(() => {
+    const firstRead = tree.status === 'idle';
+    const read = new AbortController();
+    outline.ensureLoaded({ signal: read.signal }).then(
+      () => {
+        if (firstRead) outline.collapseAll();
+        const current = tree.current;
+        if (!current) return;
+        outline.reveal(current);
+        flushSync();
+        listEl.querySelector('[aria-current="location"]')?.scrollIntoView({ block: 'nearest' });
+      },
+      () => {},
+    );
+    return () => read.abort();
   });
 </script>
 
@@ -49,7 +49,7 @@
   {:else}
     <ul>
       {#each tree.rows as row (row.item.ref.objectNumber)}
-        {@const page = pageOf(row.item)}
+        {@const destination = destinationOf(row.item)}
         <li class="flex items-center" style:padding-left="{row.depth * 0.75}rem">
           {#if row.hasChildren}
             <button
@@ -68,10 +68,10 @@
           {/if}
           <button
             type="button"
-            disabled={page === null}
-            onclick={() => page && stage.goToPage(page)}
+            disabled={destination === null}
+            onclick={() => destination && stage.goToDestination(destination)}
             title={row.item.title}
-            data-outline-item={row.item.ref.objectNumber}
+            aria-current={row.item.ref.objectNumber === tree.current?.objectNumber ? 'location' : undefined}
             class={`min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left text-xs disabled:cursor-default ${
               row.item.ref.objectNumber === tree.current?.objectNumber
                 ? 'bg-amber-700/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-500'

@@ -1,4 +1,5 @@
 {
+  flake,
   inputs,
   perSystem,
   pkgs,
@@ -7,14 +8,7 @@
 let
   inherit (pkgs) lib;
   inherit (pkgs.stdenv.hostPlatform) isDarwin;
-  toolchain = perSystem.fenix.stable.withComponents [
-    "cargo"
-    "clippy"
-    "rust-analyzer"
-    "rust-src"
-    "rustc"
-    "rustfmt"
-  ];
+  toolchain = flake.lib.rustToolchain pkgs;
 in
 perSystem.devshell.mkShell {
   imports = [
@@ -48,6 +42,6 @@ perSystem.devshell.mkShell {
   git.hooks.pre-commit.text = ''
     set -e
     ${perSystem.self.formatter}/bin/treefmt --fail-on-change
-    ${toolchain}/bin/cargo clippy --all-targets -- -D warnings
+    ${toolchain}/bin/cargo clippy --locked --all-targets -- -D warnings
   '';
 }

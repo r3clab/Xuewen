@@ -4,6 +4,8 @@
   import AnnotationHistory from '$features/reader/annotations/AnnotationHistory.svelte';
   import AnnotationTools from '$features/reader/annotations/AnnotationTools.svelte';
   import ToolbarMenu from './ToolbarMenu.svelte';
+  import { escapeLayer } from '$shared/ui/escape';
+  import { rovingToolbar } from '$shared/ui/rovingToolbar';
   import { viewer } from '$features/reader/tabs/state.svelte';
   import { cyclePdfAppearance, nextPdfAppearance, pdfAppearance } from '$shared/ui/theme.svelte';
   import { reader, setFind, toggleSidebar } from '$features/reader/state.svelte';
@@ -17,30 +19,25 @@
   const stage = useStage();
   const view = useStageState();
 
-  // --- page-number input: mirrors currentPage except while being edited ---
-  let pageText = $state('1');
-  let pageEditing = $state(false);
-  let annotationMenuOpen = $state(false);
-  $effect(() => {
-    if (!pageEditing) pageText = String(view.currentPageIndex + 1);
-  });
-  function commitPage(target: HTMLInputElement): void {
+  // The page-number input shows the current page except while it is being
+  // edited, when it shows the draft.
+  let pageDraft = $state<string | null>(null);
+  const pageText = $derived(pageDraft ?? String(view.currentPageIndex + 1));
+  let pageInput: HTMLInputElement;
+  function commitPage(): void {
     const n = clampPage(pageText, view.pageCount);
     if (n !== null) stage.goToPage(n - 1);
-    target.blur();
+    pageInput.blur();
   }
 
-  // --- zoom preset menu ---
   let zoomMenuOpen = $state(false);
+  let annotationMenuOpen = $state(false);
 
-  // Local interaction holds (page editing, zoom menu) feed the shared
-  // auto-hide controller. Wrapped in $effect (not a bare top-level call)
-  // because `pill` is a reactive prop — reading it outside a reactive
-  // context only captures its initial value (svelte-check flags this as
-  // `state_referenced_locally`).
-  $effect(() => {
-    pill.setExtraHold(() => pageEditing || zoomMenuOpen || annotationMenuOpen);
-  });
+  /// Whether an interaction here (editing the page number, an open menu)
+  /// holds the pills visible against the auto-hide.
+  export function held(): boolean {
+    return pageDraft !== null || zoomMenuOpen || annotationMenuOpen;
+  }
 
   const title = $derived(viewer.tabs.find((t) => t.id === documentId)?.title ?? '');
   const panel = $derived(reader.panel);
@@ -50,14 +47,11 @@
   const nextAppearanceLabel = $derived(APPEARANCE_NAMES[nextPdfAppearance()]);
 </script>
 
-<!-- svelte-ignore a11y_interactive_supports_focus -- every control inside
-     the pill is individually tabbable via normal document tab order; the
-     toolbar container itself is not a tab stop. A roving-tabindex pass for
-     arrow-key navigation between controls is a filed follow-up, not done
-     here. -->
 <div
+  {@attach rovingToolbar}
   role="toolbar"
   aria-label="PDF controls"
+  tabindex="-1"
   onpointerenter={() => pill.pillEnter()}
   onpointerleave={() => pill.pillLeave()}
   onfocusin={() => pill.focusIn()}
@@ -98,19 +92,17 @@
   <input
     class="w-9 rounded-md border border-transparent bg-transparent text-center text-sm text-stone-700 focus:border-stone-300 focus:outline-none dark:text-stone-200 dark:focus:border-stone-700"
     aria-label="Page number"
-    bind:value={pageText}
+    bind:this={pageInput}
+    {@attach escapeLayer(() => pageInput.blur(), { active: () => pageDraft !== null })}
+    value={pageText}
+    oninput={(e) => (pageDraft = e.currentTarget.value)}
     onfocus={(e) => {
-      pageEditing = true;
+      pageDraft = pageText;
       e.currentTarget.select();
     }}
-    onblur={() => (pageEditing = false)}
+    onblur={() => (pageDraft = null)}
     onkeydown={(e) => {
-      if (e.key === 'Enter') commitPage(e.currentTarget);
-      else if (e.key === 'Escape') {
-        e.stopPropagation(); // the global cascade must not see this
-        pageText = String(view.currentPageIndex + 1);
-        e.currentTarget.blur();
-      }
+      if (e.key === 'Enter') commitPage();
     }}
   />
   <span class="text-sm text-stone-500 dark:text-stone-400">/ {view.pageCount}</span>
@@ -146,9 +138,10 @@
     {#each ZOOM_PRESETS as p (p.label)}
       <button
         type="button"
-        role="menuitem"
+        role="menuitemradio"
+        aria-checked={isActivePreset(p, view)}
         class={`block w-full rounded-lg px-2 py-1 text-left text-xs ${
-          isActivePreset(p, view.zoomLevel)
+          isActivePreset(p, view)
             ? 'bg-amber-700/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-500'
             : 'text-stone-600 hover:bg-parchment hover:text-ink dark:text-stone-300 dark:hover:bg-stone-800'
         }`}
@@ -167,7 +160,7 @@
 
   <span class="h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-800"></span>
 
-  <AnnotationTools onHoldChange={(held) => (annotationMenuOpen = held)} />
+  <AnnotationTools bind:menuOpen={annotationMenuOpen} />
   <AnnotationHistory />
 
   <span class="h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-800"></span>

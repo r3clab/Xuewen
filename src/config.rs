@@ -1,61 +1,163 @@
 use anyhow::{Context, Result};
+use percent_encoding::{percent_decode_str, percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The loaded configuration. [`Config::load`] resolves every path in it:
+/// `~` against `$HOME`, then relative paths against the config file's
+/// directory.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "ConfigFile")]
 pub struct Config {
     pub inbox_dir: PathBuf,
     pub library_root: PathBuf,
     pub database_url: String,
-    #[serde(default)]
     pub(crate) grobid_url: Option<String>,
-    #[serde(default)]
     pub(crate) contact_email: Option<String>,
-    #[serde(default)]
     pub(crate) proxy: Option<ProxyConfig>,
-    #[serde(default)]
     pub search: SearchConfig,
-    #[serde(default)]
     pub preview: PreviewConfig,
     /// Daily arXiv recommendations. Absent ⇒ the feature is off.
-    #[serde(default)]
     pub(crate) daily: Option<DailyConfig>,
     /// Translate-on-selection defaults. Like `[search]`/`[ui]`, this section
     /// only sets defaults — the feature is gated by the presence of a
     /// provider (`[ai.translate]` or `[translate.deepl]`), not this section.
-    #[serde(default)]
     pub(crate) translate: TranslateConfig,
-    #[serde(default)]
     pub ai: AiConfig,
-    #[serde(default)]
     pub(crate) ui: UiConfig,
+}
+
+/// `xuewen.toml` as written. Every path is optional here so that `data_dir`
+/// can stand in for the ones left out.
+#[derive(Deserialize)]
+struct ConfigFile {
+    data_dir: Option<PathBuf>,
+    inbox_dir: Option<PathBuf>,
+    library_root: Option<PathBuf>,
+    database_url: Option<String>,
+    grobid_url: Option<String>,
+    contact_email: Option<String>,
+    proxy: Option<ProxyConfig>,
+    #[serde(default)]
+    search: SearchPaths,
+    #[serde(default)]
+    preview: PreviewPaths,
+    daily: Option<DailyConfig>,
+    #[serde(default)]
+    translate: TranslateConfig,
+    #[serde(default)]
+    ai: AiConfig,
+    #[serde(default)]
+    ui: UiConfig,
+}
+
+#[derive(Default, Deserialize)]
+struct SearchPaths {
+    index_dir: Option<PathBuf>,
+    vector_dir: Option<PathBuf>,
+}
+
+#[derive(Default, Deserialize)]
+struct PreviewPaths {
+    cache_dir: Option<PathBuf>,
+}
+
+impl TryFrom<ConfigFile> for Config {
+    type Error = String;
+
+    fn try_from(file: ConfigFile) -> Result<Self, String> {
+        let data_dir = file.data_dir.as_deref();
+        let required = |path: Option<PathBuf>, key: &str, name: &str| {
+            path.or_else(|| data_dir.map(|d| d.join(name)))
+                .ok_or_else(|| format!("missing `{key}` (or set `data_dir`)"))
+        };
+        let derived = |path: Option<PathBuf>, name: &str| {
+            path.unwrap_or_else(|| data_dir.unwrap_or(Path::new("")).join(name))
+        };
+        let database_url = match file.database_url {
+            Some(url) => url,
+            None => sqlite_url(&required(None, "database_url", "library.db")?),
+        };
+        Ok(Config {
+            inbox_dir: required(file.inbox_dir, "inbox_dir", "inbox")?,
+            library_root: required(file.library_root, "library_root", "library")?,
+            database_url,
+            grobid_url: file.grobid_url,
+            contact_email: file.contact_email,
+            proxy: file.proxy,
+            search: SearchConfig {
+                index_dir: derived(file.search.index_dir, "search-index"),
+                vector_dir: derived(file.search.vector_dir, "search-vectors"),
+            },
+            preview: PreviewConfig {
+                cache_dir: derived(file.preview.cache_dir, "preview-cache"),
+            },
+            daily: file.daily,
+            translate: file.translate,
+            ai: file.ai,
+            ui: file.ui,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ProxyConfig {
     /// EZproxy login prefix; a target URL is percent-encoded and appended.
     /// e.g. "https://proxy.uchicago.edu/login?url="
-    pub(crate) login_url: String,
+    pub(crate) login_url: ProxyLogin,
+}
+
+/// `[proxy].login_url`, validated as an absolute URL with a host when the
+/// config loads and kept as written, since fetch URLs append to it verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyLogin {
+    prefix: String,
+    host: String,
+}
+
+impl ProxyLogin {
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+impl std::str::FromStr for ProxyLogin {
+    type Err = anyhow::Error;
+
+    fn from_str(prefix: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(prefix)
+            .with_context(|| format!("proxy login_url {prefix:?} is not a URL"))?;
+        let host = url
+            .host_str()
+            .with_context(|| format!("proxy login_url {prefix:?} has no host"))?
+            .to_string();
+        Ok(Self {
+            prefix: prefix.to_string(),
+            host,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProxyLogin {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(|e: anyhow::Error| serde::de::Error::custom(format!("{e:#}")))
+    }
 }
 
 /// Search settings. Always present: defaults apply when `[search]` is absent.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct SearchConfig {
     /// Tantivy index directory (derived data; safe to delete).
     pub index_dir: PathBuf,
     /// Qdrant Edge vector store directory (derived data; safe to delete while
     /// no xuewen process holds it).
     pub vector_dir: PathBuf,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            index_dir: PathBuf::from("./search-index"),
-            vector_dir: PathBuf::from("./search-vectors"),
-        }
-    }
 }
 
 impl SearchConfig {
@@ -74,20 +176,11 @@ impl SearchConfig {
 
 /// Picker preview settings. Always present, like `[search]`: the previews
 /// themselves are never optional, only where their renders are kept.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct PreviewConfig {
     /// Rendered page PNGs (derived data; safe to delete — pages re-render on
     /// demand). Keyed by content hash, so nothing here can go stale.
     pub cache_dir: PathBuf,
-}
-
-impl Default for PreviewConfig {
-    fn default() -> Self {
-        Self {
-            cache_dir: PathBuf::from("./preview-cache"),
-        }
-    }
 }
 
 /// Daily arXiv recommendations (`[daily]`).
@@ -258,8 +351,10 @@ pub struct AgentConfig {
     pub max_repo_mb: u64,
     /// Per-turn wall-clock timeout.
     pub timeout_secs: u64,
-    /// Runner script override (default: agent-runner/src/runner.mjs,
-    /// resolved from the server's working directory).
+    /// Wall-clock timeout for cloning an attached repo.
+    pub clone_timeout_secs: u64,
+    /// Runner script override (default: `agent-runner/src/runner.mjs` in the
+    /// source checkout the binary was built from).
     pub runner: Option<PathBuf>,
     /// Extra hosts (beyond the built-in public forges) permitted as repo-clone
     /// targets — e.g. a self-hosted `git.example.com`. A host matches when it
@@ -274,6 +369,7 @@ impl Default for AgentConfig {
             codex: None,
             max_repo_mb: 500,
             timeout_secs: 300,
+            clone_timeout_secs: 600,
             runner: None,
             clone_allowed_hosts: Vec::new(),
         }
@@ -362,8 +458,9 @@ impl std::str::FromStr for TranslateProvider {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub(crate) enum TranslateTrigger {
     #[default]
     Auto,
@@ -374,8 +471,18 @@ pub(crate) enum TranslateTrigger {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct DeeplConfig {
+    pub(crate) api_key: Option<String>,
     pub(crate) api_key_env: Option<String>,
     pub(crate) plan: DeeplPlan,
+}
+
+impl DeeplConfig {
+    pub(crate) fn resolve_key(&self) -> Result<String, String> {
+        let env = self.api_key_env.as_deref().unwrap_or("DEEPL_API_KEY");
+        resolve_key(self.api_key.clone(), env).ok_or_else(|| {
+            format!("[translate.deepl] has no API key — set ${env} or `api_key_env`")
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -402,23 +509,71 @@ impl Config {
             .with_context(|| format!("reading config {}", path.display()))?;
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        let file = std::path::absolute(path)
+            .with_context(|| format!("locating config {}", path.display()))?;
+        let base = file.parent().unwrap_or(Path::new("/"));
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        cfg.inbox_dir = expand_tilde(cfg.inbox_dir, home.clone());
-        cfg.library_root = expand_tilde(cfg.library_root, home.clone());
-        cfg.search.index_dir = expand_tilde(cfg.search.index_dir, home.clone());
-        cfg.search.vector_dir = expand_tilde(cfg.search.vector_dir, home.clone());
-        cfg.preview.cache_dir = expand_tilde(cfg.preview.cache_dir, home.clone());
-        cfg.ai.agent.runner = cfg.ai.agent.runner.map(|p| expand_tilde(p, home));
+        cfg.resolve_paths(base, home.as_deref());
         cfg.search.check_dirs()?;
         Ok(cfg)
+    }
+
+    fn resolve_paths(&mut self, base: &Path, home: Option<&Path>) {
+        let resolve = |p: &Path| base.join(expand_tilde(p, home));
+        for p in [
+            &mut self.inbox_dir,
+            &mut self.library_root,
+            &mut self.search.index_dir,
+            &mut self.search.vector_dir,
+            &mut self.preview.cache_dir,
+        ]
+        .into_iter()
+        .chain(self.ai.agent.runner.as_mut())
+        {
+            *p = resolve(p);
+        }
+        self.database_url = resolve_sqlite_url(&self.database_url, resolve);
     }
 }
 
 /// Expand a leading `~/` (or bare `~`) using `home`; otherwise return as-is.
-fn expand_tilde(p: PathBuf, home: Option<PathBuf>) -> PathBuf {
+fn expand_tilde(p: &Path, home: Option<&Path>) -> PathBuf {
     match (p.strip_prefix("~"), home) {
         (Ok(rest), Some(home)) => home.join(rest),
-        _ => p,
+        _ => p.to_path_buf(),
+    }
+}
+
+/// sqlx splits a SQLite URL at its first `?` and percent-decodes the path
+/// before it.
+const SQLITE_PATH_RESERVED: &AsciiSet = &CONTROLS.add(b'%').add(b'?');
+
+fn sqlite_url(path: &Path) -> String {
+    let path = percent_encode(path.as_os_str().as_encoded_bytes(), SQLITE_PATH_RESERVED);
+    format!("sqlite:{path}")
+}
+
+/// `url` with its database file path passed through `resolve`. In-memory
+/// databases, and paths sqlx would reject anyway, are left for sqlx.
+fn resolve_sqlite_url(url: &str, resolve: impl Fn(&Path) -> PathBuf) -> String {
+    let rest = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))
+        .unwrap_or(url);
+    let (db, query) = match rest.split_once('?') {
+        Some((db, query)) => (db, Some(query)),
+        None => (rest, None),
+    };
+    let Ok(db) = percent_decode_str(db).decode_utf8() else {
+        return url.to_string();
+    };
+    if db.is_empty() || db == ":memory:" {
+        return url.to_string();
+    }
+    let resolved = sqlite_url(&resolve(Path::new(&*db)));
+    match query {
+        Some(query) => format!("{resolved}?{query}"),
+        None => resolved,
     }
 }
 
@@ -449,26 +604,116 @@ database_url = "sqlite:/data/library.db"
 
     #[test]
     fn expands_leading_tilde_with_home() {
-        let home = Some(PathBuf::from("/home/u"));
+        let home = Some(Path::new("/home/u"));
         assert_eq!(
-            expand_tilde(PathBuf::from("~/papers/inbox"), home.clone()),
+            expand_tilde(Path::new("~/papers/inbox"), home),
             PathBuf::from("/home/u/papers/inbox")
         );
         // No tilde, or no HOME: unchanged.
         assert_eq!(
-            expand_tilde(PathBuf::from("/data/inbox"), home),
+            expand_tilde(Path::new("/data/inbox"), home),
             PathBuf::from("/data/inbox")
         );
-        assert_eq!(
-            expand_tilde(PathBuf::from("~/x"), None),
-            PathBuf::from("~/x")
-        );
+        assert_eq!(expand_tilde(Path::new("~/x"), None), PathBuf::from("~/x"));
     }
 
     #[test]
     fn load_error_names_the_file() {
         let err = Config::load(Path::new("/nope/xuewen.toml")).unwrap_err();
         assert!(err.to_string().contains("/nope/xuewen.toml"));
+    }
+
+    #[test]
+    fn data_dir_supplies_every_path_left_out() {
+        let cfg: Config = toml::from_str(
+            "data_dir = \"/srv/xuewen\"\nlibrary_root = \"/papers\"\n[search]\nvector_dir = \"/fast/vectors\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.inbox_dir, PathBuf::from("/srv/xuewen/inbox"));
+        assert_eq!(cfg.library_root, PathBuf::from("/papers"));
+        assert_eq!(cfg.database_url, "sqlite:/srv/xuewen/library.db");
+        assert_eq!(
+            cfg.search.index_dir,
+            PathBuf::from("/srv/xuewen/search-index")
+        );
+        assert_eq!(cfg.search.vector_dir, PathBuf::from("/fast/vectors"));
+        assert_eq!(
+            cfg.preview.cache_dir,
+            PathBuf::from("/srv/xuewen/preview-cache")
+        );
+    }
+
+    #[test]
+    fn without_data_dir_the_core_paths_are_required() {
+        for (key, toml) in [
+            (
+                "inbox_dir",
+                "library_root = \"/l\"\ndatabase_url = \"sqlite:/d\"\n",
+            ),
+            (
+                "library_root",
+                "inbox_dir = \"/i\"\ndatabase_url = \"sqlite:/d\"\n",
+            ),
+            (
+                "database_url",
+                "inbox_dir = \"/i\"\nlibrary_root = \"/l\"\n",
+            ),
+        ] {
+            let err = toml::from_str::<Config>(toml).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("missing `{key}` (or set `data_dir`)")),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("conf");
+        std::fs::create_dir(&conf).unwrap();
+        let path = conf.join("xuewen.toml");
+        std::fs::write(
+            &path,
+            "data_dir = \"data\"\nlibrary_root = \"../papers\"\ndatabase_url = \"sqlite:db/x.db?mode=rwc\"\n[ai.agent]\nrunner = \"runner.mjs\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.inbox_dir, conf.join("data/inbox"));
+        assert_eq!(cfg.library_root, conf.join("../papers"));
+        assert_eq!(cfg.search.index_dir, conf.join("data/search-index"));
+        assert_eq!(cfg.ai.agent.runner, Some(conf.join("runner.mjs")));
+        assert_eq!(
+            cfg.database_url,
+            format!("sqlite:{}?mode=rwc", conf.join("db/x.db").display())
+        );
+    }
+
+    #[test]
+    fn tilde_resolves_before_the_config_directory() {
+        let mut cfg: Config = toml::from_str("data_dir = \"~/xuewen\"\n").unwrap();
+        cfg.resolve_paths(Path::new("/etc/xuewen"), Some(Path::new("/home/u")));
+        assert_eq!(cfg.inbox_dir, PathBuf::from("/home/u/xuewen/inbox"));
+        assert_eq!(cfg.database_url, "sqlite:/home/u/xuewen/library.db");
+    }
+
+    #[test]
+    fn in_memory_databases_are_left_alone() {
+        for url in ["sqlite::memory:", "sqlite://?mode=memory"] {
+            assert_eq!(resolve_sqlite_url(url, |_| unreachable!()), url);
+        }
+    }
+
+    #[test]
+    fn a_derived_database_url_round_trips_any_file_name() {
+        use std::str::FromStr as _;
+
+        let path = Path::new("/srv/a b/50%?#é/library.db");
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&sqlite_url(path)).unwrap();
+        assert_eq!(opts.get_filename(), path);
+        let resolved = resolve_sqlite_url(&sqlite_url(path), Path::to_path_buf);
+        assert_eq!(resolved, sqlite_url(path));
     }
 
     #[test]
@@ -489,8 +734,38 @@ login_url = "https://proxy.uchicago.edu/login?url="
         let cfg = Config::load(f.path()).unwrap();
         assert_eq!(
             cfg.proxy.unwrap().login_url,
-            "https://proxy.uchicago.edu/login?url="
+            "https://proxy.uchicago.edu/login?url=".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn proxy_login_must_be_a_url_with_a_host() {
+        let login: ProxyLogin = "https://proxy.uchicago.edu/login?url=".parse().unwrap();
+        assert_eq!(login.prefix(), "https://proxy.uchicago.edu/login?url=");
+        assert_eq!(login.host(), "proxy.uchicago.edu");
+        assert!("proxy.uchicago.edu/login?url="
+            .parse::<ProxyLogin>()
+            .is_err());
+        assert!("data:text/plain,x".parse::<ProxyLogin>().is_err());
+    }
+
+    #[test]
+    fn rejects_a_proxy_login_that_is_not_a_url() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"
+inbox_dir = "/data/inbox"
+library_root = "/data/library"
+database_url = "sqlite:/data/library.db"
+
+[proxy]
+login_url = "proxy.uchicago.edu/login?url="
+"#
+        )
+        .unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("login_url"), "got: {err:#}");
     }
 
     #[test]
@@ -521,9 +796,10 @@ database_url = "sqlite:/data/library.db"
         )
         .unwrap();
         let cfg = Config::load(f.path()).unwrap();
-        assert_eq!(cfg.search.index_dir, PathBuf::from("./search-index"));
-        assert_eq!(cfg.preview.cache_dir, PathBuf::from("./preview-cache"));
-        assert_eq!(cfg.search.vector_dir, PathBuf::from("./search-vectors"));
+        let dir = f.path().parent().unwrap();
+        assert_eq!(cfg.search.index_dir, dir.join("search-index"));
+        assert_eq!(cfg.preview.cache_dir, dir.join("preview-cache"));
+        assert_eq!(cfg.search.vector_dir, dir.join("search-vectors"));
         assert!(cfg.ai.embedding.is_none());
     }
 
@@ -544,7 +820,10 @@ qdrant_collection = "xuewen"
         )
         .unwrap();
         let cfg = Config::load(f.path()).unwrap();
-        assert_eq!(cfg.search.vector_dir, PathBuf::from("./search-vectors"));
+        assert_eq!(
+            cfg.search.vector_dir,
+            f.path().parent().unwrap().join("search-vectors")
+        );
     }
 
     #[test]
@@ -902,6 +1181,27 @@ plan = "pro"
     }
 
     #[test]
+    fn deepl_key_is_inline_else_its_env_var() {
+        let inline = DeeplConfig {
+            api_key: Some("k-inline".into()),
+            api_key_env: Some("XUEWEN_TEST_DEEPL_UNSET".into()),
+            ..Default::default()
+        };
+        assert_eq!(inline.resolve_key().as_deref(), Ok("k-inline"));
+        let missing = DeeplConfig {
+            api_key_env: Some("XUEWEN_TEST_DEEPL_UNSET".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            missing.resolve_key(),
+            Err(
+                "[translate.deepl] has no API key — set $XUEWEN_TEST_DEEPL_UNSET or `api_key_env`"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn translate_defaults_when_section_absent() {
         let toml = r#"
 inbox_dir = "/i"
@@ -923,6 +1223,7 @@ database_url = "sqlite::memory:"
         assert!(!ai.agent.enabled());
         assert_eq!(ai.agent.max_repo_mb, 500);
         assert_eq!(ai.agent.timeout_secs, 300);
+        assert_eq!(ai.agent.clone_timeout_secs, 600);
         assert!(ai.agent.runner.is_none());
     }
 

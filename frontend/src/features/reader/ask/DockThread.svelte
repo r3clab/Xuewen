@@ -2,8 +2,8 @@
   import { chat } from './chat.svelte';
   import type { ToolCall } from '$shared/api/generated/ToolCall';
 
-  // An untouched paper renders nothing at all: the dock is then exactly the
-  // record it used to be, plus the composer at its foot.
+  // An untouched paper renders nothing at all, leaving the dock to the
+  // paper's record and the composer at its foot.
   const shown = $derived(
     chat.messages.length > 0 || chat.pending !== null || chat.error !== null,
   );

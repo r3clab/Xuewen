@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 
 use super::lazy::Lazy;
 use super::{summarize, translate, App, Inner};
+use crate::agent::code::CloneLimits;
 use crate::agent::AgentService;
 use crate::annotations::AnnotationsService;
 use crate::citations::CitationsService;
@@ -16,7 +17,7 @@ use crate::ingest::fetch::Fetcher;
 use crate::ingest::pipeline::IngestCtx;
 use crate::ingest::Ingest;
 use crate::preview::PreviewService;
-use crate::search::vector::{OpenMode, VectorStore};
+use crate::search::vector::VectorStore;
 use crate::search::{indexer, SearchService, Semantic};
 use crate::summary::SummaryService;
 use crate::tasks::Tasks;
@@ -54,8 +55,8 @@ impl AppBuilder {
                 preview,
                 ui: UiConfig::default(),
                 summary: Lazy::unavailable(summarize::NOT_CONFIGURED.to_string()),
+                clone_limits: CloneLimits::from_config(&agent),
                 clone_allowed_hosts: agent.clone_allowed_hosts,
-                max_repo_mb: agent.max_repo_mb,
                 tasks: Tasks::new(),
                 index_dirty: Default::default(),
             },
@@ -136,8 +137,8 @@ impl AppBuilder {
         self
     }
 
-    pub(super) fn max_repo_mb(mut self, max_repo_mb: u64) -> Self {
-        self.inner.max_repo_mb = max_repo_mb;
+    pub(super) fn clone_limits(mut self, limits: CloneLimits) -> Self {
+        self.inner.clone_limits = limits;
         self
     }
 
@@ -154,7 +155,7 @@ fn from_config(cfg: &Config, pool: SqlitePool) -> AppBuilder {
         .preview(Arc::new(PreviewService::new(cfg.preview.cache_dir.clone())))
         .ui(cfg.ui.clone())
         .clone_allowed_hosts(cfg.ai.agent.clone_allowed_hosts.clone())
-        .max_repo_mb(cfg.ai.agent.max_repo_mb)
+        .clone_limits(CloneLimits::from_config(&cfg.ai.agent))
 }
 
 /// Build all services and spawn their background loops (indexer, daily
@@ -164,14 +165,7 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     let ingest = ingest(cfg, pool.clone(), RetryPolicy::interactive())?;
     // One handle per process: the store's lock refuses a second opener, so
     // search and daily share this one.
-    let semantic = Semantic::open_waiting(
-        &pool,
-        &cfg.search,
-        &cfg.ai,
-        OpenMode::LoadOrCreate,
-        indexer::CLAIM_WAIT,
-    )
-    .await?;
+    let semantic = Semantic::open_deferred(&pool, &cfg.search, &cfg.ai).await?;
     let vectors = semantic.store().cloned();
     let daily = DailyService::from_config(cfg, pool.clone(), &semantic)?;
     let search = match SearchService::open(pool.clone(), &cfg.search, semantic).await {
@@ -200,19 +194,13 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
     let builder = from_config(cfg, pool.clone());
     let tasks = &builder.inner.tasks;
     if let Some(s) = &search {
-        if let Err(e) = indexer::spawn(tasks, s.clone(), cfg.library_root.clone()).await {
-            tracing::warn!("search indexing disabled: {e:#}");
-        }
+        indexer::spawn(tasks, s.clone(), cfg.library_root.clone()).await;
     }
     if let Some(d) = &daily {
         tasks.spawn(daily::scheduler::run(d.clone(), tasks.token()));
     }
     if let Some(s) = &summary {
-        tasks.spawn(crate::summary::run(
-            s.clone(),
-            std::time::Duration::from_secs(60),
-            tasks.token(),
-        ));
+        tasks.spawn(crate::summary::run(s.clone(), tasks.token()));
     }
     let summary = match summary {
         Some(s) => Lazy::Ready(s),
@@ -233,7 +221,28 @@ pub(super) async fn server(cfg: &Config, pool: SqlitePool) -> Result<App> {
         .build())
 }
 
-pub(super) fn cli(cfg: &Config, pool: SqlitePool) -> App {
+/// `cli` plus the search service and its indexer, for the long-running
+/// `watch`: each paper it ingests reaches the index as it lands. An index
+/// held by a running server is waited for — the holder indexes what lands
+/// meanwhile, and this loop takes over once it exits.
+pub(super) async fn watch(cfg: &Config, pool: SqlitePool) -> Result<App> {
+    let semantic = Semantic::open_deferred(&pool, &cfg.search, &cfg.ai).await?;
+    let vectors = semantic.store().cloned();
+    let search = match SearchService::open(pool.clone(), &cfg.search, semantic).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("search indexing disabled: {e}");
+            None
+        }
+    };
+    let builder = cli(cfg, pool);
+    if let Some(s) = &search {
+        indexer::spawn(&builder.inner.tasks, s.clone(), cfg.library_root.clone()).await;
+    }
+    Ok(builder.search(search).vectors(vectors).build())
+}
+
+pub(super) fn cli(cfg: &Config, pool: SqlitePool) -> AppBuilder {
     let shared = Arc::new(cfg.clone());
     // Only the commands that ingest build an IngestCtx (two HTTP clients),
     // always with the production retry policy; `serve` gets its own
@@ -254,7 +263,6 @@ pub(super) fn cli(cfg: &Config, pool: SqlitePool) -> App {
         .summary(Lazy::deferred(summary))
         .lazy_translate(move || translate_service(&shared))
         .agent(AgentService::from_config(&cfg.ai.agent))
-        .build()
 }
 
 fn translate_service(cfg: &Config) -> Result<Arc<TranslateService>, String> {

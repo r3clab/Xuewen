@@ -1,13 +1,20 @@
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::directory::error::LockError;
-use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermSetQuery};
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::directory::{Directory, DirectoryLock, MmapDirectory, INDEX_WRITER_LOCK, META_LOCK};
+use tantivy::query::{
+    BooleanQuery, Occur, PhraseQuery, Query, QueryParser, TermQuery, TermSetQuery,
+};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT};
 use tantivy::snippet::SnippetGenerator;
+use tantivy::tokenizer::TokenStream;
 use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, TantivyError, Term};
+use ts_rs::TS;
+
+use super::snippet::Snippet;
 
 const WRITER_HEAP_BYTES: usize = 50_000_000;
 
@@ -107,9 +114,10 @@ pub struct PaperDoc {
     pub notes: String,
 }
 
-/// The searchable text fields a match can be attributed to — a closed set
-/// the compiler checks, stringified only at the web/CLI boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The searchable text fields a match can be attributed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, rename = "SearchField")]
 pub enum FieldName {
     Title,
     Authors,
@@ -141,8 +149,7 @@ pub(crate) struct FtsHit {
     pub(crate) paper_id: String,
     /// Which field the snippet came from.
     pub(crate) field: FieldName,
-    /// HTML-safe: escaped text with <mark> highlights only.
-    pub(crate) snippet_html: String,
+    pub(crate) snippet: Snippet,
 }
 
 struct FtsFields {
@@ -168,6 +175,51 @@ fn stored_schema_version(dir: &Path) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Tantivy's writer lock on an index directory, taken without opening the
+/// index — the one way to hold it over an index this build cannot open, so
+/// that only its holder ever wipes the directory.
+pub(crate) struct DirWriterLock {
+    dir: PathBuf,
+    _lock: DirectoryLock,
+}
+
+impl DirWriterLock {
+    /// Fails with "in use" when another `FtsIndex` — in this process or
+    /// another — holds the writer.
+    pub(crate) fn acquire(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        match MmapDirectory::open(dir)?.acquire_lock(&INDEX_WRITER_LOCK) {
+            Ok(lock) => Ok(Self {
+                dir: dir.to_path_buf(),
+                _lock: lock,
+            }),
+            Err(LockError::LockBusy) => bail!(
+                "search index at {} is in use by another xuewen process — stop it and retry",
+                dir.display()
+            ),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Delete the index, leaving an empty directory (lock files aside, so the
+    /// lock stays meaningful to anyone opening it meanwhile).
+    pub(crate) fn wipe(self) -> Result<()> {
+        let locks = [&INDEX_WRITER_LOCK.filepath, &META_LOCK.filepath];
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if locks.iter().any(|l| entry.file_name() == l.as_os_str()) {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())?;
+            } else {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct FtsIndex {
     index: Index,
     /// Lazy: read-only users (CLI search while `serve` runs) must not take
@@ -175,78 +227,44 @@ pub struct FtsIndex {
     writer: Mutex<Option<IndexWriter>>,
     reader: IndexReader,
     f: FtsFields,
+    #[cfg(test)]
+    commits: std::sync::atomic::AtomicUsize,
 }
 
 impl FtsIndex {
-    /// Open (or create) the index at `dir`. On corruption — or on a schema
-    /// version older than this build's — the directory is wiped and recreated;
-    /// it is derived data. Returns `(index, created)`; when `created` the
-    /// caller must clear all FTS stamps so the sweep re-indexes everything.
-    ///
-    /// The wipe is why `index rebuild` tells you to stop `serve` first: a
-    /// second process opening this directory can pull the index out from
-    /// under a running server.
+    /// Open (or create) the index at `dir`. Returns `(index, created)`; when
+    /// `created` the caller must clear all FTS stamps so the sweep re-indexes
+    /// everything. An index this build cannot use — an older schema version,
+    /// or one that fails to open — is derived data and is recreated, but only
+    /// under the writer lock: while another process holds it, this errors
+    /// rather than pull the index out from under that process.
     pub fn open(dir: &Path) -> Result<(Self, bool)> {
         std::fs::create_dir_all(dir)?;
-        let fresh = !dir.join("meta.json").exists();
-        let stale_schema = !fresh && stored_schema_version(dir) != Some(SCHEMA_VERSION);
-        if stale_schema {
-            tracing::info!(
-                "tantivy index at {} predates schema v{SCHEMA_VERSION}; rebuilding",
-                dir.display()
-            );
-        }
-        let opened = if stale_schema {
-            Err(anyhow::anyhow!("schema version changed"))
-        } else {
-            Self::try_open(dir)
-        };
-        match opened {
-            Ok(idx) => {
-                Self::stamp_version(dir);
-                Ok((idx, fresh))
-            }
-            Err(e) => {
-                if !stale_schema {
-                    tracing::warn!(
-                        "tantivy index at {} unusable ({e}); rebuilding",
-                        dir.display()
-                    );
-                }
-                std::fs::remove_dir_all(dir)?;
-                std::fs::create_dir_all(dir)?;
-                let idx = Self::try_open(dir)?;
-                Self::stamp_version(dir);
-                Ok((idx, true))
-            }
-        }
-    }
-
-    /// Fail when another process is writing the index at `dir` (tantivy's
-    /// writer lock, e.g. a running `xuewen serve`) — probed by deleting a doc
-    /// id that never exists, which acquires the writer without changing
-    /// anything. A missing index trivially probes writable. Guards `index
-    /// rebuild` against wiping an index out from under a live server.
-    pub(crate) fn probe_writable(dir: &Path) -> Result<()> {
         if !dir.join("meta.json").exists() {
-            return Ok(());
+            return Ok((Self::create(dir)?, true));
         }
-        let (probe, _) = Self::open(dir)?;
-        probe.delete("__rebuild_lock_probe__").map_err(|e| {
-            anyhow::anyhow!(
-                "search index at {} is in use (is `xuewen serve` running?) — stop it and retry ({e})",
-                dir.display()
-            )
-        })
+        let unusable = if stored_schema_version(dir) == Some(SCHEMA_VERSION) {
+            match Self::try_open(dir) {
+                Ok(idx) => return Ok((idx, false)),
+                Err(e) => format!("is unusable ({e})"),
+            }
+        } else {
+            format!("predates schema v{SCHEMA_VERSION}")
+        };
+        tracing::info!("tantivy index at {} {unusable}; rebuilding", dir.display());
+        let lock = DirWriterLock::acquire(dir)?;
+        lock.wipe()?;
+        Ok((Self::create(dir)?, true))
     }
 
-    /// Record the schema this index was built against. Best-effort: failing to
-    /// write it costs one extra rebuild on the next open, which is far better
-    /// than refusing to serve search at all.
-    fn stamp_version(dir: &Path) {
+    fn create(dir: &Path) -> Result<Self> {
+        let idx = Self::try_open(dir)?;
+        // Best-effort: a missing stamp costs one extra rebuild on the next
+        // open, which is far better than refusing to serve search at all.
         if let Err(e) = std::fs::write(dir.join(VERSION_FILE), SCHEMA_VERSION.to_string()) {
             tracing::warn!("could not stamp the tantivy schema version: {e}");
         }
+        Ok(idx)
     }
 
     fn try_open(dir: &Path) -> Result<Self> {
@@ -265,6 +283,8 @@ impl FtsIndex {
             index,
             writer: Mutex::new(None),
             reader,
+            #[cfg(test)]
+            commits: Default::default(),
             f: FtsFields {
                 id,
                 title,
@@ -294,7 +314,8 @@ impl FtsIndex {
         Ok(WriterClaim::Claimed)
     }
 
-    /// Give the writer lock back so another process can index.
+    /// Give the writer lock back so another process can index. Writes staged
+    /// since the last `commit` are discarded.
     pub(crate) fn release_writer(&self) {
         *self.writer.lock().expect("fts writer lock poisoned") = None;
     }
@@ -304,14 +325,11 @@ impl FtsIndex {
         if guard.is_none() {
             *guard = Some(self.index.writer(WRITER_HEAP_BYTES)?);
         }
-        let out = op(guard.as_mut().expect("writer just created"))?;
-        // Make the change visible to the next search immediately (personal
-        // scale: commit cost is negligible).
-        self.reader.reload()?;
-        Ok(out)
+        op(guard.as_mut().expect("writer just created"))
     }
 
-    pub fn upsert(&self, d: &PaperDoc) -> Result<()> {
+    /// Replace the paper's doc. Invisible to searches until `commit`.
+    pub(crate) fn stage_upsert(&self, d: &PaperDoc) -> Result<()> {
         self.with_writer(|w| {
             w.delete_term(Term::from_field_text(self.f.id, &d.id));
             w.add_document(doc!(
@@ -323,62 +341,85 @@ impl FtsIndex {
                 self.f.body => d.body.clone(),
                 self.f.notes => d.notes.clone(),
             ))?;
-            w.commit()?;
             Ok(())
         })
     }
 
-    pub(crate) fn delete(&self, paper_id: &str) -> Result<()> {
+    /// Remove the paper's doc. Invisible to searches until `commit`.
+    pub(crate) fn stage_delete(&self, paper_id: &str) -> Result<()> {
         self.with_writer(|w| {
             w.delete_term(Term::from_field_text(self.f.id, paper_id));
-            w.commit()?;
             Ok(())
         })
     }
 
-    /// Search `q` over the selected fields. `scope`, when given, restricts
-    /// matching to those paper ids INSIDE the engine (ANDed as a
-    /// `TermSetQuery`), so the top-`limit` truncation happens on the
-    /// filtered set — applying a filter after the cutoff would silently
-    /// drop matches ranked past it.
+    /// Persist everything staged since the last commit and make it visible to
+    /// the next search. On failure the staged writes are rolled back, so the
+    /// next commit cannot half-apply them.
+    pub(crate) fn commit(&self) -> Result<()> {
+        #[cfg(test)]
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.with_writer(|w| match w.commit() {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                w.rollback()?;
+                Err(e.into())
+            }
+        })?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn upsert(&self, d: &PaperDoc) -> Result<()> {
+        self.stage_upsert(d)?;
+        self.commit()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(&self, paper_id: &str) -> Result<()> {
+        self.stage_delete(paper_id)?;
+        self.commit()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commits(&self) -> usize {
+        self.commits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Search the free text `q` over the selected fields, ANDed with every
+    /// `author:` term as a phrase on the authors field. `scope`, when given,
+    /// restricts matching to those paper ids INSIDE the engine (ANDed as a
+    /// `TermSetQuery`), so the top-`limit` truncation happens on the filtered
+    /// set — applying a filter after the cutoff would silently drop matches
+    /// ranked past it.
     pub(crate) fn search(
         &self,
         q: &str,
+        authors: &[String],
         sel: &FieldSel,
         limit: usize,
         scope: Option<&[String]>,
     ) -> Result<Vec<FtsHit>> {
         let q = q.trim();
-        if q.is_empty() || !sel.any() || limit == 0 {
+        if !sel.any() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut fields = Vec::new();
-        if sel.title {
-            fields.push(self.f.title);
+        let mut clauses = Vec::new();
+        for author in authors {
+            clauses.extend(self.author_phrase(author)?);
         }
-        if sel.authors {
-            fields.push(self.f.authors);
+        if !q.is_empty() {
+            clauses.push(self.text_query(q, sel));
         }
-        if sel.abstract_text {
-            fields.push(self.f.abstract_text);
-        }
-        if sel.body {
-            fields.push(self.f.body);
-        }
-        if sel.notes {
-            fields.push(self.f.notes);
-        }
-
-        let mut parser = QueryParser::for_index(&self.index, fields);
-        parser.set_field_boost(self.f.title, 3.0);
-        parser.set_field_boost(self.f.authors, 2.0);
-        // Above the abstract: a note is the reader's own words about this
-        // paper, so matching one is a stronger signal than matching prose the
-        // publisher wrote.
-        parser.set_field_boost(self.f.notes, 2.5);
-        parser.set_field_boost(self.f.abstract_text, 1.5);
-        // Lenient: user input must never be a query syntax error.
-        let (query, _errors) = parser.parse_query_lenient(q);
+        let query: Box<dyn Query> = match clauses.len() {
+            0 => return Ok(Vec::new()),
+            1 => clauses.remove(0),
+            _ => Box::new(BooleanQuery::new(
+                clauses.into_iter().map(|c| (Occur::Must, c)).collect(),
+            )),
+        };
         let scoped: Option<BooleanQuery> = scope.map(|ids| {
             let terms =
                 TermSetQuery::new(ids.iter().map(|id| Term::from_field_text(self.f.id, id)));
@@ -405,18 +446,18 @@ impl FtsIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let (field, snippet_html) = self.best_snippet(&searcher, query.as_ref(), &doc, sel)?;
+            let (field, snippet) = self.best_snippet(&searcher, query.as_ref(), &doc, sel)?;
             out.push(FtsHit {
                 paper_id,
                 field,
-                snippet_html,
+                snippet,
             });
         }
         Ok(out)
     }
 
     /// The first selected field (title > authors > abstract > notes > body)
-    /// with a highlighted fragment; falls back to the escaped title text.
+    /// with a highlighted fragment; falls back to the plain title text.
     /// Notes outrank body because a matched note is short, deliberate and
     /// already about this paper — a better thing to show than a body fragment.
     fn best_snippet(
@@ -425,7 +466,7 @@ impl FtsIndex {
         query: &dyn Query,
         doc: &TantivyDocument,
         sel: &FieldSel,
-    ) -> Result<(FieldName, String)> {
+    ) -> Result<(FieldName, Snippet)> {
         let candidates: [(FieldName, Field, bool); 5] = [
             (FieldName::Title, self.f.title, sel.title),
             (FieldName::Authors, self.f.authors, sel.authors),
@@ -439,30 +480,58 @@ impl FtsIndex {
             }
             let mut gen = SnippetGenerator::create(searcher, query, field)?;
             gen.set_max_num_chars(200);
-            let snip = gen.snippet_from_doc(doc);
-            if !snip.highlighted().is_empty() {
-                let html = snip
-                    .to_html()
-                    .replace("<b>", "<mark>")
-                    .replace("</b>", "</mark>");
-                return Ok((name, html));
+            if let Some(snippet) = Snippet::highlighted(&gen.snippet_from_doc(doc)) {
+                return Ok((name, snippet));
             }
         }
         let title = doc
             .get_first(self.f.title)
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        Ok((FieldName::Title, html_escape(title)))
+        Ok((FieldName::Title, Snippet::plain(title)))
     }
-}
 
-/// Minimal HTML escaping for snippet text we assemble ourselves.
-pub(crate) fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    fn text_query(&self, q: &str, sel: &FieldSel) -> Box<dyn Query> {
+        let fields = [
+            (sel.title, self.f.title),
+            (sel.authors, self.f.authors),
+            (sel.abstract_text, self.f.abstract_text),
+            (sel.body, self.f.body),
+            (sel.notes, self.f.notes),
+        ]
+        .into_iter()
+        .filter_map(|(on, field)| on.then_some(field))
+        .collect();
+        let mut parser = QueryParser::for_index(&self.index, fields);
+        parser.set_field_boost(self.f.title, 3.0);
+        parser.set_field_boost(self.f.authors, 2.0);
+        // Above the abstract: a note is the reader's own words about this
+        // paper, so matching one is a stronger signal than matching prose the
+        // publisher wrote.
+        parser.set_field_boost(self.f.notes, 2.5);
+        parser.set_field_boost(self.f.abstract_text, 1.5);
+        // Lenient: user input must never be a query syntax error.
+        parser.parse_query_lenient(q).0
+    }
+
+    /// `author` as a phrase over the authors field, tokenized the way that
+    /// field was indexed; `None` when it holds nothing searchable.
+    fn author_phrase(&self, author: &str) -> Result<Option<Box<dyn Query>>> {
+        let mut analyzer = self.index.tokenizer_for_field(self.f.authors)?;
+        let mut stream = analyzer.token_stream(author);
+        let mut terms = Vec::new();
+        while stream.advance() {
+            terms.push(Term::from_field_text(self.f.authors, &stream.token().text));
+        }
+        Ok(match terms.len() {
+            0 => None,
+            1 => Some(Box::new(TermQuery::new(
+                terms.remove(0),
+                IndexRecordOption::WithFreqs,
+            ))),
+            _ => Some(Box::new(PhraseQuery::new(terms))),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -504,21 +573,123 @@ mod tests {
     }
 
     #[test]
-    fn probe_writable_detects_a_held_writer_lock() {
+    fn the_dir_writer_lock_is_the_index_writer_lock() {
         let dir = tempfile::tempdir().unwrap();
-        // No index yet: trivially writable (nothing to wipe out from under
-        // anyone).
-        FtsIndex::probe_writable(dir.path()).unwrap();
-
         let (idx, _) = FtsIndex::open(dir.path()).unwrap();
-        // An upsert forces the lazy writer into existence; a running
-        // `xuewen serve` claims it eagerly at startup instead.
-        idx.upsert(&doc("p1", "T", "b")).unwrap();
-        let err = FtsIndex::probe_writable(dir.path()).unwrap_err();
+        assert_eq!(idx.claim_writer().unwrap(), WriterClaim::Claimed);
+        let err = DirWriterLock::acquire(dir.path()).err().unwrap();
         assert!(err.to_string().contains("in use"), "got: {err}");
 
+        idx.release_writer();
+        let lock = DirWriterLock::acquire(dir.path()).unwrap();
+        assert_eq!(idx.claim_writer().unwrap(), WriterClaim::Busy);
+        drop(lock);
+        assert_eq!(idx.claim_writer().unwrap(), WriterClaim::Claimed);
+    }
+
+    #[test]
+    fn wiping_leaves_an_empty_index_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (idx, _) = FtsIndex::open(dir.path()).unwrap();
+        idx.upsert(&doc("p1", "A Title", "body")).unwrap();
         drop(idx);
-        FtsIndex::probe_writable(dir.path()).unwrap();
+
+        DirWriterLock::acquire(dir.path()).unwrap().wipe().unwrap();
+        assert!(!dir.path().join("meta.json").exists());
+        let (idx, created) = FtsIndex::open(dir.path()).unwrap();
+        assert!(created);
+        assert!(idx
+            .search("title", &[], &FieldSel::all(), 10, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The writer holder may be a running server: an index this build cannot
+    /// use is left alone until it lets go.
+    #[test]
+    fn a_stale_index_another_writer_holds_is_an_error_not_a_wipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, _) = FtsIndex::open(dir.path()).unwrap();
+        holder.upsert(&doc("p1", "A Title", "body")).unwrap();
+        std::fs::write(dir.path().join(VERSION_FILE), b"1").unwrap();
+
+        let err = FtsIndex::open(dir.path()).err().unwrap();
+        assert!(err.to_string().contains("in use"), "got: {err}");
+        assert_eq!(
+            holder
+                .search("title", &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .len(),
+            1,
+            "the holder's index is untouched"
+        );
+
+        drop(holder);
+        let (_, created) = FtsIndex::open(dir.path()).unwrap();
+        assert!(created);
+    }
+
+    #[test]
+    fn staged_writes_are_invisible_until_committed() {
+        let (idx, _dir) = open_tmp();
+        idx.upsert(&doc("p1", "Old Title", "b")).unwrap();
+        idx.stage_upsert(&doc("p1", "New Title", "b")).unwrap();
+        idx.stage_upsert(&doc("p2", "Another Title", "b")).unwrap();
+        let titled = |q: &str| {
+            idx.search(q, &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .len()
+        };
+        assert_eq!((titled("old"), titled("new"), titled("another")), (1, 0, 0));
+
+        idx.commit().unwrap();
+        assert_eq!((titled("old"), titled("new"), titled("another")), (0, 1, 1));
+
+        idx.stage_delete("p2").unwrap();
+        idx.release_writer();
+        assert_eq!(
+            titled("another"),
+            1,
+            "releasing the writer drops staged work"
+        );
+    }
+
+    #[test]
+    fn author_terms_are_phrases_anded_with_the_free_text() {
+        let (idx, _dir) = open_tmp();
+        let mut by_smith = doc("smith", "Sorting Networks", "batcher merge");
+        by_smith.authors = "Jane Smith ; Ada Lovelace".into();
+        let mut smith_sorting = doc("other", "Sorting Revisited", "thanks to jane smith");
+        smith_sorting.authors = "Smith Jane".into();
+        idx.upsert(&by_smith).unwrap();
+        idx.upsert(&smith_sorting).unwrap();
+        idx.upsert(&doc("unrelated", "Sorting Survey", "nothing"))
+            .unwrap();
+
+        let ids = |authors: &[&str], q: &str| -> Vec<String> {
+            let authors: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
+            let mut ids: Vec<String> = idx
+                .search(q, &authors, &FieldSel::all(), 10, None)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.paper_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            ids(&["jane smith"], ""),
+            vec!["smith"],
+            "a phrase, in order"
+        );
+        assert_eq!(ids(&["smith"], ""), vec!["other", "smith"]);
+        assert_eq!(ids(&["smith"], "batcher"), vec!["smith"], "ANDed, not ORed");
+        assert_eq!(ids(&["smith", "lovelace"], ""), vec!["smith"]);
+        assert!(ids(&["nobody"], "sorting").is_empty());
+        assert!(
+            ids(&["!!!"], "").is_empty(),
+            "nothing searchable matches nothing"
+        );
     }
 
     #[test]
@@ -530,7 +701,6 @@ mod tests {
         assert_eq!(first.claim_writer().unwrap(), WriterClaim::Claimed);
         assert_eq!(first.claim_writer().unwrap(), WriterClaim::Claimed);
         assert_eq!(second.claim_writer().unwrap(), WriterClaim::Busy);
-        assert!(FtsIndex::probe_writable(dir.path()).is_err());
 
         first.release_writer();
         assert_eq!(second.claim_writer().unwrap(), WriterClaim::Claimed);
@@ -548,14 +718,35 @@ mod tests {
         idx.upsert(&doc("p2", "Unrelated Paper", "nothing to see here"))
             .unwrap();
 
-        let hits = idx.search("fuzzing", &FieldSel::all(), 10, None).unwrap();
+        let hits = idx
+            .search("fuzzing", &[], &FieldSel::all(), 10, None)
+            .unwrap();
         assert_eq!(hits[0].paper_id, "p1");
         assert!(
-            hits[0].snippet_html.contains("<mark>"),
-            "got: {}",
-            hits[0].snippet_html
+            hits[0].snippet.0.iter().any(|p| p.marked),
+            "got: {:?}",
+            hits[0].snippet
         );
         assert!(!hits.iter().any(|h| h.paper_id == "p2"));
+    }
+
+    #[test]
+    fn snippets_carry_text_verbatim_with_the_hits_marked() {
+        let (idx, _dir) = open_tmp();
+        idx.upsert(&doc("p1", "Turing's <Test> & Beyond", "b"))
+            .unwrap();
+        let hits = idx
+            .search("turing", &[], &FieldSel::all(), 10, None)
+            .unwrap();
+        let snippet = &hits[0].snippet;
+        assert_eq!(snippet.text(), "Turing's <Test> & Beyond");
+        let marked: Vec<&str> = snippet
+            .0
+            .iter()
+            .filter(|p| p.marked)
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(marked, ["Turing"]);
     }
 
     #[test]
@@ -565,10 +756,13 @@ mod tests {
             .unwrap();
         let mut sel = FieldSel::none();
         sel.title = true;
-        assert!(idx.search("quicksort", &sel, 10, None).unwrap().is_empty());
+        assert!(idx
+            .search("quicksort", &[], &sel, 10, None)
+            .unwrap()
+            .is_empty());
         let mut sel = FieldSel::none();
         sel.body = true;
-        let hits = idx.search("quicksort", &sel, 10, None).unwrap();
+        let hits = idx.search("quicksort", &[], &sel, 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].field, FieldName::Body);
     }
@@ -588,12 +782,14 @@ mod tests {
         ))
         .unwrap();
 
-        let hits = idx.search("quicksort", &FieldSel::all(), 1, None).unwrap();
+        let hits = idx
+            .search("quicksort", &[], &FieldSel::all(), 1, None)
+            .unwrap();
         assert_eq!(hits[0].paper_id, "in-title");
 
         let scope = vec!["in-body".to_string()];
         let hits = idx
-            .search("quicksort", &FieldSel::all(), 1, Some(&scope))
+            .search("quicksort", &[], &FieldSel::all(), 1, Some(&scope))
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].paper_id, "in-body");
@@ -601,7 +797,7 @@ mod tests {
         // A scope nothing matches yields nothing.
         let scope = vec!["zz".to_string()];
         assert!(idx
-            .search("quicksort", &FieldSel::all(), 10, Some(&scope))
+            .search("quicksort", &[], &FieldSel::all(), 10, Some(&scope))
             .unwrap()
             .is_empty());
     }
@@ -618,11 +814,11 @@ mod tests {
 
         let mut sel = FieldSel::none();
         sel.notes = true;
-        let hits = idx.search("dijkstra", &sel, 10, None).unwrap();
+        let hits = idx.search("dijkstra", &[], &sel, 10, None).unwrap();
         assert_eq!(hits.len(), 1, "in:notes must not reach the title field");
         assert_eq!(hits[0].paper_id, "p1");
         assert_eq!(hits[0].field, FieldName::Notes);
-        assert!(hits[0].snippet_html.contains("<mark>"));
+        assert!(hits[0].snippet.0.iter().any(|p| p.marked));
     }
 
     #[test]
@@ -636,7 +832,9 @@ mod tests {
             "quicksort quicksort quicksort",
         ))
         .unwrap();
-        let hits = idx.search("quicksort", &FieldSel::all(), 10, None).unwrap();
+        let hits = idx
+            .search("quicksort", &[], &FieldSel::all(), 10, None)
+            .unwrap();
         assert_eq!(hits[0].paper_id, "in-title");
     }
 
@@ -646,16 +844,18 @@ mod tests {
         idx.upsert(&doc("p1", "Old Title", "b")).unwrap();
         idx.upsert(&doc("p1", "New Title", "b")).unwrap();
         assert!(idx
-            .search("old", &FieldSel::all(), 10, None)
+            .search("old", &[], &FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
         assert_eq!(
-            idx.search("new", &FieldSel::all(), 10, None).unwrap().len(),
+            idx.search("new", &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .len(),
             1
         );
         idx.delete("p1").unwrap();
         assert!(idx
-            .search("new", &FieldSel::all(), 10, None)
+            .search("new", &[], &FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
     }
@@ -679,13 +879,13 @@ mod tests {
         let (idx, created) = FtsIndex::open(dir.path()).unwrap();
         assert!(!created, "an index at the current schema must survive");
         assert_eq!(
-            idx.search("quicksort", &FieldSel::all(), 10, None)
+            idx.search("quicksort", &[], &FieldSel::all(), 10, None)
                 .unwrap()
                 .len(),
             0
         );
         assert_eq!(
-            idx.search("title", &FieldSel::all(), 10, None)
+            idx.search("title", &[], &FieldSel::all(), 10, None)
                 .unwrap()
                 .len(),
             1
@@ -704,7 +904,7 @@ mod tests {
         let (idx, created) = FtsIndex::open(dir.path()).unwrap();
         assert!(created, "a stale stamp must report created so stamps clear");
         assert!(
-            idx.search("title", &FieldSel::all(), 10, None)
+            idx.search("title", &[], &FieldSel::all(), 10, None)
                 .unwrap()
                 .is_empty(),
             "the wiped index starts empty; the sweep refills it"
@@ -725,11 +925,6 @@ mod tests {
         std::fs::remove_file(dir.path().join(VERSION_FILE)).unwrap();
         let (_idx, created) = FtsIndex::open(dir.path()).unwrap();
         assert!(created);
-    }
-
-    #[test]
-    fn escapes_html() {
-        assert_eq!(html_escape("<b>&\"'"), "&lt;b&gt;&amp;&quot;&#39;");
     }
 
     #[test]
@@ -758,7 +953,7 @@ mod tests {
         ))
         .unwrap();
         assert!(idx
-            .search("fuzzing", &FieldSel::all(), 0, None)
+            .search("fuzzing", &[], &FieldSel::all(), 0, None)
             .unwrap()
             .is_empty());
     }

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { escapeLayer } from '$shared/ui/escape';
+  import { focusOnMount } from '$shared/ui/focus';
+
   /// The dashed "+ New project" pill that flips into an inline name input
   /// (Enter/blur submits, Escape cancels) — shared by the filter strip's
   /// project pills and the paper detail's project editor, which differ only in pill
@@ -15,11 +18,6 @@
 
   let adding = $state(false);
   let name = $state('');
-  let input = $state<HTMLInputElement | null>(null);
-
-  $effect(() => {
-    if (adding) input?.focus();
-  });
 
   function start() {
     name = '';
@@ -38,16 +36,14 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       submit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancel();
     }
   }
 </script>
 
 {#if adding}
   <input
-    bind:this={input}
+    {@attach focusOnMount}
+    {@attach escapeLayer(cancel)}
     bind:value={name}
     type="text"
     aria-label="New project name"

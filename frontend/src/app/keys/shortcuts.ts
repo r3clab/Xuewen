@@ -1,14 +1,11 @@
 import { clearAnnotationSelection, redoAnnotation, undoAnnotation } from '$features/reader/annotations/commands';
-import { identifyState } from '$features/identify/state.svelte';
 import { isLeaderRoot, openSelected, SINGLE_KEYS } from './keymap';
 import { advanceLeader, cancelLeader, leader } from './leader.svelte';
 import { copyPdfSelection, pdfSelectionHasText } from '$features/reader/pdfCopy';
 import { openFind } from '$features/reader/state.svelte';
 import { viewer } from '$features/reader/tabs/state.svelte';
-import { shell } from '$app/shell.svelte';
 import { closeDock, dock } from '$features/reader/dock/state.svelte';
-import { importState } from '$features/importing/queue.svelte';
-import { finder } from '$features/library/search/state.svelte';
+import { dismissTopLayer, modalOpen } from '$shared/ui/escape';
 
 export function isEditable(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
@@ -18,10 +15,6 @@ export function isEditable(t: EventTarget | null): boolean {
     t instanceof HTMLSelectElement ||
     t.isContentEditable
   );
-}
-
-function anyModalOpen(): boolean {
-  return importState.open || identifyState.open || shell.helpOpen || finder.open;
 }
 
 /// True when the browser has a real text selection of its own. Every surface
@@ -38,13 +31,18 @@ function hasDomSelection(): boolean {
 
 /// Global keymap driver. Single keys live as data in keymap.ts
 /// (SINGLE_KEYS), multi-key sequences in LEADER_CHORDS; this dispatches both
-/// after the gating below. Modals own their Esc (Modal.svelte stops
-/// propagation); everything is inert while a modal — the file picker
-/// included — is open or focus is in a text control. Spec deviation:
-/// close-tab is `x`, not ⌘W — browsers reserve ⌘W/Ctrl+W for closing the
-/// browser tab.
+/// after the gating below. Esc closes the innermost open surface first (the
+/// layer stack in `$shared/ui/escape`); every other key is inert while a modal
+/// dialog is open or focus is in a text control. Spec deviation: close-tab is
+/// `x`, not ⌘W — browsers reserve ⌘W/Ctrl+W for closing the browser tab.
 export function handleKeydown(e: KeyboardEvent): void {
-  if (anyModalOpen()) return;
+  if (e.key === 'Escape') {
+    escape(e);
+    return;
+  }
+  // A key the focused widget already acted on (a toolbar's or a menu's
+  // arrows) is not the keymap's as well.
+  if (e.defaultPrevented || modalOpen()) return;
   // No chord contains a modifier, so this keystroke belongs to one of the
   // branches below. Abandoning the sequence here is what keeps a stray Space
   // before a ⌘-shortcut from swallowing the *next* key, or completing a chord
@@ -58,11 +56,7 @@ export function handleKeydown(e: KeyboardEvent): void {
     }
     return;
   }
-  // Keyboard events from inside a shadow DOM (the PDF viewer) retarget
-  // `e.target` to the shadow host, which is never editable — so keys typed
-  // into the viewer's find box would leak to these app shortcuts. Check the
-  // real deepest target from the composed path instead.
-  const realTarget = e.composedPath()[0] ?? e.target;
+  const target = e.target;
   // ⌘C copies the reader's text selection. The reader is the one place in the
   // app where the browser cannot do this itself — its pages are <img> and its
   // selection overlay is empty <div>s, so the document selection there is
@@ -75,7 +69,7 @@ export function handleKeydown(e: KeyboardEvent): void {
   // deferred: it writes the clipboard synchronously, while this keystroke's
   // user gesture still authorizes the write.
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c') {
-    if (viewer.activeId && !isEditable(realTarget) && !hasDomSelection() && pdfSelectionHasText()) {
+    if (viewer.activeId && !isEditable(target) && !hasDomSelection() && pdfSelectionHasText()) {
       e.preventDefault();
       copyPdfSelection();
     }
@@ -89,26 +83,11 @@ export function handleKeydown(e: KeyboardEvent): void {
   // it did nothing, so the keystroke goes on untouched. ⌥ is excluded so
   // ⌘⌥Z stays available to the browser.
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
-    if (isEditable(realTarget)) return;
+    if (isEditable(target)) return;
     if (e.shiftKey ? redoAnnotation() : undoAnnotation()) e.preventDefault();
     return;
   }
-  if (e.key === 'Escape') {
-    // First rung: a half-typed chord is the most transient thing on screen,
-    // and Helix's own Esc abandons a pending sequence before anything else.
-    if (cancelLeader()) return;
-    // Before the dock and zen rungs: a selected mark is the most local thing
-    // on screen, and it is the one piece of reader state with no other way
-    // out — clicking elsewhere on the page is the alternative. The command's
-    // own answer is the rung's condition, so a deselect that couldn't happen
-    // falls through to the dock rather than swallowing the key.
-    else if (clearAnnotationSelection()) {
-      // Deselected. Esc stops here rather than also closing the dock.
-    } else if (dock.open && viewer.activeId !== null) closeDock();
-    else if (viewer.zen) viewer.zen = false;
-    return;
-  }
-  if (isEditable(realTarget)) return;
+  if (isEditable(target)) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   // Match letters case-insensitively so Caps Lock or a held Shift doesn't
   // dead-key a shortcut (`Z`/`X` would otherwise miss `z`/`x`). Named keys
@@ -123,8 +102,8 @@ export function handleKeydown(e: KeyboardEvent): void {
   if (leader.pending.length > 0 || isLeaderRoot(key)) {
     const overControl =
       leader.pending.length === 0 &&
-      realTarget instanceof HTMLElement &&
-      realTarget.closest('button, a, summary');
+      target instanceof HTMLElement &&
+      target.closest('button, a, summary');
     if (!overControl) {
       e.preventDefault();
       advanceLeader(key);
@@ -140,10 +119,24 @@ export function handleKeydown(e: KeyboardEvent): void {
   }
   if (key === 'Enter') {
     // Enter on a focused control activates that control — it must not also
-    // open the selected paper. Checked against the composed-path target, so
-    // a button inside the viewer's shadow DOM counts too (raw e.target would
-    // be its never-matching host).
-    if (realTarget instanceof HTMLElement && realTarget.closest('button, a, summary')) return;
+    // open the selected paper.
+    if (target instanceof HTMLElement && target.closest('button, a, summary')) return;
     openSelected();
   }
+}
+
+/// Esc's rungs, innermost first; each one that acts stops the key there.
+function escape(e: KeyboardEvent): void {
+  // A half-typed chord is the most transient thing on screen, and Helix's
+  // own Esc abandons a pending sequence before anything else.
+  if (cancelLeader()) return;
+  // An open surface: dialog, menu, popover, find bar, inline editor.
+  if (dismissTopLayer(e)) return;
+  // A selected mark is the one piece of reader state with no other way out
+  // — clicking elsewhere on the page is the alternative. The command's own
+  // answer is the rung's condition, so a deselect that couldn't happen falls
+  // through to the dock rather than swallowing the key.
+  if (clearAnnotationSelection()) return;
+  if (dock.open && viewer.activeId !== null) closeDock();
+  else if (viewer.zen) viewer.zen = false;
 }

@@ -27,14 +27,15 @@ function select(...subtypes: string[]): void {
   annotationState.selected = subtypes.map((subtype) => ({ subtype, ref }));
 }
 
+let unregister: () => void;
 beforeEach(() => {
   deleteSelection.mockClear();
   canDelete.mockReturnValue(true);
-  registerAnnotationCommands(commands);
+  unregister = registerAnnotationCommands(commands);
 });
 
 // Registered globally by PdfDeck in the app; must not leak into sibling files.
-afterEach(() => registerAnnotationCommands(null));
+afterEach(() => unregister());
 
 describe('the selected mark’s floating menu', () => {
   it('deletes through the same command the Delete key uses', async () => {

@@ -13,7 +13,7 @@ pub struct Embedder {
     base_url: String,
     model: String,
     dims: usize,
-    api_key: Option<String>,
+    api_key: String,
 }
 
 fn embedding_http() -> HttpClient {
@@ -40,18 +40,19 @@ impl Embedder {
             base_url: r.base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             dims,
-            api_key: Some(key),
+            api_key: key,
         })
     }
 
-    /// Keyless client pointed at a mock server. Test support only.
+    /// Client pointed at a mock server, authenticating as `test-key`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(base_url: &str, model: &str, dims: usize) -> Self {
         Self {
             http: embedding_http(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             dims,
-            api_key: None,
+            api_key: "test-key".into(),
         }
     }
 
@@ -78,13 +79,11 @@ impl Embedder {
             data: Vec<Item>,
         }
 
-        let mut req = self
+        let req = self
             .http
             .post(&format!("{}/embeddings", self.base_url))
+            .bearer_auth(&self.api_key)
             .json(&serde_json::json!({ "model": self.model, "input": batch }));
-        if let Some(k) = &self.api_key {
-            req = req.bearer_auth(k);
-        }
         let text = self
             .http
             .send_text(req)

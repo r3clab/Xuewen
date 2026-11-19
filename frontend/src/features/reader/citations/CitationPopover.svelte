@@ -9,17 +9,12 @@
   import { enqueueUrl, openImport } from '$features/importing/queue.svelte';
   import { openTab } from '$features/reader/tabs/state.svelte';
   import { abbreviateVenue } from '$features/library/venue';
-  import { anchoredPosition } from '$shared/ui/popoverPosition';
+  import { aboveAnchor } from '$shared/ui/popoverPosition';
   import { authorLine, refLinks, titleCase } from './refFormat';
 
   const c = $derived(citationHover.current);
   const s = $derived(c?.reference.structured ?? null);
   const links = $derived(c ? refLinks(s, c.reference.externalUrl) : []);
-
-  // Keep the popover on screen (shared flip/clamp policy — see popoverPosition).
-  const pos = $derived(
-    anchoredPosition(c?.screenX ?? 0, c?.screenY ?? 0, { maxW: 384 /* max-w-sm */, belowOffset: 18 }),
-  );
 
   function open() {
     if (c?.matchedPaper) openTab(c.matchedPaper);
@@ -43,9 +38,7 @@
     role="tooltip"
     onpointerenter={cancelHideCitation}
     onpointerleave={hideCitationSoon}
-    style:left="{pos.left}px"
-    style:top="{pos.top}px"
-    style:transform={pos.below ? 'none' : 'translateY(-100%)'}
+    {@attach aboveAnchor(c.screenX, c.screenY, 18)}
     class="pointer-events-auto fixed z-50 max-w-sm rounded-xl border border-stone-200 bg-paper p-3 text-[12.5px] shadow-2xl dark:border-stone-800 dark:bg-soot"
   >
     {#if s?.title}

@@ -32,7 +32,7 @@ const paper: PaperSummary = {
 };
 
 beforeEach(() => {
-  filters.tag = undefined;
+  filters.q = '';
 });
 
 describe('PaperRowTags', () => {
@@ -110,7 +110,7 @@ describe('PaperRowTags', () => {
   });
 
   it('keeps a tag matching the active filter visible beyond the cap', () => {
-    filters.tag = 'robotics';
+    filters.q = 'tag:robotics';
     render(PaperRowTags, { props: { paper } });
     expect(screen.getByText('robotics')).toBeInTheDocument();
     // benchmarks (index 3, no match) stays hidden; robotics (index 4) is

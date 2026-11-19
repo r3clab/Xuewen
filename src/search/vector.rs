@@ -219,7 +219,37 @@ impl DirLock {
 /// profile. Clones share one shard, one lock, and one `close`.
 #[derive(Clone)]
 pub struct VectorStore {
-    held: Arc<RwLock<Option<Held>>>,
+    state: Arc<RwLock<State>>,
+}
+
+enum State {
+    /// Another process holds the directory; every operation fails until
+    /// `acquire` takes the lock over.
+    Waiting {
+        dir: PathBuf,
+        dims: usize,
+        /// Published once the lock is ours.
+        publish: Option<SocketAddr>,
+    },
+    Open(Held),
+    /// `acquire` found the store unusable.
+    Failed(String),
+    Closed,
+}
+
+impl State {
+    fn unavailable(&self) -> Option<String> {
+        match self {
+            Self::Open(_) => None,
+            Self::Waiting { dir, .. } => Some(format!(
+                "vector store {} is in use by another xuewen process; semantic search \
+                 starts once it is released",
+                dir.display()
+            )),
+            Self::Failed(reason) => Some(reason.clone()),
+            Self::Closed => Some("vector store is closed".into()),
+        }
+    }
 }
 
 struct Held {
@@ -238,10 +268,69 @@ impl VectorStore {
         let (held, opened) = tokio::task::spawn_blocking(move || open_blocking(&owned, dims, mode))
             .await
             .map_err(|e| OpenError::io(dir, format!("open task panicked: {e}")))??;
-        let store = Self {
-            held: Arc::new(RwLock::new(Some(held))),
-        };
-        Ok((store, opened))
+        Ok((Self::with_state(State::Open(held)), opened))
+    }
+
+    /// A store at `dir` whose lock another process holds, for `acquire` to
+    /// take over once that process lets go.
+    pub(crate) fn waiting(dir: &Path, dims: usize) -> Self {
+        Self::with_state(State::Waiting {
+            dir: dir.to_path_buf(),
+            dims,
+            publish: None,
+        })
+    }
+
+    fn with_state(state: State) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
+    }
+
+    pub(crate) fn is_waiting(&self) -> bool {
+        matches!(
+            *self.state.read().unwrap_or_else(PoisonError::into_inner),
+            State::Waiting { .. }
+        )
+    }
+
+    /// Why operations fail right now; `None` while the store is open.
+    pub(crate) fn unavailable(&self) -> Option<String> {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unavailable()
+    }
+
+    /// Take over a `waiting` store's lock. `Ok(None)` while it is still held
+    /// elsewhere (or the store is not waiting); an unusable store fails for
+    /// good.
+    pub(crate) async fn acquire(&self) -> Result<Option<Opened>> {
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            let mut state = state.write().unwrap_or_else(PoisonError::into_inner);
+            let State::Waiting { dir, dims, publish } = &*state else {
+                return Ok(None);
+            };
+            match open_blocking(dir, *dims, OpenMode::LoadOrCreate) {
+                Ok((held, opened)) => {
+                    if let Some(addr) = publish {
+                        if let Err(e) = held.lock.publish(*addr) {
+                            tracing::warn!("could not publish the server address for the CLI: {e}");
+                        }
+                    }
+                    *state = State::Open(held);
+                    Ok(Some(opened))
+                }
+                Err(OpenError::Locked { .. }) => Ok(None),
+                Err(e) => {
+                    *state = State::Failed(e.to_string());
+                    Err(e.into())
+                }
+            }
+        })
+        .await
+        .context("vector store task panicked")?
     }
 
     /// Edge calls block on disk I/O; this runs them on the blocking pool so
@@ -250,35 +339,54 @@ impl VectorStore {
         &self,
         op: impl FnOnce(&Held) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let held = Arc::clone(&self.held);
+        let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
-            match &*held.read().unwrap_or_else(PoisonError::into_inner) {
-                Some(held) => op(held),
-                None => bail!("vector store is closed"),
+            match &*state.read().unwrap_or_else(PoisonError::into_inner) {
+                State::Open(held) => op(held),
+                other => Err(anyhow!(other.unavailable().unwrap_or_default())),
             }
         })
         .await
         .context("vector store task panicked")?
     }
 
+    #[cfg(test)]
     pub(crate) async fn upsert(&self, points: Vec<ChunkPoint>) -> Result<()> {
+        self.run(move |held| held.write_points(points)).await
+    }
+
+    /// Make `points` the paper's only points: a re-chunk can leave fewer
+    /// chunks than the last one, and their points must not outlive them.
+    pub(crate) async fn replace_paper(
+        &self,
+        paper_id: &str,
+        points: Vec<ChunkPoint>,
+    ) -> Result<()> {
+        let filter = paper_filter(paper_id);
         self.run(move |held| {
-            let mut points = points.into_iter().map(|p| {
-                PointStruct::new(
-                    point_id(&p.paper_id, p.seq),
-                    p.vector,
-                    json!({"paper_id": p.paper_id, "seq": p.seq, "page": p.page}),
-                )
-                .into()
-            });
-            loop {
-                let batch: Vec<_> = points.by_ref().take(UPSERT_BATCH).collect();
-                if batch.is_empty() {
-                    return Ok(held.shard.flush()?);
-                }
+            held.shard.update(UpdateOperation::PointOperation(
+                PointOperations::DeletePointsByFilter(filter),
+            ))?;
+            held.write_points(points)
+        })
+        .await
+    }
+
+    /// Replace the paper's seq-0 point, or remove it for a paper that no
+    /// longer has a title or abstract.
+    pub(crate) async fn replace_summary(
+        &self,
+        paper_id: &str,
+        point: Option<ChunkPoint>,
+    ) -> Result<()> {
+        let id = point_id(paper_id, 0);
+        self.run(move |held| match point {
+            Some(point) => held.write_points(vec![point]),
+            None => {
                 held.shard.update(UpdateOperation::PointOperation(
-                    PointOperations::UpsertPoints(PointInsertOperations::PointsList(batch)),
+                    PointOperations::DeletePoints { ids: vec![id] },
                 ))?;
+                Ok(held.shard.flush()?)
             }
         })
         .await
@@ -378,10 +486,7 @@ impl VectorStore {
     }
 
     pub(crate) async fn delete_paper(&self, paper_id: &str) -> Result<()> {
-        let filter = Filter::new_must(Condition::Field(FieldCondition::new_match(
-            key("paper_id"),
-            Match::from(paper_id.to_string()),
-        )));
+        let filter = paper_filter(paper_id);
         self.run(move |held| {
             held.shard.update(UpdateOperation::PointOperation(
                 PointOperations::DeletePointsByFilter(filter),
@@ -397,19 +502,33 @@ impl VectorStore {
         self.run(|held| Ok(held.shard.optimize()?)).await
     }
 
+    /// A waiting store publishes `addr` once it takes the lock over.
     pub(crate) async fn publish_addr(&self, addr: SocketAddr) -> Result<()> {
         let addr = reachable(addr);
-        self.run(move |held| Ok(held.lock.publish(addr)?)).await
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            match &mut *state.write().unwrap_or_else(PoisonError::into_inner) {
+                State::Open(held) => Ok(held.lock.publish(addr)?),
+                State::Waiting { publish, .. } => {
+                    *publish = Some(addr);
+                    Ok(())
+                }
+                other => Err(anyhow!(other.unavailable().unwrap_or_default())),
+            }
+        })
+        .await
+        .context("vector store task panicked")?
     }
 
     /// Flush and release the lock even while clones remain; they fail from
     /// then on.
     pub async fn close(&self) -> Result<()> {
-        let held = Arc::clone(&self.held);
+        let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
-            match held.write().unwrap_or_else(PoisonError::into_inner).take() {
-                Some(held) => Ok(held.shard.flush()?),
-                None => Ok(()),
+            let mut state = state.write().unwrap_or_else(PoisonError::into_inner);
+            match std::mem::replace(&mut *state, State::Closed) {
+                State::Open(held) => Ok(held.shard.flush()?),
+                _ => Ok(()),
             }
         })
         .await
@@ -466,6 +585,35 @@ fn open_blocking(dir: &Path, dims: usize, mode: OpenMode) -> Result<(Held, Opene
         _ => Opened::Populated,
     };
     Ok((Held { shard, lock }, opened))
+}
+
+impl Held {
+    fn write_points(&self, points: Vec<ChunkPoint>) -> Result<()> {
+        let mut points = points.into_iter().map(|p| {
+            PointStruct::new(
+                point_id(&p.paper_id, p.seq),
+                p.vector,
+                json!({"paper_id": p.paper_id, "seq": p.seq, "page": p.page}),
+            )
+            .into()
+        });
+        loop {
+            let batch: Vec<_> = points.by_ref().take(UPSERT_BATCH).collect();
+            if batch.is_empty() {
+                return Ok(self.shard.flush()?);
+            }
+            self.shard.update(UpdateOperation::PointOperation(
+                PointOperations::UpsertPoints(PointInsertOperations::PointsList(batch)),
+            ))?;
+        }
+    }
+}
+
+fn paper_filter(paper_id: &str) -> Filter {
+    Filter::new_must(Condition::Field(FieldCondition::new_match(
+        key("paper_id"),
+        Match::from(paper_id.to_string()),
+    )))
 }
 
 fn edge_config(dims: usize) -> EdgeConfig {
@@ -791,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_ranks_by_cosine_and_returns_the_page() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![
                 point("far", 1, Some(9), vec![0.0, 1.0, 0.0, 0.0]),
@@ -812,7 +960,7 @@ mod tests {
 
     #[tokio::test]
     async fn seq_filters_select_summary_or_body_chunks() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![
                 point("p1", 0, None, vec![1.0, 0.0, 0.0, 0.0]),
@@ -842,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn scope_filter_applies_before_truncation() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![
                 point("best", 1, None, vec![1.0, 0.0, 0.0, 0.0]),
@@ -861,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn reupserting_the_same_paper_and_seq_overwrites() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![point("p1", 1, Some(1), vec![0.0, 1.0, 0.0, 0.0])])
             .await
@@ -880,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_beyond_one_batch_stores_every_point() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         let n = UPSERT_BATCH * 2 + 1;
         let points = (1..=n as i64)
             .map(|seq| point("p1", seq, Some(seq), vec![1.0, seq as f32, 0.0, 0.0]))
@@ -895,7 +1043,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_paper_removes_only_that_papers_points() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![
                 point("p1", 0, None, vec![1.0, 0.0, 0.0, 0.0]),
@@ -913,8 +1061,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_paper_leaves_only_the_new_points() {
+        let (_dir, store) = temp_vectors(4).await;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        store
+            .upsert(vec![
+                point("p1", 0, None, v.clone()),
+                point("p1", 1, Some(1), v.clone()),
+                point("p1", 2, Some(2), v.clone()),
+                point("p2", 1, Some(1), v.clone()),
+            ])
+            .await
+            .unwrap();
+        let all = async || {
+            let mut ids = hit_ids(&store.search(&v, 10, SeqFilter::All, None).await.unwrap());
+            ids.sort();
+            ids
+        };
+
+        store
+            .replace_paper("p1", vec![point("p1", 1, Some(1), v.clone())])
+            .await
+            .unwrap();
+        assert_eq!(all().await, [("p1".to_string(), 1), ("p2".to_string(), 1)]);
+        store.replace_paper("p1", Vec::new()).await.unwrap();
+        assert_eq!(all().await, [("p2".to_string(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn replace_summary_rewrites_or_removes_only_seq_zero() {
+        let (_dir, store) = temp_vectors(4).await;
+        store
+            .upsert(vec![
+                point("p1", 0, None, vec![1.0, 0.0, 0.0, 0.0]),
+                point("p1", 1, Some(1), vec![0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .unwrap();
+        store
+            .replace_summary("p1", Some(point("p1", 0, None, vec![0.0, 0.0, 1.0, 0.0])))
+            .await
+            .unwrap();
+        let top = store
+            .search(&[0.0, 0.0, 1.0, 0.0], 1, SeqFilter::OnlySummary, None)
+            .await
+            .unwrap();
+        assert_eq!(hit_ids(&top), [("p1".to_string(), 0)]);
+        assert_eq!(store.scroll_summaries().await.unwrap()[0].1[2], 1.0);
+
+        store.replace_summary("p1", None).await.unwrap();
+        assert!(store.scroll_summaries().await.unwrap().is_empty());
+        let body = store
+            .search(&[0.0, 1.0, 0.0, 0.0], 10, SeqFilter::All, None)
+            .await
+            .unwrap();
+        assert_eq!(hit_ids(&body), [("p1".to_string(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_store_takes_over_once_the_holder_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, _) = open(dir.path(), 4).await.unwrap();
+        let waiting = VectorStore::waiting(dir.path(), 4);
+        assert!(waiting.is_waiting());
+        let reason = waiting.unavailable().unwrap();
+        assert!(reason.contains("in use"), "got: {reason}");
+        let err = waiting
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, SeqFilter::All, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), reason);
+        let addr: SocketAddr = "127.0.0.1:8123".parse().unwrap();
+        waiting.publish_addr(addr).await.unwrap();
+        assert_eq!(waiting.acquire().await.unwrap(), None, "still held");
+
+        holder.close().await.unwrap();
+        assert_eq!(waiting.acquire().await.unwrap(), Some(Opened::Empty));
+        assert!(!waiting.is_waiting() && waiting.unavailable().is_none());
+        match open(dir.path(), 4).await {
+            Err(OpenError::Locked { holder, .. }) => {
+                assert_eq!(holder, Some(addr), "the deferred address is published")
+            }
+            other => panic!("expected Locked, got {:?}", other.map(|(_, o)| o)),
+        }
+        assert_eq!(
+            waiting.acquire().await.unwrap(),
+            None,
+            "nothing to take over"
+        );
+    }
+
+    #[tokio::test]
     async fn scroll_summaries_pages_past_one_page_and_skips_body_chunks() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         let n = SCROLL_PAGE + 44;
         let mut points: Vec<ChunkPoint> = (0..n)
             .map(|i| point(&format!("p{i}"), 0, None, vec![0.0, 0.0, 2.0, 0.0]))
@@ -931,7 +1170,7 @@ mod tests {
 
     #[tokio::test]
     async fn optimize_keeps_a_populated_store_searchable() {
-        let store = temp_vectors(4).await;
+        let (_dir, store) = temp_vectors(4).await;
         store
             .upsert(vec![
                 point("p1", 0, None, vec![1.0, 0.0, 0.0, 0.0]),

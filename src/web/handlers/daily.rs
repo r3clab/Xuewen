@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::app::App;
+use crate::daily::store::DailyPaper;
 use crate::web::error::ApiError;
 
 pub(super) fn routes() -> Router<App> {
@@ -15,67 +16,39 @@ pub(super) fn routes() -> Router<App> {
         .route("/api/daily/run", post(run_daily))
 }
 
-/// One paper in the daily-recommendations response (Glance widget input).
-#[derive(Serialize)]
-struct DailyPaperDto {
-    rank: i64,
-    arxiv_id: String,
-    title: String,
-    authors: Vec<String>,
-    #[serde(rename = "abstract")]
-    abstract_text: String,
-    categories: Vec<String>,
-    score: f64,
-    tldr: Option<String>,
-    abs_url: String,
-    pdf_url: String,
-    summary: Option<crate::summary::Summary>,
-    code_url: Option<String>,
-}
-
-impl From<&crate::daily::store::DailyPaper> for DailyPaperDto {
-    fn from(p: &crate::daily::store::DailyPaper) -> Self {
-        Self {
-            rank: p.rank,
-            arxiv_id: p.arxiv_id.clone(),
-            title: p.title.clone(),
-            authors: p.authors.clone(),
-            abstract_text: p.abstract_text.clone(),
-            categories: p.categories.clone(),
-            score: p.score,
-            tldr: p.tldr.clone(),
-            abs_url: p.abs_url.clone(),
-            pdf_url: p.pdf_url.clone(),
-            summary: p.summary.clone(),
-            code_url: p.code_url.clone(),
-        }
-    }
-}
-
 /// `date` is `None` until the first non-empty batch exists.
 #[derive(Serialize)]
-struct DailyResponse {
+struct DailyResponse<'a> {
     date: Option<String>,
-    papers: Vec<DailyPaperDto>,
+    papers: Vec<DailyPaperJson<'a>>,
+}
+
+/// The Glance widget reads `tldr` beside the summary it is taken from.
+#[derive(Serialize)]
+struct DailyPaperJson<'a> {
+    #[serde(flatten)]
+    paper: &'a DailyPaper,
+    tldr: Option<&'a str>,
 }
 
 /// GET /api/daily — the latest non-empty daily batch for the Glance widget.
 async fn daily_papers(State(app): State<App>) -> Result<Response, ApiError> {
     app.daily()?;
-    let resp = match crate::daily::store::latest_batch(app.pool())
+    let (date, papers) = match crate::daily::store::latest_batch(app.pool())
         .await
         .context("daily papers")?
     {
-        Some((date, papers)) => DailyResponse {
-            date: Some(date),
-            papers: papers.iter().map(DailyPaperDto::from).collect(),
-        },
-        None => DailyResponse {
-            date: None,
-            papers: Vec::new(),
-        },
+        Some((date, papers)) => (Some(date), papers),
+        None => (None, Vec::new()),
     };
-    Ok(Json(resp).into_response())
+    let papers = papers
+        .iter()
+        .map(|paper| DailyPaperJson {
+            paper,
+            tldr: paper.tldr(),
+        })
+        .collect();
+    Ok(Json(DailyResponse { date, papers }).into_response())
 }
 
 /// POST /api/daily/run — manual trigger; 202 started, 409 already running.

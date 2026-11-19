@@ -25,7 +25,7 @@ sha2 = "0.11"
 hex = "0.4"
 regex = "1"
 percent-encoding = "2" # already transitive via reqwest/url; promoted for direct use
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 tracing = "0.1"
@@ -46,13 +46,11 @@ roxmltree = "0.21"
 strsim = "0.11"
 notify = "8"
 unicode-normalization = "0.1"
-axum = { version = "0.8", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs"] }
 rust-embed = "8"
 mime_guess = "2"
-flate2 = "1"
-brotli = "9"
 tantivy = "0.27"
 qdrant-edge = "=0.9.0" # beta: API and on-disk format may change between releases
 hayro = "0.9" # pure-Rust PDF rasterizer for the picker previews (src/preview)
@@ -85,20 +83,12 @@ members = [".", "desktop"]
 [workspace.package]
 version = "0.1.2"
 
-# Hashing and compression are the only places a dev build does real work per
-# request, and unoptimized they dominate it: rust-embed re-reads and SHA-256s
-# every asset on every request in debug (that is what makes a frontend rebuild
-# show up without a Rust recompile), which measured 38-44 ms for the 4.6 MB
-# PDFium wasm — ~119 MB/s, exactly unoptimized SHA-256 speed. These crates are
-# pure computation with no debugging value, so optimize them even in dev; they
-# are compiled once and the rest of the tree keeps its fast, debuggable build.
+# Hashing is the one place a dev build does real work per request, and
+# unoptimized it dominates it: rust-embed re-reads and SHA-256s every asset on
+# every request in debug (that is what makes a frontend rebuild show up
+# without a Rust recompile), which measured 38-44 ms for the 4.6 MB PDFium
+# wasm — ~119 MB/s, exactly unoptimized SHA-256 speed. The crate is pure
+# computation with no debugging value, so optimize it even in dev; it is
+# compiled once and the rest of the tree keeps its fast, debuggable build.
 [profile.dev.package.sha2]
-opt-level = 3
-[profile.dev.package.flate2]
-opt-level = 3
-[profile.dev.package.miniz_oxide]
-opt-level = 3
-[profile.dev.package.brotli]
-opt-level = 3
-[profile.dev.package.brotli-decompressor]
 opt-level = 3

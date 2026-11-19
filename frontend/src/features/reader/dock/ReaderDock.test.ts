@@ -5,7 +5,7 @@ import ReaderDock from './ReaderDock.svelte';
 import { chat } from '$features/reader/ask/chat.svelte';
 import { viewer } from '$features/reader/tabs/state.svelte';
 import { appSettings } from '$shared/api/settings.svelte';
-import { dock } from './state.svelte';
+import { askInDock, dock } from './state.svelte';
 
 const detail = {
   id: 'p1', title: 'Attention', authors: ['Vaswani'], venue: 'NeurIPS', year: 2017,
@@ -17,7 +17,6 @@ const detail = {
 beforeEach(() => {
   viewer.activeId = 'p1';
   dock.open = true;
-  dock.entry = null;
   viewer.zen = false;
   appSettings.foldAbstract = false;
   chat.available = true;
@@ -68,12 +67,11 @@ describe('ReaderDock', () => {
     expect(record.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("an 'ask' entry focuses the composer and is consumed", async () => {
-    dock.entry = 'ask';
+  it('the composer is where askInDock puts the cursor', async () => {
     render(ReaderDock, { props: { id: 'p1' } });
     await screen.findByText('Attention');
+    askInDock();
     expect(document.activeElement).toBe(screen.getByPlaceholderText('Ask about this paper…'));
-    expect(dock.entry).toBeNull();
   });
 
   it('the close button closes the dock', async () => {
@@ -82,13 +80,36 @@ describe('ReaderDock', () => {
     expect(dock.open).toBe(false);
   });
 
-  it('Escape inside the dock closes it without leaving zen', async () => {
-    viewer.zen = true;
+  it('follows the reply to the bottom once the reader sends, and stops when they scroll up', async () => {
+    let grow = () => {};
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: () => void) {
+          grow = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
     render(ReaderDock, { props: { id: 'p1' } });
-    await userEvent.click(screen.getByPlaceholderText('Ask about this paper…'));
-    await userEvent.keyboard('{Escape}');
-    expect(dock.open).toBe(false);
-    expect(viewer.zen).toBe(true);
+    await screen.findByText('Attention');
+    const scroller = screen.getByText('Attention').closest('.overflow-y-auto') as HTMLElement;
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 300, configurable: true });
+
+    grow();
+    expect(scroller.scrollTop).toBe(0); // opening lands on the record
+
+    chat.draft = 'Why?';
+    await userEvent.click(screen.getByRole('button', { name: /send/i }));
+    grow();
+    expect(scroller.scrollTop).toBe(1000);
+
+    scroller.scrollTop = 100;
+    scroller.dispatchEvent(new Event('scroll'));
+    grow();
+    expect(scroller.scrollTop).toBe(100);
   });
 
   it('the zen button toggles zen', async () => {

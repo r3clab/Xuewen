@@ -3,29 +3,18 @@
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';
   import { abbreviateVenue } from '$features/library/venue';
   import StatusPill from '$features/library/StatusPill.svelte';
+  import { safeHttpUrl } from '$shared/browser/url';
 
   let { d }: { d: PaperDetail } = $props();
   const venueLabel = $derived(abbreviateVenue(d.venue));
 
   type Link = { label: string; href: string };
-  // `d.url` is attacker-influenceable — manual identify (POST .../identify)
-  // round-trips an arbitrary candidate url into paper.url — so a
-  // javascript:/data: href here would run in the app origin when clicked.
-  // Only web schemes may become links, as citation links do (refFormat.ts).
-  const isHttpUrl = (href: string): boolean => {
-    try {
-      const proto = new URL(href).protocol;
-      return proto === 'http:' || proto === 'https:';
-    } catch {
-      return false;
-    }
-  };
   const links = $derived.by(() => {
     const out: Link[] = [];
     if (d.doi) out.push({ label: 'DOI', href: `https://doi.org/${d.doi}` });
     if (d.arxiv_id) out.push({ label: 'arXiv', href: `https://arxiv.org/abs/${d.arxiv_id}` });
     if (d.dblp_key) out.push({ label: 'DBLP', href: `https://dblp.org/rec/${d.dblp_key}.html` });
-    if (d.url && isHttpUrl(d.url)) out.push({ label: 'URL', href: d.url });
+    if (d.url && safeHttpUrl(d.url)) out.push({ label: 'URL', href: d.url });
     return out;
   });
 </script>

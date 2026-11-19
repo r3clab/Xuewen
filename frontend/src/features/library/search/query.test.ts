@@ -1,93 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SEMANTIC_FIELD_KEYS,
   hasSearchTerms,
   parseQuery,
   setFieldQualifiers,
   setQualifier,
   setStarredQualifier,
 } from './query';
+import cases from './query_cases.json';
 
-// Mirrors the Rust fixtures in src/search/query.rs — keep the two in sync.
+// query_cases.json is the grammar's one spec: the canonical Rust parser
+// (src/search/query.rs) runs the same cases.
 describe('parseQuery', () => {
-  it('treats bare words as free text', () => {
-    const p = parseQuery('attention is all you need');
-    expect(p.text).toBe('attention is all you need');
-    expect(p.tag).toBeNull();
-    expect(p.authors).toEqual([]);
-    expect(p.starred).toBe(false);
+  it.each(cases.cases)('parses $input', ({ input, parsed }) => {
+    expect(parseQuery(input)).toEqual(parsed);
   });
+});
 
-  it('parses a single tag', () => {
-    const p = parseQuery('tag:nlp');
-    expect(p.tag).toBe('nlp');
-    expect(p.text).toBe('');
-  });
-
-  it('parses quoted values and all filter keys', () => {
-    const p = parseQuery('tag:"deep learning" project:Thesis is:starred status:needs-review');
-    expect(p.tag).toBe('deep learning');
-    expect(p.project).toBe('Thesis');
-    expect(p.starred).toBe(true);
-    expect(p.status).toBe('needs_review');
-    expect(p.text).toBe('');
-  });
-
-  it('unions in: tokens', () => {
-    const p = parseQuery('in:title in:abstract transformers');
-    expect(p.fields).toEqual(['title', 'abstract']);
-    expect(p.text).toBe('transformers');
-  });
-
-  it('scopes to annotation notes with in:notes', () => {
-    const p = parseQuery('in:notes attention');
-    expect(p.fields).toEqual(['notes']);
-    expect(p.text).toBe('attention');
-  });
-
-  it('collects repeated author terms', () => {
-    const p = parseQuery('author:smith author:"ada lovelace" attention');
-    expect(p.authors).toEqual(['smith', 'ada lovelace']);
-    expect(p.text).toBe('attention');
-  });
-
-  it('keeps the last repeated filter key', () => {
-    expect(parseQuery('tag:a tag:b').tag).toBe('b');
-  });
-
-  it('degrades unknown keys and values to free text', () => {
-    const p = parseQuery('foo:bar is:open in:everything tag:');
-    expect(p.text).toBe('foo:bar is:open in:everything tag:');
-    expect(p.tag).toBeNull();
-    expect(p.fields).toBeNull();
-    expect(p.starred).toBe(false);
-  });
-
-  it('passes quoted phrases through', () => {
-    expect(parseQuery('"exact phrase" more').text).toBe('"exact phrase" more');
-  });
-
-  it('is case-insensitive on keys, preserves value case', () => {
-    const p = parseQuery('TAG:NLP In:Title');
-    expect(p.tag).toBe('NLP');
-    expect(p.fields).toEqual(['title']);
-  });
-
-  it('parses the empty string', () => {
-    const p = parseQuery('');
-    expect(p.text).toBe('');
-    expect(p.tag).toBeNull();
-  });
-
-  it('runs an unclosed quote to end of string', () => {
-    expect(parseQuery('tag:"unclosed').tag).toBe('unclosed');
-  });
-
-  it('splits only on ASCII whitespace — NBSP stays inside a token', () => {
-    // Pasted-from-PDF text carries NBSP; the Rust parser keeps it in the
-    // value, so the mirror must not let JS `\s` split there.
-    const p = parseQuery('tag:deep\u00A0learning');
-    expect(p.tag).toBe('deep\u00A0learning');
-    expect(p.text).toBe('');
+describe('SEMANTIC_FIELD_KEYS', () => {
+  it('names exactly the fields the vector tier embeds', () => {
+    expect([...SEMANTIC_FIELD_KEYS]).toEqual(cases.semantic_fields);
   });
 });
 

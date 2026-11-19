@@ -4,6 +4,7 @@ pub(crate) mod scheduler;
 mod score;
 pub mod store;
 
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use sqlx::SqlitePool;
 
 use crate::config::{Config, DailyConfig};
 use crate::http::{user_agent, HttpClient, RetryPolicy};
+use crate::library::model::ARXIV_PDF_BASE;
 use crate::llm::LlmClient;
 use crate::search::embedder::Embedder;
 use crate::search::vector::VectorStore;
@@ -18,8 +20,6 @@ use crate::search::Semantic;
 use crate::tasks::Tasks;
 
 const ARXIV_FEED_BASE: &str = "https://rss.arxiv.org/atom";
-const ARXIV_PDF_BASE: &str = "https://arxiv.org/pdf";
-const ARXIV_ABS_BASE: &str = "https://arxiv.org/abs";
 
 /// Daily arXiv recommendations. Owns its own HTTP clients (all stateless);
 /// only the vector store is shared with `SearchService`, since one process
@@ -119,7 +119,8 @@ impl DailyService {
         })))
     }
 
-    /// DI constructor: every remote endpoint is overridable. Test support only.
+    /// DI constructor: every remote endpoint is overridable.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(
         cfg: DailyConfig,
         pool: SqlitePool,
@@ -152,45 +153,44 @@ impl DailyService {
         self.running.load(Ordering::SeqCst)
     }
 
-    fn try_begin(&self) -> bool {
-        self.running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
     /// Run for `batch_date` unless a run is already in flight (then `None`).
     pub(crate) async fn run_guarded(&self, batch_date: &str) -> Option<store::DailyRun> {
-        if !self.try_begin() {
-            return None;
-        }
-        let _guard = RunFlagGuard(&self.running);
-        Some(job::run_once(self, batch_date).await)
+        let running = Running::begin(self)?;
+        Some(job::run_once(running.0, batch_date).await)
     }
 
     /// Guarded run on a background task; `false` if one was in flight.
     /// The guard is taken synchronously, so a caller seeing `true` knows
     /// the very next `spawn_run`/`run_guarded` will refuse.
     pub(crate) fn spawn_run(self: &Arc<Self>, batch_date: String, tasks: &Tasks) -> bool {
-        if !self.try_begin() {
+        let Some(running) = Running::begin(self.clone()) else {
             return false;
-        }
-        let svc = self.clone();
-        tasks.spawn(async move {
-            let _guard = RunFlagGuard(&svc.running);
-            let run = job::run_once(&svc, &batch_date).await;
+        };
+        tasks.spawn_until_cancelled(async move {
+            let run = job::run_once(&running.0, &batch_date).await;
             tracing::info!("daily run {run}");
         });
         true
     }
 }
 
-/// Clears the running flag on scope exit — including panics and
-/// cancellation — so a wedged run can never permanently refuse new runs.
-struct RunFlagGuard<'a>(&'a AtomicBool);
+/// Holds the service's running flag and clears it on drop — after a panic,
+/// a cancellation, or a spawned run dropped before its first poll — so a
+/// wedged run can never permanently refuse new runs.
+struct Running<S: Deref<Target = DailyService>>(S);
 
-impl Drop for RunFlagGuard<'_> {
+impl<S: Deref<Target = DailyService>> Running<S> {
+    fn begin(svc: S) -> Option<Self> {
+        svc.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then(|| Self(svc))
+    }
+}
+
+impl<S: Deref<Target = DailyService>> Drop for Running<S> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -217,11 +217,13 @@ database_url = "sqlite::memory:"
         }
     }
 
-    async fn ready() -> Semantic {
-        Semantic::Ready(crate::search::SemanticTier {
+    async fn ready() -> (tempfile::TempDir, Semantic) {
+        let (dir, store) = temp_vectors(4).await;
+        let semantic = Semantic::Ready(crate::search::SemanticTier {
             embedder: Embedder::for_tests("http://unused", "m1", 4),
-            store: temp_vectors(4).await,
-        })
+            store,
+        });
+        (dir, semantic)
     }
 
     #[tokio::test]
@@ -249,7 +251,8 @@ database_url = "sqlite::memory:"
             ),
         ];
         for (sections, want) in cases {
-            assert_eq!(reason(sections, ready().await).await, want, "{sections:?}");
+            let (_vectors, semantic) = ready().await;
+            assert_eq!(reason(sections, semantic).await, want, "{sections:?}");
         }
     }
 
@@ -260,7 +263,8 @@ database_url = "sqlite::memory:"
             EMBEDDING,
             "[ai.daily]\nmodel = \"m\"\napi_key = \"k\"\n",
         ];
-        assert_eq!(reason(&full, ready().await).await, "enabled");
+        let (_vectors, semantic) = ready().await;
+        assert_eq!(reason(&full, semantic).await, "enabled");
         assert_eq!(
             reason(&full, Semantic::NotConfigured).await,
             "the vector store is unavailable (embedding API not configured (set [ai.embedding] and an API key))"

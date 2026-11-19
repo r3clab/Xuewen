@@ -1,16 +1,21 @@
-import { request, requestText, requestVoid } from '$shared/api/http';
-import { filterParams } from '$features/library/search/api';
-import { hasSearchTerms, parseQuery } from '$features/library/search/query';
-import type { BibFormat } from './types';
-import type { Filters } from '$features/library/search/types';
+import { request, requestRaw, requestText, requestVoid } from '$shared/api/http';
+import type { BibFormat } from '$shared/api/generated/BibFormat';
+import type { ExportPapersBody } from '$shared/api/generated/ExportPapersBody';
+import type { ListParams } from '$shared/api/generated/ListParams';
 import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 import type { PaperNameResponse } from '$shared/api/generated/PaperNameResponse';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 import type { PreviewMeta } from '$shared/api/generated/PreviewMeta';
+import type { SetPaperNameBody } from '$shared/api/generated/SetPaperNameBody';
 import type { Stats } from '$shared/api/generated/Stats';
 
-export async function listPapers(f: Filters): Promise<PaperSummary[]> {
-  return request(`/api/papers?${filterParams(f).toString()}`, 'list failed');
+/// The library list. `q` is the raw search-box string: the server parses its
+/// qualifiers with the same grammar /api/search uses.
+export async function listPapers({ q, sort }: ListParams = {}): Promise<PaperSummary[]> {
+  const params = new URLSearchParams();
+  if (q?.trim()) params.set('q', q.trim());
+  if (sort) params.set('sort', sort);
+  return request(`/api/papers?${params.toString()}`, 'list failed');
 }
 
 export async function getPaper(id: string): Promise<PaperDetail> {
@@ -52,7 +57,7 @@ export async function restorePaper(id: string): Promise<void> {
 export async function setPaperName(paperId: string, name: string | null): Promise<PaperNameResponse> {
   return request(`/api/papers/${encodeURIComponent(paperId)}/name`, 'update name failed', {
     method: 'PATCH',
-    json: { name },
+    json: { name } satisfies SetPaperNameBody,
   });
 }
 
@@ -63,7 +68,7 @@ export async function setStar(paperId: string, on: boolean): Promise<void> {
 }
 
 /// URL for one paper's citation export — also the Download link target
-/// (sibling of `pdfUrl`; `exportUrl` below covers the filtered-list export).
+/// (sibling of `pdfUrl`).
 export function paperExportUrl(id: string, fmt: BibFormat): string {
   return `/api/papers/${encodeURIComponent(id)}/export?format=${fmt}`;
 }
@@ -72,13 +77,8 @@ export async function exportPaper(id: string, fmt: BibFormat): Promise<string> {
   return requestText(paperExportUrl(id, fmt), 'export failed');
 }
 
-/// URL for the filtered-list export. The export endpoint LIKE-matches `q`
-/// against title/authors, so a qualifier-only query ('tag:nlp') must not leak
-/// in as `q` — the parsed filters already carry it as tag=/project=/starred=/
-/// status= (the same rule as loadPapers' listPapers call). Free-text/author
-/// queries keep their `q`; the filter strip disables the export link for those.
-export function exportUrl(f: Filters, fmt: BibFormat): string {
-  const params = filterParams(hasSearchTerms(parseQuery(f.q)) ? f : { ...f, q: '' });
-  params.set('format', fmt);
-  return `/api/papers/export?${params.toString()}`;
+/// The given papers as one `.bib` file, entries in `ids` order.
+export async function exportPapers(body: ExportPapersBody): Promise<Blob> {
+  const res = await requestRaw('/api/papers/export', 'export failed', { method: 'POST', json: body });
+  return res.blob();
 }

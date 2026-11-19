@@ -5,12 +5,13 @@ use super::ResolvedMetadata;
 use crate::http::{encode_doi_path, HttpClient};
 use crate::text::{collapse_ws, strip_tags};
 
-/// Fetch the Crossref work record for a DOI from `{base}/works/{doi}`.
-pub(crate) async fn fetch(http: &HttpClient, base: &str, doi: &str) -> Result<String> {
+/// Fetch the Crossref work record for a DOI from `{base}/works/{doi}`;
+/// `None` when Crossref has no such DOI.
+pub(crate) async fn fetch(http: &HttpClient, base: &str, doi: &str) -> Result<Option<String>> {
     // Crossref requires the DOI URL-encoded: a raw `#`/`?` (legal in DOIs)
     // would truncate the request path.
     let url = format!("{base}/works/{}", encode_doi_path(doi));
-    http.get_text(&url).await
+    http.find_text(http.get(&url)).await
 }
 
 /// Search Crossref by bibliographic string (title). Returns raw JSON.

@@ -15,18 +15,16 @@
   let expanded = $state(false);
 
   function isHit(tagName: string): boolean {
-    return filters.tag != null && isPrefixMatch(tagName, filters.tag);
+    return filters.tag !== null && isPrefixMatch(tagName, filters.tag);
   }
 
   // A tag chip is visible when expanded, within the first CAP, or (even
-  // beyond the cap) it matches the active tag filter — mirrors the approved
-  // mock's layoutChips(): `show = expanded || i < CAP || isHit`.
+  // beyond the cap) when it matches the active tag filter.
   const collapsedTags = $derived(paper.tags.filter((t, i) => i < CAP || isHit(t.name)));
   const visibleTags = $derived(expanded ? paper.tags : collapsedTags);
-  // How many the collapsed view hides — computed from the collapsed set (not
-  // `visibleTags`) so the toggle persists once expanded, giving a way to fold
-  // back. Was `paper.tags.length - visibleTags.length`, which went to 0 on
-  // expand and made the control vanish with no collapse affordance.
+  // How many the collapsed view hides — counted against the collapsed set,
+  // not `visibleTags`, so the toggle stays once expanded as the way to fold
+  // back.
   const overflowCount = $derived(paper.tags.length - collapsedTags.length);
 
   // Clipping is what keeps the row one line high, so the chips carry
@@ -62,12 +60,6 @@
     expanded ? 'contents' : 'flex min-w-0 items-center gap-1 overflow-hidden',
   );
 
-  // Rows are themselves a clickable container (opens the paper) — stop the
-  // +N control's click from bubbling up and opening it too.
-  function onMoreClick(e: MouseEvent) {
-    e.stopPropagation();
-    expanded = !expanded;
-  }
 </script>
 
 {#if paper.projects.length || paper.tags.length}
@@ -84,7 +76,7 @@
       {/each}
     </div>
     {#if overflowCount > 0}
-      <button type="button" onclick={onMoreClick} aria-expanded={expanded} class={moreClasses}>
+      <button type="button" onclick={() => (expanded = !expanded)} aria-expanded={expanded} class={moreClasses}>
         {expanded ? 'Less' : `+${overflowCount}`}
       </button>
     {/if}

@@ -29,7 +29,7 @@
       "binaries/node"
     ],
     "resources": {
-      "../agent-runner": "agent-runner",
+      "binaries/agent-runner": "agent-runner",
       "binaries/libs": "libs"
     },
     "macOS": {

@@ -3,6 +3,12 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PaperNameEditor from './PaperNameEditor.svelte';
 import type { PaperDetail } from '$shared/api/generated/PaperDetail';
+import { dismissTopLayer } from '$shared/ui/escape';
+
+beforeEach(() => {
+  window.addEventListener('keydown', dismissTopLayer);
+  return () => window.removeEventListener('keydown', dismissTopLayer);
+});
 
 function stubFetch(handler: (url: string, init?: RequestInit) => unknown) {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];

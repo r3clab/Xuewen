@@ -5,9 +5,9 @@ use serde_json::json;
 
 /// Annotations are always on (no `[ai.*]` gate), so the plain router serves
 /// them — there is no `build_router_with_annotations` to reach for.
-async fn server(paper: &str) -> TestServer {
-    let (pool, root) = support::pool_and_root_with_paper(paper).await;
-    TestServer::new(support::router(pool, root))
+async fn server(paper: &str) -> (TestServer, tempfile::TempDir) {
+    let (pool, root, dir) = support::pool_and_root_with_paper(paper).await;
+    (TestServer::new(support::router(pool, root)), dir)
 }
 
 fn highlight(page_index: i64, note: Option<&str>) -> serde_json::Value {
@@ -26,7 +26,7 @@ fn highlight(page_index: i64, note: Option<&str>) -> serde_json::Value {
 
 #[tokio::test]
 async fn put_then_list_roundtrips_a_mark() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     let resp = server
         .put("/api/papers/p1/annotations/a1")
         .json(&highlight(3, Some("the key claim")))
@@ -49,7 +49,7 @@ async fn put_then_list_roundtrips_a_mark() {
 
 #[tokio::test]
 async fn list_is_empty_for_a_paper_with_no_marks() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     let resp = server.get("/api/papers/p1/annotations").await;
     resp.assert_status_ok();
     assert_eq!(resp.json::<serde_json::Value>(), json!([]));
@@ -57,7 +57,7 @@ async fn list_is_empty_for_a_paper_with_no_marks() {
 
 #[tokio::test]
 async fn list_comes_back_in_reading_order() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     for (id, page) in [("c", 5), ("a", 0), ("b", 2)] {
         server
             .put(&format!("/api/papers/p1/annotations/{id}"))
@@ -77,7 +77,7 @@ async fn list_comes_back_in_reading_order() {
 
 #[tokio::test]
 async fn re_putting_the_same_id_replaces_instead_of_duplicating() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     server
         .put("/api/papers/p1/annotations/a1")
         .json(&highlight(1, None))
@@ -103,7 +103,7 @@ async fn re_putting_the_same_id_replaces_instead_of_duplicating() {
 async fn putting_a_blank_note_stores_null() {
     // Blank and never-set must be the same NULL, so a cleared note neither
     // lists as empty text nor reaches the search index.
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     let resp = server
         .put("/api/papers/p1/annotations/a1")
         .json(&highlight(0, Some("   ")))
@@ -114,7 +114,7 @@ async fn putting_a_blank_note_stores_null() {
 
 #[tokio::test]
 async fn delete_removes_one_mark_then_404s() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     server
         .put("/api/papers/p1/annotations/a1")
         .json(&highlight(0, None))
@@ -132,7 +132,7 @@ async fn delete_removes_one_mark_then_404s() {
 
 #[tokio::test]
 async fn clearing_a_paper_reports_how_many_went() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     for id in ["a1", "a2", "a3"] {
         server
             .put(&format!("/api/papers/p1/annotations/{id}"))
@@ -154,7 +154,7 @@ async fn clearing_a_paper_reports_how_many_went() {
 
 #[tokio::test]
 async fn unknown_paper_is_404_on_every_verb() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     server
         .get("/api/papers/nope/annotations")
         .await
@@ -172,7 +172,7 @@ async fn unknown_paper_is_404_on_every_verb() {
 
 #[tokio::test]
 async fn a_negative_page_is_rejected() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     server
         .put("/api/papers/p1/annotations/a1")
         .json(&highlight(-1, None))
@@ -182,7 +182,7 @@ async fn a_negative_page_is_rejected() {
 
 #[tokio::test]
 async fn a_non_object_payload_is_rejected() {
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     let mut body = highlight(0, None);
     body["payload"] = json!([1, 2, 3]);
     server
@@ -198,7 +198,7 @@ async fn an_unrenderable_kind_is_refused_at_the_wire() {
     // no renderer for out of storage; serde rejects it before any handler
     // code runs. That lands as 422 (the body parses as JSON but names a
     // variant that doesn't exist), not the 400 our own validators return.
-    let server = server("p1").await;
+    let (server, _dir) = server("p1").await;
     let mut body = highlight(0, None);
     body["kind"] = json!("ink");
     server
@@ -210,7 +210,7 @@ async fn an_unrenderable_kind_is_refused_at_the_wire() {
 
 #[tokio::test]
 async fn annotations_are_scoped_to_their_paper() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     // A second paper sharing the same database must not see p1's marks.
     xuewen::library::papers::insert(
         &pool,

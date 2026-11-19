@@ -3,6 +3,7 @@ use crate::support;
 use axum_test::TestServer;
 use serde_json::json;
 use std::path::PathBuf;
+use xuewen::agent::history::ChatRole;
 use xuewen::agent::AgentService;
 use xuewen::config::{AgentBackendConfig, AgentConfig};
 
@@ -14,6 +15,18 @@ fn stub_agent() -> std::sync::Arc<AgentService> {
         ..AgentConfig::default()
     })
     .unwrap()
+}
+
+/// The JSON payload of every SSE message in a streamed reply, in order.
+fn sse_events(body: &str) -> Vec<serde_json::Value> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect()
+}
+
+fn kinds(events: &[serde_json::Value]) -> Vec<&str> {
+    events.iter().map(|e| e["type"].as_str().unwrap()).collect()
 }
 
 /// Router with the agent service wired: the library ships no per-service
@@ -29,7 +42,7 @@ fn router_with_agent(
 
 #[tokio::test]
 async fn models_report_unavailable_without_config() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(support::router(pool, root));
     let resp = server.get("/api/chat/models").await;
     resp.assert_status_ok();
@@ -39,7 +52,7 @@ async fn models_report_unavailable_without_config() {
 
 #[tokio::test]
 async fn models_list_agent_backends() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(router_with_agent(pool, root, stub_agent()));
     let v: serde_json::Value = server.get("/api/chat/models").await.json();
     assert_eq!(v["available"], true);
@@ -50,7 +63,7 @@ async fn models_list_agent_backends() {
 
 #[tokio::test]
 async fn send_streams_tool_and_deltas_and_persists_with_tools() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
 
     let resp = server
@@ -58,33 +71,37 @@ async fn send_streams_tool_and_deltas_and_persists_with_tools() {
         .json(&json!({"model_id": "claude_code", "message": "what is this?"}))
         .await;
     resp.assert_status_ok();
-    let body = resp.text();
-    assert!(body.contains("event: tool"));
-    assert!(body.contains("\"name\":\"Read\""));
-    assert!(body.contains("event: delta"));
-    assert!(body.contains("event: done"));
+    let events = sse_events(&resp.text());
+    let kinds = kinds(&events);
+    assert_eq!(kinds.first(), Some(&"tool"));
+    assert_eq!(events[0]["name"], "Read");
+    assert!(kinds.contains(&"delta"));
+    assert_eq!(kinds.last(), Some(&"done"));
 
     let rows = xuewen::agent::history::list(&pool, "p1").await.unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].role, "user");
-    assert_eq!(rows[1].role, "assistant");
+    assert_eq!(rows[0].role, ChatRole::User);
+    assert_eq!(rows[1].role, ChatRole::Assistant);
     assert_eq!(rows[1].content, "Hello from claude_code");
     assert_eq!(rows[1].model.as_deref(), Some("Claude Code"));
     let tools: serde_json::Value =
         serde_json::from_str(rows[1].tools_json.as_deref().unwrap()).unwrap();
     assert_eq!(tools[0]["name"], "Read");
+
+    let thread: Vec<serde_json::Value> = server.get("/api/papers/p1/chat").await.json();
+    assert_eq!(events.last().unwrap()["id"], thread[1]["id"]);
 }
 
 #[tokio::test]
 async fn send_error_persists_nothing() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
     let resp = server
         .post("/api/papers/p1/chat")
         .json(&json!({"model_id": "codex", "message": "please fail"}))
         .await;
     resp.assert_status_ok();
-    assert!(resp.text().contains("event: error"));
+    assert_eq!(kinds(&sse_events(&resp.text())).last(), Some(&"error"));
     assert!(xuewen::agent::history::list(&pool, "p1")
         .await
         .unwrap()
@@ -93,16 +110,17 @@ async fn send_error_persists_nothing() {
 
 #[tokio::test]
 async fn send_with_empty_reply_errors_and_persists_nothing() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
     let resp = server
         .post("/api/papers/p1/chat")
         .json(&json!({"model_id": "claude_code", "message": "answer with empty please"}))
         .await;
     resp.assert_status_ok();
-    let body = resp.text();
-    assert!(body.contains("event: error"));
-    assert!(body.contains("empty reply"));
+    let events = sse_events(&resp.text());
+    let last = events.last().unwrap();
+    assert_eq!(last["type"], "error");
+    assert!(last["message"].as_str().unwrap().contains("empty reply"));
     assert!(xuewen::agent::history::list(&pool, "p1")
         .await
         .unwrap()
@@ -111,7 +129,7 @@ async fn send_with_empty_reply_errors_and_persists_nothing() {
 
 #[tokio::test]
 async fn send_validates_model_message_paper_and_config() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let plain = TestServer::new(support::router(pool.clone(), root.clone()));
     // Chat errors carry the API-wide `{"error": string}` body — the shape
     // the frontend's one extraction point (errorFromResponse) parses.
@@ -160,7 +178,7 @@ async fn send_validates_model_message_paper_and_config() {
 
 #[tokio::test]
 async fn history_roundtrip_and_clear() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     xuewen::agent::history::insert_exchange(
         &pool,
         "p1",

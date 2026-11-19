@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,9 +7,23 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::db::ChangeWatch;
+use crate::library::model::Paper;
+use crate::pdf::Pages;
+use crate::search::planner::VectorWork;
+use crate::search::store::{ErrorTier, VectorsDone};
 use crate::search::vector::{OpenError, OpenMode};
 use crate::search::{chunker, fts, planner, store, vector, SearchService, Semantic};
 use crate::tasks::Tasks;
+
+/// Docs staged per Tantivy commit: few enough segments for a rebuild, yet a
+/// long sweep's progress still shows up in searches as it goes.
+const FTS_BATCH: usize = 64;
+/// How often a loop whose locks another process holds tries them again.
+const CLAIM_RETRY: Duration = Duration::from_secs(2);
+/// The loop sweeps on every library change and backoff deadline; this only
+/// bounds how long a missed signal could go unnoticed.
+const IDLE_SWEEP: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Default)]
 pub struct SweepSummary {
@@ -16,6 +31,8 @@ pub struct SweepSummary {
     pub(crate) deindexed: usize,
     pub failed: usize,
     pub(crate) vectors_touched: usize,
+    /// When the earliest backed-off work falls due.
+    pub(crate) retry_at: Option<DateTime<Utc>>,
 }
 
 impl SweepSummary {
@@ -64,17 +81,13 @@ pub(crate) enum CatchUp {
     Skipped(Skipped),
 }
 
-/// How long an indexer owner waits for the writer at startup: long enough
-/// to outlast a CLI command's catch-up sweep that happens to overlap it.
-pub(crate) const CLAIM_WAIT: Duration = Duration::from_secs(10);
-
 /// Drop and re-derive the search indexes from SQLite + PDFs (`xuewen index
-/// rebuild`). Nothing is wiped until both indexes are known to be ours:
-/// `probe_writable` refuses a Tantivy index another process is writing, and
-/// the vector store's lock is taken (and, for a vectors rebuild, the store
-/// recreated under it) before the Tantivy directory goes. `SearchService::open`
-/// then detects the fresh Tantivy directory and clears the FTS stamps itself,
-/// a recreated store clears the vector stamps, and one full sweep follows.
+/// rebuild`). Nothing is wiped until both indexes are known to be ours: the
+/// Tantivy writer lock is taken first, and the vector store's lock (and, for
+/// a vectors rebuild, the store recreated under it) before the Tantivy
+/// directory goes. `SearchService::open` then detects the fresh Tantivy
+/// directory and clears the FTS stamps itself, a recreated store clears the
+/// vector stamps, and one full sweep follows.
 pub(crate) async fn rebuild(
     pool: sqlx::SqlitePool,
     search: &crate::config::SearchConfig,
@@ -87,9 +100,11 @@ pub(crate) async fn rebuild(
         RebuildScope::Vectors => (false, true),
         RebuildScope::Both => (true, true),
     };
-    if do_fts {
-        fts::FtsIndex::probe_writable(&search.index_dir)?;
-    }
+    let fts_lock = if do_fts {
+        Some(fts::DirWriterLock::acquire(&search.index_dir)?)
+    } else {
+        None
+    };
     let mode = if do_vectors {
         OpenMode::Recreate
     } else {
@@ -103,18 +118,19 @@ pub(crate) async fn rebuild(
         Semantic::Unavailable(e) if do_vectors => anyhow::bail!("{e}"),
         _ => {}
     }
-    if do_fts {
-        match std::fs::remove_dir_all(&search.index_dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => anyhow::bail!(
-                "could not clear search index dir {}: {e}",
+    if let Some(lock) = fts_lock {
+        if let Err(e) = lock.wipe() {
+            if let Some(store) = semantic.store() {
+                store.close_gracefully().await;
+            }
+            return Err(e.context(format!(
+                "could not clear search index dir {}",
                 search.index_dir.display()
-            ),
+            )));
         }
     }
     let svc = SearchService::open(pool.clone(), search, semantic).await?;
-    if svc.claim_writer(Duration::ZERO).await? == fts::WriterClaim::Busy {
+    if svc.claim_writer().await? == fts::WriterClaim::Busy {
         svc.close_vectors().await;
         anyhow::bail!("{} — stop it and retry", Skipped::IndexWriterHeld);
     }
@@ -138,7 +154,7 @@ pub(crate) async fn catch_up(
     ) {
         return Ok(CatchUp::Skipped(Skipped::VectorStoreHeld));
     }
-    if svc.claim_writer(Duration::ZERO).await? == fts::WriterClaim::Busy {
+    if svc.claim_writer().await? == fts::WriterClaim::Busy {
         return Ok(CatchUp::Skipped(Skipped::IndexWriterHeld));
     }
     Ok(CatchUp::Swept(
@@ -184,48 +200,30 @@ pub(crate) async fn sweep_scoped(
         &rows,
         tier.filter(|_| scope == Scope::Full)
             .map(|t| t.embedder.model()),
-        chrono::Utc::now(),
+        Utc::now(),
     );
-    let mut summary = SweepSummary::default();
-
-    for row in plan
+    let mut sweep = Sweep {
+        svc,
+        summary: SweepSummary {
+            retry_at: plan.retry_at,
+            ..SweepSummary::default()
+        },
+        staged: Vec::new(),
+    };
+    let tombstones: Vec<&store::IndexRow> = plan
         .deindex
         .iter()
-        .filter_map(|id| rows_by_id.get(id.as_str()))
-    {
-        let paper_id = &row.paper_id;
-        match deindex_paper(svc, row).await {
-            Ok(false) => {}
-            Ok(true) => {
-                summary.deindexed += 1;
-                if tier.is_some() {
-                    summary.vectors_touched += 1;
-                }
-            }
-            Err(e) => {
-                tracing::warn!("deindex {paper_id}: {e}");
-                summary.failed += 1;
-            }
-        }
-    }
+        .filter_map(|id| rows_by_id.get(id.as_str()).copied())
+        .collect();
+    sweep.deindex(&tombstones).await;
     for work in &plan.index {
-        match index_paper(svc, library_root, work, scope).await {
-            Ok(true) => {
-                summary.indexed += 1;
-                if work.vectors {
-                    summary.vectors_touched += 1;
-                }
-            }
-            Ok(false) => {}
-            Err(f) => {
-                tracing::warn!("index {}: {}", work.paper_id, f.source);
-                store::record_error(&svc.pool, &work.paper_id, &f.source.to_string(), f.tier)
-                    .await
-                    .ok();
-                summary.failed += 1;
-            }
+        sweep.index(library_root, work, scope).await;
+        if sweep.staged.len() >= FTS_BATCH {
+            sweep.commit_staged().await;
         }
     }
+    sweep.commit_staged().await;
+    let summary = sweep.summary;
     if let Some(tier) = tier.filter(|_| summary.vectors_touched > 0) {
         if let Err(e) = tier.store.optimize().await {
             tracing::warn!("vector store optimize: {e:#}");
@@ -234,104 +232,219 @@ pub(crate) async fn sweep_scoped(
     Ok(summary)
 }
 
-/// A paper-indexing failure, tagged with the tier whose backoff it charges
-/// so a broken embedder never delays healthy FTS work (or vice versa).
-struct IndexFailure {
-    tier: store::ErrorTier,
-    source: anyhow::Error,
+/// A Tantivy doc written but not yet committed.
+struct Staged {
+    paper_id: String,
+    doc_hash: String,
+    /// No other tier of this paper failed in this sweep.
+    clean: bool,
 }
 
-fn charge(tier: store::ErrorTier) -> impl Fn(anyhow::Error) -> IndexFailure {
-    move |source| IndexFailure { tier, source }
+struct Sweep<'a> {
+    svc: &'a SearchService,
+    summary: SweepSummary,
+    staged: Vec<Staged>,
 }
 
-async fn index_paper(
+impl Sweep<'_> {
+    /// Log a failure and charge it to `tier`'s backoff.
+    async fn record(&self, paper_id: &str, tier: ErrorTier, e: &anyhow::Error) {
+        tracing::warn!("index {paper_id}: {e:#}");
+        if let Err(re) =
+            store::record_error(&self.svc.pool, paper_id, &format!("{e:#}"), tier).await
+        {
+            tracing::warn!("index {paper_id}: could not record the failure for backoff: {re:#}");
+        }
+    }
+
+    async fn fail(&mut self, paper_id: &str, tier: ErrorTier, e: anyhow::Error) {
+        self.record(paper_id, tier, &e).await;
+        self.summary.failed += 1;
+    }
+
+    async fn index(&mut self, library_root: &Path, work: &planner::Work, scope: Scope) {
+        let svc = self.svc;
+        let id = work.paper_id.as_str();
+        // Failures before the tiers split (lookup, extraction, chunking)
+        // charge BOTH: the broken precursor serves both tiers, so neither may
+        // hot-loop on it. Without an embedder there is no vector tier to
+        // hot-loop — and a `vec_last_error` written then would never be
+        // cleared, since no vector pass ever runs to clear it — so the charge
+        // narrows to FTS alone. An FTS-only pass narrows it too: it never ran
+        // the vector tier.
+        let pre_tier = if scope == Scope::Full && svc.semantic.tier().is_some() {
+            ErrorTier::Both
+        } else {
+            ErrorTier::Fts
+        };
+        let paper = match crate::library::papers::get(&svc.pool, id).await {
+            Ok(Some(paper)) => paper,
+            Ok(None) => return, // purged since the plan was computed; tombstone next sweep
+            Err(e) => return self.fail(id, pre_tier, e).await,
+        };
+        let body = match derive_body(svc, library_root, &paper, work.reextract).await {
+            Ok(body) => body,
+            Err(e) => return self.fail(id, pre_tier, e).await,
+        };
+
+        let doc_hash = if work.fts {
+            match stage_doc(svc, &paper, &body.chunks).await {
+                Ok(doc_hash) => Some(doc_hash),
+                Err(e) => return self.fail(id, ErrorTier::Fts, e).await,
+            }
+        } else {
+            None
+        };
+        // A re-extracted body that changed has cleared the vector stamp:
+        // re-embed all of it now rather than the summary alone.
+        let vectors = match work.vectors {
+            VectorWork::Summary if body.changed => VectorWork::All,
+            planned => planned,
+        };
+        let clean = match vectors {
+            VectorWork::None => true,
+            vectors => match index_vectors(svc, &paper, &body.chunks, vectors).await {
+                Ok(()) => {
+                    self.summary.vectors_touched += 1;
+                    true
+                }
+                Err(e) => {
+                    self.fail(id, ErrorTier::Vectors, e).await;
+                    false
+                }
+            },
+        };
+        match doc_hash {
+            Some(doc_hash) => self.staged.push(Staged {
+                paper_id: paper.id,
+                doc_hash,
+                clean,
+            }),
+            None if clean => self.summary.indexed += 1,
+            None => {}
+        }
+    }
+
+    /// Commit the staged docs and stamp them. A failed commit rolls every one
+    /// of them back, so each is charged to the FTS backoff.
+    async fn commit_staged(&mut self) {
+        if self.staged.is_empty() {
+            return;
+        }
+        let staged = std::mem::take(&mut self.staged);
+        let stamped = match self.svc.fts_commit().await {
+            Ok(()) => {
+                let docs: Vec<(&str, &str)> = staged
+                    .iter()
+                    .map(|s| (s.paper_id.as_str(), s.doc_hash.as_str()))
+                    .collect();
+                store::mark_fts_done(&self.svc.pool, &docs)
+                    .await
+                    .context("stamping the committed docs")
+            }
+            Err(e) => Err(e.context("committing the full-text index")),
+        };
+        for s in &staged {
+            match &stamped {
+                Ok(()) if s.clean => self.summary.indexed += 1,
+                Ok(()) => {}
+                Err(e) => {
+                    self.record(&s.paper_id, ErrorTier::Fts, e).await;
+                    if s.clean {
+                        self.summary.failed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn deindex(&mut self, tombstones: &[&store::IndexRow]) {
+        let docs: Vec<String> = tombstones
+            .iter()
+            .filter(|r| r.fts_indexed_at.is_some())
+            .map(|r| r.paper_id.clone())
+            .collect();
+        let fts_gone = if docs.is_empty() {
+            true
+        } else {
+            let removed = match self.svc.fts_stage_deletes(docs).await {
+                Ok(()) => self.svc.fts_commit().await,
+                Err(e) => Err(e),
+            };
+            match removed {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("deindex: removing full-text docs: {e:#}");
+                    false
+                }
+            }
+        };
+        for row in tombstones {
+            if !fts_gone && row.fts_indexed_at.is_some() {
+                self.summary.failed += 1; // the row stays for the next sweep
+                continue;
+            }
+            match deindex_paper(self.svc, row).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.summary.deindexed += 1;
+                    if self.svc.semantic.tier().is_some() {
+                        self.summary.vectors_touched += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("deindex {}: {e:#}", row.paper_id);
+                    self.summary.failed += 1;
+                }
+            }
+        }
+    }
+}
+
+/// A paper's body chunks, and whether deriving them changed what was stored.
+struct Body {
+    chunks: Vec<chunker::Chunk>,
+    changed: bool,
+}
+
+/// Deriving the text and writing the Tantivy doc are separate steps: a
+/// metadata or note edit needs the second without the first, and `pdftotext`
+/// is by far the most expensive thing in the sweep.
+async fn derive_body(
     svc: &SearchService,
     library_root: &Path,
-    work: &planner::Work,
-    scope: Scope,
-) -> Result<bool, IndexFailure> {
-    // Failures before the tiers split (lookup, extraction, chunking) charge
-    // BOTH: the broken precursor serves both tiers, so neither may hot-loop
-    // on it. Without an embedder there is no vector tier to hot-loop — and a
-    // `vec_last_error` written then would never be cleared, since no vector
-    // pass ever runs to clear it — so the charge narrows to FTS alone. An
-    // FTS-only pass narrows it too: it never ran the vector tier.
-    let pre_tier = if scope == Scope::Full && svc.semantic.tier().is_some() {
-        store::ErrorTier::Both
-    } else {
-        store::ErrorTier::Fts
-    };
-    let Some(paper) = crate::library::papers::get(&svc.pool, &work.paper_id)
-        .await
-        .map_err(charge(pre_tier))?
-    else {
-        return Ok(false); // purged since the plan was computed; tombstone next sweep
-    };
-
-    let chunks = derive_chunks(svc, library_root, &paper, work.reextract)
-        .await
-        .map_err(charge(pre_tier))?;
-
-    if work.fts {
-        index_fts(svc, &paper, &chunks)
-            .await
-            .map_err(charge(store::ErrorTier::Fts))?;
-    }
-    if work.vectors {
-        index_vectors(svc, &paper, &chunks)
-            .await
-            .map_err(charge(store::ErrorTier::Vectors))?;
-    }
-    Ok(true)
-}
-
-/// Deriving the text and writing the Tantivy doc are separate steps: a note
-/// edit needs the second without the first, and `pdftotext` is by far the
-/// most expensive thing in the sweep.
-async fn derive_chunks(
-    svc: &SearchService,
-    library_root: &Path,
-    paper: &crate::library::model::Paper,
+    paper: &Paper,
     reextract: bool,
-) -> Result<Vec<chunker::Chunk>> {
+) -> Result<Body> {
     if !reextract {
-        return store::chunks_for_paper(&svc.pool, &paper.id).await;
+        return Ok(Body {
+            chunks: store::body_chunks(&svc.pool, &paper.id).await?,
+            changed: false,
+        });
     }
     let pdf_path = library_root.join(&paper.rel_path);
-    let text = tokio::task::spawn_blocking(move || crate::pdf::extract_text_all(&pdf_path))
-        .await
-        .context("pdftotext task panicked")??;
-    let chunks = chunker::chunk_paper(
-        paper.meta.title.as_deref(),
-        paper.meta.abstract_text.as_deref(),
-        &text,
-    );
-    store::replace_chunks(
-        &svc.pool,
-        &paper.id,
-        &chunks,
-        &paper.content_hash,
-        &store::meta_hash(paper),
-    )
-    .await?;
-    Ok(chunks)
+    let title = paper.meta.title.clone();
+    let text = tokio::task::spawn_blocking(move || {
+        crate::pdf::paper_text(&pdf_path, title.as_deref(), Pages::All)
+    })
+    .await
+    .context("pdftotext task panicked")??;
+    let chunks = chunker::body_chunks(&text);
+    let changed = store::replace_body(&svc.pool, &paper.id, &chunks, &paper.content_hash).await?;
+    Ok(Body { chunks, changed })
 }
 
-async fn index_fts(
-    svc: &SearchService,
-    paper: &crate::library::model::Paper,
-    chunks: &[chunker::Chunk],
-) -> Result<()> {
-    let body: String = chunks
+/// Stage the paper's Tantivy doc; returns the `doc_hash` to stamp once it is
+/// committed.
+async fn stage_doc(svc: &SearchService, paper: &Paper, body: &[chunker::Chunk]) -> Result<String> {
+    let body: String = body
         .iter()
-        .filter(|c| c.seq >= 1)
         .map(|c| c.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
     let notes = crate::annotations::store::notes_blob(&svc.pool, &paper.id).await?;
-    let notes_hash = store::notes_hash(&notes);
-    svc.fts_upsert(fts::PaperDoc {
+    let doc_hash = store::doc_hash(paper, &notes);
+    svc.fts_stage_upsert(fts::PaperDoc {
         id: paper.id.clone(),
         title: paper.meta.title.clone().unwrap_or_default(),
         authors: paper.meta.authors.0.join(" ; "),
@@ -341,126 +454,211 @@ async fn index_fts(
         notes,
     })
     .await?;
-    store::mark_fts_done(&svc.pool, &paper.id, &notes_hash).await?;
-    Ok(())
+    Ok(doc_hash)
 }
 
 async fn index_vectors(
     svc: &SearchService,
-    paper: &crate::library::model::Paper,
-    chunks: &[chunker::Chunk],
+    paper: &Paper,
+    body: &[chunker::Chunk],
+    work: VectorWork,
 ) -> Result<()> {
     let Some(tier) = svc.semantic.tier() else {
         return Ok(()); // planner only schedules vectors when configured
     };
-    if !chunks.is_empty() {
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let vectors = tier.embedder.embed(&texts).await?;
-        let points: Vec<vector::ChunkPoint> = chunks
-            .iter()
-            .zip(vectors)
-            .map(|(c, v)| vector::ChunkPoint {
-                paper_id: paper.id.clone(),
-                seq: c.seq,
-                page: c.page,
-                vector: v,
-            })
-            .collect();
-        tier.store.upsert(points).await?;
-    }
-    store::mark_vectors_done(&svc.pool, &paper.id, tier.embedder.model()).await?;
-    Ok(())
+    let summary = chunker::summary_text(
+        paper.meta.title.as_deref(),
+        paper.meta.abstract_text.as_deref(),
+    );
+    let point = |seq: i64, page: Option<i64>, vector: Vec<f32>| vector::ChunkPoint {
+        paper_id: paper.id.clone(),
+        seq,
+        page,
+        vector,
+    };
+    let done = match work {
+        VectorWork::None => return Ok(()),
+        VectorWork::Summary => {
+            // Unchanged text keeps its point, so a row whose stamp predates
+            // `summary_hash` costs no embedding call.
+            if store::embedded_summary(&svc.pool, &paper.id).await? != summary {
+                let point = match &summary {
+                    Some(text) => {
+                        let vector = tier.embedder.embed(std::slice::from_ref(text)).await?;
+                        vector.into_iter().next().map(|v| point(0, None, v))
+                    }
+                    None => None,
+                };
+                tier.store.replace_summary(&paper.id, point).await?;
+            }
+            VectorsDone::Summary
+        }
+        VectorWork::All => {
+            let chunks: Vec<(i64, Option<i64>, &str)> = summary
+                .iter()
+                .map(|s| (0, None, s.as_str()))
+                .chain(body.iter().map(|c| (c.seq, c.page, c.text.as_str())))
+                .collect();
+            let points = if chunks.is_empty() {
+                Vec::new()
+            } else {
+                let texts: Vec<String> = chunks.iter().map(|(_, _, t)| t.to_string()).collect();
+                let vectors = tier.embedder.embed(&texts).await?;
+                chunks
+                    .iter()
+                    .zip(vectors)
+                    .map(|(&(seq, page, _), v)| point(seq, page, v))
+                    .collect()
+            };
+            tier.store.replace_paper(&paper.id, points).await?;
+            VectorsDone::All {
+                model: tier.embedder.model(),
+            }
+        }
+    };
+    store::mark_vectors_done(&svc.pool, &paper.id, summary.as_deref(), done).await
 }
 
-/// `false` when nothing was left for this process to do.
+/// The tombstone's Tantivy doc is already gone; this deletes its points and
+/// row. `false` when nothing was left for this process to do.
 async fn deindex_paper(svc: &SearchService, row: &store::IndexRow) -> Result<bool> {
     let paper_id = row.paper_id.as_str();
-    let tier = svc.semantic.tier();
-    if tier.is_none() && row.embed_model.is_some() {
-        // Its points may sit in a store this process cannot open (no API key
-        // in this environment, or an unusable store). The row is the only
-        // record that they need deleting, so it stays for a process that can;
-        // only the Tantivy doc goes, once.
-        if row.fts_indexed_at.is_none() {
-            return Ok(false);
+    match svc.semantic.store() {
+        None if row.embed_model.is_some() => {
+            // Its points sit in a store this process cannot open (no API key
+            // in this environment, or an unusable store). The row is the only
+            // record that they need deleting, so it stays for a process that
+            // can.
+            if row.fts_indexed_at.is_none() {
+                return Ok(false);
+            }
+            store::clear_fts_stamp(&svc.pool, paper_id).await?;
         }
-        svc.fts_delete(paper_id.to_string()).await?;
-        store::clear_fts_stamp(&svc.pool, paper_id).await?;
-        return Ok(true);
-    }
-    svc.fts_delete(paper_id.to_string()).await?;
-    if let Some(tier) = tier {
-        // Vector cleanup only matters when vectors were ever written; a failing
-        // store here must not wedge the tombstone forever.
-        if let Err(e) = tier.store.delete_paper(paper_id).await {
-            tracing::warn!(
-                "vector delete {paper_id}: {e} (index row removed anyway; \
-                            orphan points are overwritten if the paper returns)"
-            );
+        None => store::remove_index_entry(&svc.pool, paper_id).await?,
+        Some(vectors) => {
+            if let Err(e) = vectors.delete_paper(paper_id).await {
+                // The row is the only record of the points: it stays, and the
+                // vector backoff schedules the retry.
+                if row.fts_indexed_at.is_some() {
+                    store::clear_fts_stamp(&svc.pool, paper_id).await?;
+                }
+                store::record_error(&svc.pool, paper_id, &format!("{e:#}"), ErrorTier::Vectors)
+                    .await?;
+                return Err(e.context("deleting its vectors"));
+            }
+            store::remove_index_entry(&svc.pool, paper_id).await?;
         }
     }
-    store::remove_index_entry(&svc.pool, paper_id).await?;
     Ok(true)
 }
 
-/// Start the indexer loop, but only once this process holds the Tantivy
-/// writer: "an indexer loop runs" and "the writer lock is held" then mean the
-/// same thing, which is what lets a CLI command take the lock as proof that
-/// nobody else is indexing. On `Busy` no loop starts.
-pub(crate) async fn spawn(
-    tasks: &Tasks,
-    svc: Arc<SearchService>,
-    library_root: PathBuf,
-) -> Result<fts::WriterClaim> {
-    spawn_claiming(tasks, svc, library_root, CLAIM_WAIT).await
+/// Run the indexer loop in the background. It sweeps only while this process
+/// holds the Tantivy writer — "a sweep runs" and "the writer lock is held"
+/// mean the same thing, which is what lets a CLI command take the lock as
+/// proof that nobody else is indexing — and waits for the lock (and for a
+/// vector store another process held at startup) for as long as it takes.
+/// A free writer is claimed before this returns, so a started server owns it
+/// before any library change can need it.
+pub(crate) async fn spawn(tasks: &Tasks, svc: Arc<SearchService>, library_root: PathBuf) {
+    let claim = svc.claim_writer().await;
+    tasks.spawn(run(svc, library_root, claim, tasks.token()));
 }
 
-async fn spawn_claiming(
-    tasks: &Tasks,
-    svc: Arc<SearchService>,
-    library_root: PathBuf,
-    wait: Duration,
-) -> Result<fts::WriterClaim> {
-    let claim = svc.claim_writer(wait).await?;
-    match claim {
-        fts::WriterClaim::Claimed => tasks.spawn(run(
-            svc,
-            library_root,
-            Duration::from_secs(30),
-            tasks.token(),
-        )),
-        fts::WriterClaim::Busy => tracing::warn!(
-            "search indexing disabled: the full-text index is held by another xuewen process"
-        ),
-    }
-    Ok(claim)
-}
-
-/// Indexer loop: sweep, then sleep until woken or the tick elapses.
 async fn run(
     svc: Arc<SearchService>,
     library_root: PathBuf,
-    tick: Duration,
+    claim: Result<fts::WriterClaim>,
     cancel: CancellationToken,
 ) {
-    loop {
-        match sweep(&svc, &library_root).await {
-            Ok(s) if !s.is_empty() => {
-                tracing::info!(
-                    "search index sweep: {} indexed, {} removed, {} failed",
-                    s.indexed,
-                    s.deindexed,
-                    s.failed
-                );
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("search index sweep failed: {e}"),
+    if !claim_writer_when_free(&svc, claim, &cancel).await {
+        return;
+    }
+    let mut watch = match ChangeWatch::open(&svc.pool).await {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!("search index: not watching for other processes' changes: {e:#}");
+            None
         }
+    };
+    loop {
+        let store_waiting = svc.semantic.acquire_waiting(&svc.pool).await;
+        if let Some(w) = &mut watch {
+            if let Err(e) = w.mark_seen().await {
+                tracing::warn!("search index: reading the database version: {e:#}");
+            }
+        }
+        let retry_at = match sweep(&svc, &library_root).await {
+            Ok(s) => {
+                if !s.is_empty() {
+                    tracing::info!(
+                        "search index sweep: {} indexed, {} removed, {} failed",
+                        s.indexed,
+                        s.deindexed,
+                        s.failed
+                    );
+                }
+                s.retry_at
+            }
+            Err(e) => {
+                tracing::warn!("search index sweep failed: {e:#}");
+                None
+            }
+        };
+        let mut idle = retry_at.map_or(IDLE_SWEEP, |at| {
+            (at - Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO)
+                .min(IDLE_SWEEP)
+        });
+        if store_waiting {
+            idle = idle.min(CLAIM_RETRY);
+        }
+        let changed = async {
+            match &mut watch {
+                Some(w) => w.changed().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             () = cancel.cancelled() => return,
-            () = svc.wait_work(tick) => {}
+            () = svc.notify.notified() => {}
+            () = changed => {}
+            () = tokio::time::sleep(idle) => {}
         }
+    }
+}
+
+/// `false` when cancelled first.
+async fn claim_writer_when_free(
+    svc: &SearchService,
+    mut claim: Result<fts::WriterClaim>,
+    cancel: &CancellationToken,
+) -> bool {
+    let mut waiting = false;
+    loop {
+        match claim {
+            Ok(fts::WriterClaim::Claimed) => {
+                if waiting {
+                    tracing::info!("search indexing started: the full-text index was released");
+                }
+                return true;
+            }
+            Ok(fts::WriterClaim::Busy) if !waiting => {
+                tracing::warn!("search indexing waits: {}", Skipped::IndexWriterHeld);
+            }
+            Err(e) if !waiting => {
+                tracing::warn!("search indexing waits: taking the full-text index writer: {e:#}");
+            }
+            Ok(fts::WriterClaim::Busy) | Err(_) => {}
+        }
+        waiting = true;
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return false,
+            () = tokio::time::sleep(CLAIM_RETRY) => {}
+        }
+        claim = svc.claim_writer().await;
     }
 }
 
@@ -469,34 +667,11 @@ mod tests {
     use super::*;
     use crate::library::model::{Authors, Paper, PaperMeta, PaperStatus};
     use crate::search::{fts, store, vector, SearchService};
-    use printpdf::*;
+    use crate::testutil::write_pdf;
     use serde_json::json;
     use std::path::Path;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn write_pdf(path: &Path, line: &str) {
-        let mut doc = PdfDocument::new("t");
-        let ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(12.0),
-            },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(15.0), Mm(280.0)),
-            },
-            Op::ShowText {
-                items: vec![TextItem::Text(line.to_string())],
-            },
-            Op::EndTextSection,
-        ];
-        let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
-        let bytes = doc
-            .with_pages(vec![page])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(path, bytes).unwrap();
-    }
 
     struct Fixture {
         svc: std::sync::Arc<SearchService>,
@@ -514,9 +689,14 @@ mod tests {
         let (fts_idx, _) = fts::FtsIndex::open(idx_dir.path()).unwrap();
         let lib_dir = tempfile::tempdir().unwrap();
         let library_root = lib_dir.path().to_path_buf();
-        let dirs = vec![db_dir, idx_dir, lib_dir];
+        let mut dirs = vec![db_dir, idx_dir, lib_dir];
         let semantic = match server {
-            Some(s) => Some(crate::testutil::tier(&format!("{}/v1", s.uri()), Vec::new()).await),
+            Some(s) => {
+                let (dir, tier) =
+                    crate::testutil::tier(&format!("{}/v1", s.uri()), Vec::new()).await;
+                dirs.push(dir);
+                Some(tier)
+            }
             None => None,
         };
         let svc = SearchService::open_with(pool, fts_idx, semantic);
@@ -566,7 +746,7 @@ mod tests {
         body_line: &str,
     ) {
         let rel = format!("{id}.pdf");
-        write_pdf(&library_root.join(&rel), body_line);
+        write_pdf(&library_root.join(&rel), &[body_line]);
         let p = Paper {
             id: id.into(),
             content_hash: format!("hash-{id}"),
@@ -641,7 +821,7 @@ mod tests {
         let hits = f
             .svc
             .fts
-            .search("dictionaries", &fts::FieldSel::all(), 10, None)
+            .search("dictionaries", &[], &fts::FieldSel::all(), 10, None)
             .unwrap();
         assert_eq!(hits.len(), 1, "body text searchable after sweep");
         let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
@@ -684,7 +864,7 @@ mod tests {
         assert!(f
             .svc
             .fts
-            .search("bisimulation", &fts::FieldSel::all(), 10, None)
+            .search("bisimulation", &[], &fts::FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
 
@@ -699,14 +879,18 @@ mod tests {
 
         let mut sel = fts::FieldSel::none();
         sel.notes = true;
-        let hits = f.svc.fts.search("bisimulation", &sel, 10, None).unwrap();
+        let hits = f
+            .svc
+            .fts
+            .search("bisimulation", &[], &sel, 10, None)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].paper_id, "p1");
         // The body survived the rewrite — it came from the stored chunks.
         assert_eq!(
             f.svc
                 .fts
-                .search("body", &fts::FieldSel::all(), 10, None)
+                .search("body", &[], &fts::FieldSel::all(), 10, None)
                 .unwrap()
                 .len(),
             1
@@ -804,7 +988,7 @@ mod tests {
         assert_eq!(sweep(&keyless, &f.library_root).await.unwrap().deindexed, 1);
         assert!(keyless
             .fts
-            .search("Fuzzing", &fts::FieldSel::all(), 10, None)
+            .search("Fuzzing", &[], &fts::FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
         let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
@@ -882,30 +1066,183 @@ mod tests {
         );
     }
 
+    async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while !done().await {
+            assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn fts_indexed(svc: &SearchService) -> i64 {
+        svc.status().await.unwrap().fts.indexed
+    }
+
     #[tokio::test]
-    async fn spawn_holds_the_writer_and_refuses_to_start_beside_a_holder() {
+    async fn the_loop_waits_for_a_held_writer_then_follows_every_change() {
         let f = fixture(None).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        let (holder, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
+        holder.claim_writer().unwrap();
+
         let tasks = Tasks::new();
-        let claim = spawn(&tasks, f.svc.clone(), f.library_root.clone())
-            .await
-            .unwrap();
-        assert_eq!(claim, fts::WriterClaim::Claimed);
+        spawn(&tasks, f.svc.clone(), f.library_root.clone()).await;
+        tokio::time::sleep(CLAIM_RETRY + Duration::from_millis(500)).await;
+        assert_eq!(fts_indexed(&f.svc).await, 0, "no sweep without the writer");
+
+        drop(holder);
+        eventually("the loop takes the writer once released", async || {
+            fts_indexed(&f.svc).await == 1
+        })
+        .await;
         let (other, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
         assert_eq!(other.claim_writer().unwrap(), fts::WriterClaim::Busy);
-        tasks.shutdown(Duration::from_secs(5)).await;
 
-        let g = fixture(None).await;
-        let (holder, _) = fts::FtsIndex::open(g._dirs[1].path()).unwrap();
-        holder.claim_writer().unwrap();
-        let claim = spawn_claiming(
-            &tasks,
-            g.svc.clone(),
-            g.library_root.clone(),
-            Duration::ZERO,
-        )
+        // A paper added through another connection, the way a CLI command
+        // beside the server adds one, with nobody calling `wake`.
+        let elsewhere = crate::db::connect(&format!(
+            "sqlite:{}",
+            f._dirs[0].path().join("t.db").display()
+        ))
         .await
         .unwrap();
-        assert_eq!(claim, fts::WriterClaim::Busy);
+        insert_paper_with_pdf_at(&elsewhere, &f.library_root, "p2", "Sorting", "words").await;
+        eventually("a commit by another process is noticed", async || {
+            fts_indexed(&f.svc).await == 2
+        })
+        .await;
+        tasks.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn a_rechunk_with_fewer_chunks_leaves_no_stale_points() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "x").await;
+        write_pdf(&f.library_root.join("p1.pdf"), &["page one", "page two"]);
+        sweep_in(&f).await.unwrap();
+        let mut hits = vector_hits(f.svc.semantic.store().unwrap()).await;
+        hits.sort();
+        assert_eq!(hits, [("p1".into(), 0), ("p1".into(), 1), ("p1".into(), 2)]);
+
+        write_pdf(&f.library_root.join("p1.pdf"), &["one page now"]);
+        sqlx::query("UPDATE papers SET content_hash = 'hash-p1-v2' WHERE id = 'p1'")
+            .execute(&f.svc.pool)
+            .await
+            .unwrap();
+        assert_eq!(sweep_in(&f).await.unwrap().indexed, 1);
+        let mut hits = vector_hits(f.svc.semantic.store().unwrap()).await;
+        hits.sort();
+        assert_eq!(hits, [("p1".into(), 0), ("p1".into(), 1)]);
+    }
+
+    async fn embedded_texts(server: &MockServer) -> Vec<Vec<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                serde_json::from_value(body["input"].clone()).unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn metadata_edits_redo_only_what_reads_the_field() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        sweep_in(&f).await.unwrap();
+        assert_eq!(embedded_texts(&server).await.len(), 1);
+        // A re-extract would now fail: every pass below reuses stored chunks.
+        std::fs::remove_file(f.library_root.join("p1.pdf")).unwrap();
+        let edit = async |sql: &'static str| {
+            sqlx::query(sql).execute(&f.svc.pool).await.unwrap();
+            let s = sweep_in(&f).await.unwrap();
+            assert_eq!(s.failed, 0, "{sql}");
+            s
+        };
+
+        // Year feeds no index.
+        let s = edit("UPDATE papers SET year = 1999 WHERE id = 'p1'").await;
+        assert!(s.is_empty());
+
+        // Venue is in the Tantivy doc only.
+        let s = edit("UPDATE papers SET venue = 'Usenix Security' WHERE id = 'p1'").await;
+        assert_eq!((s.indexed, s.vectors_touched), (1, 0));
+        assert_eq!(embedded_texts(&server).await.len(), 1);
+        assert_eq!(
+            f.svc
+                .fts
+                .search("venue:usenix", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A title edit re-embeds the seq-0 chunk alone.
+        let s = edit("UPDATE papers SET title = 'Taming Firmware' WHERE id = 'p1'").await;
+        assert_eq!((s.indexed, s.vectors_touched), (1, 1));
+        let texts = embedded_texts(&server).await;
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[1], ["Taming Firmware\nAn abstract."]);
+        assert_eq!(
+            store::embedded_summary(&f.svc.pool, "p1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Taming Firmware\nAn abstract.")
+        );
+        assert_eq!(
+            f.svc
+                .fts
+                .search("taming", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(sweep_in(&f).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_summary_stamp_from_before_the_split_costs_no_embedding() {
+        let server = echo_embeddings().await;
+        let f = fixture(Some(&server)).await;
+        insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
+        sweep_in(&f).await.unwrap();
+        // What migration 0026 leaves behind.
+        sqlx::query("UPDATE search_index SET summary_hash = '', doc_hash = ''")
+            .execute(&f.svc.pool)
+            .await
+            .unwrap();
+        std::fs::remove_file(f.library_root.join("p1.pdf")).unwrap();
+
+        let s = sweep_in(&f).await.unwrap();
+        assert_eq!((s.indexed, s.failed), (1, 0));
+        assert_eq!(
+            embedded_texts(&server).await.len(),
+            1,
+            "no second embedding"
+        );
+        assert!(sweep_in(&f).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_sweep_commits_its_docs_in_batches() {
+        let f = fixture(None).await;
+        for i in 0..5 {
+            insert_paper_with_pdf(&f, &format!("p{i}"), "Fuzzing Firmware", "body words").await;
+        }
+        let before = f.svc.fts.commits();
+        assert_eq!(sweep_in(&f).await.unwrap().indexed, 5);
+        assert_eq!(
+            f.svc.fts.commits() - before,
+            1,
+            "one commit, not one per paper"
+        );
+        assert_eq!(f.svc.status().await.unwrap().fts.indexed, 5);
     }
 
     #[tokio::test]
@@ -962,7 +1299,7 @@ mod tests {
         assert_eq!(
             f.svc
                 .fts
-                .search("bisimulation", &sel, 10, None)
+                .search("bisimulation", &[], &sel, 10, None)
                 .unwrap()
                 .len(),
             1
@@ -1056,7 +1393,7 @@ mod tests {
         assert_eq!(
             f.svc
                 .fts
-                .search("fuzzing", &fts::FieldSel::all(), 10, None)
+                .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
                 .unwrap()
                 .len(),
             1
@@ -1070,11 +1407,11 @@ mod tests {
         assert!(f
             .svc
             .fts
-            .search("fuzzing", &fts::FieldSel::all(), 10, None)
+            .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
             .unwrap()
             .is_empty());
         assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
-        assert!(store::chunks_for_paper(&f.svc.pool, "p1")
+        assert!(store::body_chunks(&f.svc.pool, "p1")
             .await
             .unwrap()
             .is_empty());
@@ -1100,7 +1437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vector_delete_failure_does_not_wedge_tombstone() {
+    async fn a_failed_vector_delete_keeps_the_tombstone_until_a_retry_succeeds() {
         let server = echo_embeddings().await;
         let f = fixture(Some(&server)).await;
         insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "body words").await;
@@ -1111,16 +1448,47 @@ mod tests {
             .await
             .unwrap();
         let s = sweep_in(&f).await.unwrap();
-        assert_eq!(
-            s.deindexed, 1,
-            "tombstone cleared despite the store failing"
-        );
-        assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
+        assert_eq!((s.deindexed, s.failed), (0, 1));
         assert!(f
             .svc
             .fts
-            .search("fuzzing", &fts::FieldSel::all(), 10, None)
+            .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
             .unwrap()
+            .is_empty());
+        let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
+        assert_eq!(rows.len(), 1, "the row is the only record of the points");
+        assert!(rows[0].fts_indexed_at.is_none());
+        assert_eq!(rows[0].vec_attempts, 1);
+        assert!(sweep_in(&f).await.unwrap().is_empty(), "backed off");
+
+        // Once the backoff elapses, a process with a working store finishes.
+        f.svc.release_writer();
+        sqlx::query("UPDATE search_index SET vec_last_attempt_at = '2000-01-01T00:00:00Z'")
+            .execute(&f.svc.pool)
+            .await
+            .unwrap();
+        let vector_dir = f._dirs[3].path().join("vectors");
+        let (vectors, _) = vector::VectorStore::open(&vector_dir, 4, OpenMode::LoadOrCreate)
+            .await
+            .unwrap();
+        assert!(!vector_hits(&vectors).await.is_empty());
+        let (fts_idx, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
+        let retry = SearchService::open_with(
+            f.svc.pool.clone(),
+            fts_idx,
+            Some(crate::search::SemanticTier {
+                embedder: crate::search::embedder::Embedder::for_tests(
+                    &format!("{}/v1", server.uri()),
+                    "m1",
+                    4,
+                ),
+                store: vectors,
+            }),
+        );
+        assert_eq!(sweep(&retry, &f.library_root).await.unwrap().deindexed, 1);
+        assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
+        assert!(vector_hits(retry.semantic.store().unwrap())
+            .await
             .is_empty());
     }
 

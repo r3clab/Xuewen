@@ -202,6 +202,101 @@ describe('fromWire', () => {
       });
     });
 
+    // Whole payloads exactly as the 2.14 reader stored them: the selection
+    // handler's object over the highlight tool's defaults (with the palette
+    // color pushed into both color fields), and the comment tool's object
+    // with its 24pt icon box — stamped with the configured author, `created`
+    // serialized by JSON, keys alphabetized by the server.
+    it('redraws a real two-line 2.x highlight, one quad per line', () => {
+      const back = fromWire({
+        paper_id: 'p1',
+        id: '6f1c2d3e-8a9b-4c5d-9e0f-1a2b3c4d5e6f',
+        page_index: 3,
+        kind: 'highlight',
+        color: 'green',
+        quoted_text: 'a sentence that wraps onto the next line',
+        note: 'worth revisiting',
+        payload: {
+          annotation: {
+            author: 'Xuewen',
+            blendMode: 1,
+            color: '#4fa96b',
+            contents: 'worth revisiting',
+            created: '2026-08-14T09:12:44.512Z',
+            custom: { text: 'a sentence that wraps onto the next line' },
+            id: '6f1c2d3e-8a9b-4c5d-9e0f-1a2b3c4d5e6f',
+            opacity: 1,
+            pageIndex: 3,
+            rect: { origin: { x: 72.5, y: 140.25 }, size: { width: 210.5, height: 24.75 } },
+            segmentRects: [
+              { origin: { x: 150, y: 140.25 }, size: { width: 133, height: 11.5 } },
+              { origin: { x: 72.5, y: 153.5 }, size: { width: 98.25, height: 11.5 } },
+            ],
+            strokeColor: '#4fa96b',
+            type: 9,
+          },
+        },
+        created_at: '2026-08-14T09:12:44Z',
+        updated_at: '2026-08-14T09:13:02Z',
+      });
+      expect(back).toEqual({
+        kind: 'legacy',
+        pageIndex: 3,
+        draft: {
+          subtype: 'highlight',
+          quadPoints: [
+            { upperLeft: { x: 150, y: 140.25 }, upperRight: { x: 283, y: 140.25 }, lowerLeft: { x: 150, y: 151.75 }, lowerRight: { x: 283, y: 151.75 } },
+            { upperLeft: { x: 72.5, y: 153.5 }, upperRight: { x: 170.75, y: 153.5 }, lowerLeft: { x: 72.5, y: 165 }, lowerRight: { x: 170.75, y: 165 } },
+          ],
+          color: colorHex('green'),
+          blendMode: 'multiply',
+          nm: '6f1c2d3e-8a9b-4c5d-9e0f-1a2b3c4d5e6f',
+          contents: 'worth revisiting',
+        },
+      });
+    });
+
+    it('redraws a real 2.x sticky note at its icon box', () => {
+      const back = fromWire({
+        paper_id: 'p1',
+        id: '0b9e8d7c-6b5a-4f3e-8d2c-1b0a9f8e7d6c',
+        page_index: 0,
+        kind: 'text_comment',
+        color: 'rose',
+        quoted_text: null,
+        note: 'check the threat model',
+        payload: {
+          annotation: {
+            author: 'Xuewen',
+            contents: 'check the threat model',
+            created: '2026-08-14T09:20:01.007Z',
+            flags: ['print', 'noRotate', 'noZoom'],
+            id: '0b9e8d7c-6b5a-4f3e-8d2c-1b0a9f8e7d6c',
+            name: 0,
+            opacity: 1,
+            pageIndex: 0,
+            rect: { origin: { x: 288, y: 388 }, size: { width: 24, height: 24 } },
+            strokeColor: '#e0607e',
+            type: 1,
+          },
+        },
+        created_at: '2026-08-14T09:20:01Z',
+        updated_at: '2026-08-14T09:20:09Z',
+      });
+      expect(back).toEqual({
+        kind: 'legacy',
+        pageIndex: 0,
+        draft: {
+          subtype: 'text',
+          rect: { x: 288, y: 388, width: 24, height: 24 },
+          color: colorHex('rose'),
+          icon: 'comment',
+          nm: '0b9e8d7c-6b5a-4f3e-8d2c-1b0a9f8e7d6c',
+          contents: 'check the threat model',
+        },
+      });
+    });
+
     it('is null without geometry to redraw, or for a subtype it never stored', () => {
       expect(fromWire(legacyRow({ type: 9, rect: LEGACY_RECT }))).toBeNull();
       expect(fromWire(legacyRow({ type: 9, segmentRects: [LEGACY_RECT] }))).toBeNull();

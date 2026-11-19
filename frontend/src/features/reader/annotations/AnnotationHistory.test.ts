@@ -16,13 +16,14 @@ const scope = {
   canRedo: () => state.canRedo,
 };
 
+let unregister: () => void;
 beforeEach(() => {
   vi.clearAllMocks();
   state.canUndo = false;
   state.canRedo = false;
   // The buttons act through the shared commands, the same path ⌘Z takes, so
   // the test has to stand in for the registration PdfDeck does in the app.
-  registerAnnotationCommands(
+  unregister = registerAnnotationCommands(
     createAnnotationCommands({
       marks: () => ({ selection: { getSelected: () => [], clear: () => {}, delete: async () => {} } }),
       history: () => scope,
@@ -31,7 +32,7 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => registerAnnotationCommands(null));
+afterEach(() => unregister());
 
 const undoBtn = () => screen.getByRole('button', { name: /undo annotation/i });
 const redoBtn = () => screen.getByRole('button', { name: /redo annotation/i });

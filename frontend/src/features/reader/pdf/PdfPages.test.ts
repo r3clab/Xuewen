@@ -1,19 +1,6 @@
 import { render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// svelte/motion (Spring) constructs a prefers-reduced-motion MediaQuery at
-// module load, and jsdom has no matchMedia — hoisted so the stub exists before
-// PdfPages' imports run.
-vi.hoisted(() => {
-  window.matchMedia ??= ((query: string) =>
-    ({
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    }) as unknown as MediaQueryList) as typeof window.matchMedia;
-});
-
 // The selection→translate wiring under test is all window-level (the settled-
 // selection feed + the svelte:window pointer handlers), so PdfPages only needs
 // a document scope that renders nothing (the document never opens).
@@ -60,6 +47,7 @@ async function resolvePending(text: string): Promise<void> {
 
 const RANGE = { start: {}, end: {} };
 
+let unregisterCopier: () => void;
 beforeEach(() => {
   vi.useFakeTimers();
   handlers = {};
@@ -80,14 +68,14 @@ beforeEach(() => {
       return () => {};
     },
   });
-  registerPdfCopy(copier);
+  unregisterCopier = registerPdfCopy(copier);
   appSettings.translate = { enabled: true, trigger: 'auto' };
   requestTranslate.mockClear();
 });
 
 afterEach(() => {
   copier.destroy();
-  registerPdfCopy(null);
+  unregisterCopier();
   appSettings.translate = { enabled: false };
   vi.useRealTimers();
 });

@@ -1,4 +1,5 @@
-import { tick } from 'svelte';
+import { flushSync } from 'svelte';
+import { FocusTarget } from '$shared/ui/focus';
 
 /// Reader UI state. The find bar is per-open-paper (keyed by documentId) so the
 /// global keymap reaches the active tab's bar while hidden tabs keep their own.
@@ -53,21 +54,29 @@ export function toggleAnnotationsPanel(): void {
   else setPanelView('annotations');
 }
 
-/// ⌘F: open (or refocus) a document's find bar. Focus waits a tick so a
-/// just-mounted bar exists; `select()` keeps a previous query editable.
+const findInputs = new Map<string, FocusTarget>();
+
+/// A document's find input, which its bar registers with.
+export function findFocus(id: string): FocusTarget {
+  let target = findInputs.get(id);
+  if (!target) {
+    target = new FocusTarget();
+    findInputs.set(id, target);
+  }
+  return target;
+}
+
+/// ⌘F: open (or refocus) a document's find bar, with a previous query
+/// selected so typing replaces it.
 export function openFind(id: string): void {
   reader.find[id] = true;
-  void tick().then(() => {
-    const input = document.querySelector<HTMLInputElement>(`[data-find-input="${id}"]`);
-    if (input) {
-      input.focus();
-      input.select();
-    }
-  });
+  flushSync();
+  findFocus(id).focus();
 }
 
 /// Forget a closed tab's find state (called from closeTab). The side panel is
 /// global, so there is nothing panel-related to drop per tab.
 export function dropReaderState(id: string): void {
   delete reader.find[id];
+  findInputs.delete(id);
 }

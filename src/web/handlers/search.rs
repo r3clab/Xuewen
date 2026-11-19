@@ -1,14 +1,15 @@
 use anyhow::Context as _;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use serde::Deserialize;
 
 use super::papers::{attach_row_extras, PaperSummary};
 use crate::app::App;
+use crate::search::{SearchHit, SearchResults};
 use crate::web::error::ApiError;
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
+use crate::web::extract::ApiQuery;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -16,63 +17,12 @@ pub(super) fn routes() -> Router<App> {
         .route("/api/search/status", get(search_status))
 }
 
-/// Why a paper matched a search query.
-#[derive(Serialize, TS)]
-#[ts(export)]
-struct SearchMatch {
-    #[ts(type = "\"keyword\" | \"semantic\" | \"both\"")]
-    engine: String,
-    field: String,
-    /// HTML-safe: escaped text with <mark> highlights only.
-    snippet: String,
-    page: Option<i64>,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export, rename = "SearchResultItem")]
-struct SearchResult {
-    paper: PaperSummary,
-    #[serde(rename = "match")]
-    match_info: SearchMatch,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-struct SemanticAvailability {
-    available: bool,
-    reason: Option<String>,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-struct SearchResponse {
-    semantic: SemanticAvailability,
-    results: Vec<SearchResult>,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-struct TierCounts {
-    indexed: i64,
-    pending: i64,
-    failed: i64,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-struct SearchStatus {
-    fts: TierCounts,
-    vectors: TierCounts,
-    semantic_available: bool,
-    reason: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct SearchParams {
     q: Option<String>,
     fields: Option<String>,
     engines: Option<String>,
-    status: Option<String>,
+    status: Option<crate::library::model::PaperStatus>,
     project: Option<String>,
     tag: Option<String>,
     starred: Option<bool>,
@@ -82,7 +32,7 @@ struct SearchParams {
 /// values fall back to "all" (mirrors the whitelisting style elsewhere).
 async fn search_papers(
     State(app): State<App>,
-    Query(p): Query<SearchParams>,
+    ApiQuery(p): ApiQuery<SearchParams>,
 ) -> Result<Response, ApiError> {
     let svc = app.search()?;
     let (keyword, semantic) = parse_engines(p.engines.as_deref());
@@ -108,32 +58,23 @@ async fn search_papers(
     let mut summaries: Vec<PaperSummary> = out
         .results
         .iter()
-        .map(|(paper, _)| PaperSummary::from(paper))
+        .map(|hit| PaperSummary::from(&hit.paper))
         .collect();
     attach_row_extras(app.pool(), &mut summaries)
         .await
         .context("search row extras")?;
-    let results: Vec<SearchResult> = summaries
-        .into_iter()
-        .zip(out.results.iter())
-        .map(|(paper, (_, m))| SearchResult {
-            paper,
-            match_info: SearchMatch {
-                engine: m.engine.as_str().to_string(),
-                field: m.field.as_str().to_string(),
-                snippet: m.snippet.clone(),
-                page: m.page,
-            },
-        })
-        .collect();
-    Ok(Json(SearchResponse {
-        semantic: SemanticAvailability {
-            available: out.semantic.available,
-            reason: out.semantic.reason,
-        },
-        results,
-    })
-    .into_response())
+    let body = SearchResults {
+        semantic: out.semantic,
+        results: summaries
+            .into_iter()
+            .zip(out.results)
+            .map(|(paper, hit)| SearchHit {
+                paper,
+                matched: hit.matched,
+            })
+            .collect(),
+    };
+    Ok(Json(body).into_response())
 }
 
 fn parse_engines(csv: Option<&str>) -> (bool, bool) {
@@ -155,19 +96,5 @@ fn parse_engines(csv: Option<&str>) -> (bool, bool) {
 async fn search_status(State(app): State<App>) -> Result<Response, ApiError> {
     let svc = app.search()?;
     let st = svc.status().await.context("search status")?;
-    Ok(Json(SearchStatus {
-        fts: TierCounts {
-            indexed: st.fts.indexed,
-            pending: st.fts.pending,
-            failed: st.fts.failed,
-        },
-        vectors: TierCounts {
-            indexed: st.vectors.indexed,
-            pending: st.vectors.pending,
-            failed: st.vectors.failed,
-        },
-        semantic_available: st.semantic_available,
-        reason: st.reason,
-    })
-    .into_response())
+    Ok(Json(st).into_response())
 }

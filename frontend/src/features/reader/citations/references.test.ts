@@ -131,11 +131,11 @@ describe('findReferencesStart', () => {
     expect(findReferencesStart(pages)).toBeNull();
   });
 
-  // Regressions from the task-21 live sweep: the two heading-line reconstruction
-  // failure modes measured against real PDFs (devlin/jimenez/kim). See
-  // .superpowers/sdd/task-21-report.md. Geometry numbers below are the live-probed
-  // values (Mode B x/y/h are exact; Mode A y + text are exact, per-run x reflects
-  // the two-column layout since the probe JSON logged only the joined line text).
+  // Regressions: the two heading-line reconstruction failure modes measured
+  // against real PDFs (devlin/jimenez/kim). Geometry numbers below are the
+  // live-probed values (Mode B x/y/h are exact; Mode A y + text are exact,
+  // per-run x reflects the two-column layout since the probe logged only the
+  // joined line text).
 
   it('Mode A: column-aware — a two-column heading is not joined with the other column (devlin)', () => {
     // devlin p9: "References" (left col, y=62) and the first entry

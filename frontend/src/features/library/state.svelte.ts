@@ -1,5 +1,5 @@
 import { SvelteMap } from 'svelte/reactivity';
-import type { BibFormat } from './types';
+import type { BibFormat } from '$shared/api/generated/BibFormat';
 import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 import type { Stats } from '$shared/api/generated/Stats';
@@ -11,16 +11,11 @@ export const library = $state<{
   /// "not fetched yet", not "the library is empty".
   loaded: boolean;
   error: string | null;
-  revision: number;
-}>({ papers: [], loading: false, loaded: false, error: null, revision: 0 });
+}>({ papers: [], loading: false, loaded: false, error: null });
 
 export const stats = $state<{ value: Stats | null }>({ value: null });
 
 export const bibFormat = $state<{ value: BibFormat }>({ value: 'bibtex' });
-
-export function markLibraryChanged(): void {
-  library.revision++;
-}
 
 /// Cached full record per paper id. Reactive (SvelteMap), so an open view
 /// (DockDetails) re-renders in place when a mutation patches a record and

@@ -1,35 +1,38 @@
-import { describe, expect, it } from 'vitest';
-import { exportUrl } from './api';
-import type { Filters } from '$features/library/search/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { exportPapers, listPapers } from './api';
 
-const baseFilters: Filters = { q: '', status: 'all', sort: 'year_desc', project: 'all' };
+function stubFetch(body: BodyInit = '[]') {
+  const fetch = vi.fn(async () => new Response(body));
+  vi.stubGlobal('fetch', fetch);
+  return fetch;
+}
 
-describe('exportUrl', () => {
-  it('builds a url with sort and format when no other filters are set', () => {
-    const url = exportUrl(baseFilters, 'bibtex');
-    expect(url).toBe('/api/papers/export?sort=year_desc&format=bibtex');
+afterEach(() => vi.unstubAllGlobals());
+
+describe('listPapers', () => {
+  it('sends the raw query string and the sort, and nothing else', async () => {
+    const fetch = stubFetch();
+    await listPapers({ q: '  tag:nlp project:Thesis  ', sort: 'title' });
+    expect(fetch).toHaveBeenCalledWith('/api/papers?q=tag%3Anlp+project%3AThesis&sort=title', expect.anything());
   });
 
-  it('includes active search, status, and project filters', () => {
-    const url = exportUrl(
-      { q: 'graph', status: 'resolved', sort: 'year_desc', project: 'p1' },
-      'biblatex',
-    );
-    expect(url).toContain('q=graph');
-    expect(url).toContain('status=resolved');
-    expect(url).toContain('project=p1');
-    expect(url).toContain('format=biblatex');
+  it('omits an empty query and the default order', async () => {
+    const fetch = stubFetch();
+    await listPapers({ q: '   ' });
+    expect(fetch).toHaveBeenCalledWith('/api/papers?', expect.anything());
   });
+});
 
-  it('strips a qualifier-only q and rides on the parsed filters instead', () => {
-    // A tag pill writes 'tag:nlp' into filters.q and the cached parse sets
-    // filters.tag; the endpoint would LIKE-match the literal 'tag:nlp' as q,
-    // so the export must travel as tag=, with q dropped.
-    const url = exportUrl(
-      { q: 'tag:nlp', status: 'all', sort: 'year_desc', project: 'all', tag: 'nlp' },
-      'bibtex',
-    );
-    expect(url).toContain('tag=nlp');
-    expect(url).not.toContain('q=');
+describe('exportPapers', () => {
+  it('posts exactly the given ids in order, with the format', async () => {
+    const fetch = stubFetch('@article{a,}');
+    const blob = await exportPapers({ ids: ['b', 'a'], format: 'biblatex' });
+    expect(await blob.text()).toBe('@article{a,}');
+    expect(fetch).toHaveBeenCalledWith('/api/papers/export', {
+      method: 'POST',
+      signal: undefined,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ['b', 'a'], format: 'biblatex' }),
+    });
   });
 });

@@ -23,7 +23,9 @@ import {
   library,
   patchDetail,
 } from '$features/library/state.svelte';
+import { errorMessage } from '$shared/errors';
 import type { Project } from '$shared/api/generated/Project';
+import type { UpdateProjectBody } from '$shared/api/generated/UpdateProjectBody';
 
 export async function loadProjects(): Promise<void> {
   try {
@@ -47,27 +49,22 @@ export async function createNewProject(name: string): Promise<Project> {
   return p;
 }
 
-export async function renameProject(id: string, patch: { name?: string }): Promise<void> {
-  const wasActive = filters.project === id;
+export async function renameProject(id: string, patch: UpdateProjectBody): Promise<void> {
+  const wasActive = filters.project?.id === id;
   await updateProject(id, patch);
   clearDetails();
   await loadProjects();
   // The `project:` qualifier is name-keyed, so an active filter must follow
-  // the rename in the search string (the single source of truth) — the old
-  // name would stop resolving to an id and silently match nothing on the
-  // next sync. loadProjects ran first so the new name resolves.
+  // the rename in the search string — the old name would match nothing.
   if (wasActive && patch.name) await applyQueryEdit(setQualifier(filters.q, 'project', patch.name));
   else await loadPapers();
 }
 
 export async function removeProject(id: string): Promise<void> {
-  const wasActive = filters.project === id;
+  const wasActive = filters.project?.id === id;
   await deleteProject(id);
   clearDetails();
   await loadProjects();
-  // Drop the dead qualifier from the search string itself — clearing only the
-  // cached filters.project would leave `project:` in the box to resurrect the
-  // filter on the next sync.
   if (wasActive) await applyQueryEdit(setQualifier(filters.q, 'project', null));
   else await loadPapers();
 }
@@ -87,13 +84,13 @@ export async function addPapersToProject(paperIds: string[], projectId: string):
   for (const id of added) evictDetail(id);
   if (added.length > 0) {
     await loadProjects();
-    if (filters.project === projectId) await loadPapers();
+    if (filters.project?.id === projectId) await loadPapers();
   }
   const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
   if (failures.length > 0) {
     if (paperIds.length === 1) throw failures[0].reason;
     throw new Error(
-      `couldn't add ${failures.length} of ${paperIds.length} papers: ${(failures[0].reason as Error).message}`,
+      `couldn't add ${failures.length} of ${paperIds.length} papers: ${errorMessage(failures[0].reason, 'adding to the project failed')}`,
     );
   }
 }
@@ -102,7 +99,7 @@ export async function removeFromProject(paperId: string, projectId: string): Pro
   await removePaperFromProject(paperId, projectId);
   evictDetail(paperId);
   await loadProjects();
-  if (filters.project === projectId) await loadPapers();
+  if (filters.project?.id === projectId) await loadPapers();
 }
 
 /// Add a tag (by name; creating it if new) to a paper, patch the row/cached
@@ -158,9 +155,7 @@ export async function renameTag(id: string, name: string): Promise<void> {
 
 /// Delete a tag from every paper carrying it (GC'd tag row included), then
 /// refresh the tags store and paper list. If it was the active filter, the
-/// dead qualifier is dropped from the search string itself — clearing only
-/// the cached filters.tag would leave `tag:` in the box to resurrect an
-/// always-empty filter on the next sync.
+/// dead qualifier is dropped from the search string.
 export async function deleteTag(id: string): Promise<void> {
   const tag = tags.items.find((t) => t.id === id);
   await apiDeleteTag(id);

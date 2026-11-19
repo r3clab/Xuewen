@@ -44,7 +44,7 @@ export interface ClusteredLine { col: number; y: number; x: number; runs: TextRu
  * y-bucket. Shared by pageLines (heading detection) and columnMajorLines
  * (fallback segmentation) so both reconstruct lines the same robust way.
  *
- * Two prior failure modes this replaces (measured live — see task-21 report):
+ * Two failure modes, measured against real PDFs, that naive bucketing hits:
  *  - Column-blind `Math.round(y/LINE_TOLERANCE)` bucketing joined a two-column
  *    heading with the OTHER column's same-baseline body text, so the joined
  *    "line" no longer matched the whole-line heading regex. Fixed by clustering

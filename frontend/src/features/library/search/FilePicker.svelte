@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { fade, fly } from 'svelte/transition';
+  import type { Attachment } from 'svelte/attachments';
+  import { fly } from 'svelte/transition';
   import { getPreviewMeta, listPapers, previewPageUrl } from '$features/library/api';
   import { fuzzyScore } from './fuzzy';
   import { library } from '$features/library/state.svelte';
   import { finder } from './state.svelte';
+  import { modalDialog } from '$shared/ui/dialog';
   import { DUR, dur } from '$shared/ui/motion';
   import { openTab } from '$features/reader/tabs/state.svelte';
   import type { PaperSummary } from '$shared/api/generated/PaperSummary';
@@ -12,11 +14,6 @@
 
   let query = $state('');
   let active = $state(0);
-  let input = $state<HTMLInputElement | null>(null);
-
-  $effect(() => {
-    input?.focus();
-  });
 
   // The picker jumps anywhere in the library, so it can't read the table's
   // view — `library.papers` is whatever the current filter or search left
@@ -24,11 +21,10 @@
   // == open); until it resolves — or if it fails — the filtered view stands
   // in, which is still better than an empty list.
   let corpus = $state<PaperSummary[] | null>(null);
-  $effect(() => {
-    void listPapers({ q: '', status: 'all', sort: 'added_desc', project: 'all' })
-      .then((papers) => (corpus = papers))
-      .catch(() => {});
-  });
+  listPapers({ sort: 'added_desc' }).then(
+    (papers) => (corpus = papers),
+    (e: unknown) => console.warn('picker: loading the whole library failed', e),
+  );
 
   // Name and title only. Authors and cite keys are deliberately not matched:
   // every match is then visible in the row that matched it.
@@ -45,11 +41,6 @@
   // under an Enter the user is mid-way through pressing.
   const index = $derived(Math.min(active, matches.length - 1));
   const highlighted = $derived(matches[index]?.p ?? null);
-
-  $effect(() => {
-    void query;
-    active = 0;
-  });
 
   // Preview state for whichever row is highlighted. `meta === null` with no
   // error means "still loading"; a rejected fetch (422 for an unrenderable
@@ -91,16 +82,7 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      // Stop here: the global handler's Esc cascade would otherwise go on to
-      // close the dock or leave zen behind the overlay.
-      e.stopPropagation();
-      close();
-    } else if (e.key === 'Tab') {
-      // Single-focus surface: rows are tabindex="-1" and the page beneath is
-      // not inert, so Tab must not carry focus out.
-      e.preventDefault();
-    } else if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
       active = Math.min(matches.length - 1, index + 1);
     } else if (e.key === 'ArrowUp') {
@@ -113,36 +95,24 @@
   }
 
   // Keep the highlighted row in view when the arrow keys walk past the edge.
-  function scrollRowIntoView(el: HTMLElement, isActive: boolean) {
-    if (isActive) el.scrollIntoView({ block: 'nearest' });
-    return {
-      update(nowActive: boolean) {
-        if (nowActive) el.scrollIntoView({ block: 'nearest' });
-      },
-    };
-  }
+  const scrollIntoView: Attachment<HTMLElement> = (row) => {
+    row.scrollIntoView({ block: 'nearest' });
+  };
 </script>
 
-<div
-  transition:fade={{ duration: dur(DUR.fast) }}
-  role="presentation"
-  onclick={(e) => {
-    if (e.target === e.currentTarget) close();
-  }}
-  class="fixed inset-0 z-[60] flex items-start justify-center bg-stone-950/40 p-4 pt-[10vh] backdrop-blur-[2px]"
+<!-- showModal() puts focus on the dialog's first control: the query. -->
+<dialog
+  {@attach modalDialog(close)}
+  transition:fly={{ y: -12, duration: dur(DUR.base) }}
+  aria-label="Find paper"
+  class="mx-auto mt-[10vh] w-[calc(100%-2rem)] max-w-3xl overflow-hidden rounded-xl border border-stone-200 bg-paper p-0 text-ink shadow-2xl backdrop:bg-stone-950/40 backdrop:backdrop-blur-[2px] dark:border-stone-800 dark:bg-soot dark:text-stone-100"
 >
-  <div
-    transition:fly={{ y: -12, duration: dur(DUR.base) }}
-    role="dialog"
-    aria-modal="true"
-    aria-label="Find paper"
-    class="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-stone-200 bg-paper shadow-2xl dark:border-stone-800 dark:bg-soot"
-  >
+  <div class="flex max-h-[calc(90vh-1rem)] flex-col">
     <div class="flex shrink-0 items-center gap-2 border-b border-stone-200 px-3.5 dark:border-stone-800">
       <span aria-hidden="true" class="text-sm font-semibold text-amber-700 dark:text-amber-500">›</span>
       <input
-        bind:this={input}
         bind:value={query}
+        oninput={() => (active = 0)}
         {onkeydown}
         role="combobox"
         aria-expanded="true"
@@ -174,7 +144,7 @@
             <button
               type="button"
               tabindex="-1"
-              use:scrollRowIntoView={i === index}
+              {@attach i === index && scrollIntoView}
               onclick={() => open(p)}
               onmousemove={() => (active = i)}
               class={`flex w-full flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left ${
@@ -243,4 +213,4 @@
       <span class="ml-auto">matching name + title</span>
     </div>
   </div>
-</div>
+</dialog>

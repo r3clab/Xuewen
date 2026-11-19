@@ -2,24 +2,20 @@
   import { Upload } from '@lucide/svelte';
   import { openImport } from '$features/importing/queue.svelte';
   import { library } from '$features/library/state.svelte';
-  import { projects } from '$features/library/organization/state.svelte';
   import { anyFilterActive, filters, noMatchesBlame } from '$features/library/search/state.svelte';
   import { clearFilters } from '$features/library/search/actions';
   import SealMark from '$shared/ui/SealMark.svelte';
 
   const filteredEmpty = $derived(library.papers.length === 0 && anyFilterActive());
   // The one dead-end worth a tip: a selected project that has no papers yet.
-  const emptyProject = $derived(
-    filters.project !== 'all' &&
-      (projects.items.find((p) => p.id === filters.project)?.paper_count ?? -1) === 0,
-  );
+  const emptyProject = $derived(filters.project?.paper_count === 0);
 </script>
 
 <div class="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
   <SealMark size={48} />
   <h2 class="font-serif text-2xl font-semibold text-ink dark:text-stone-100">Xuewen</h2>
   {#if filteredEmpty}
-    <p class="max-w-sm text-sm text-stone-500 dark:text-stone-400">{noMatchesBlame(projects.items)}</p>
+    <p class="max-w-sm text-sm text-stone-500 dark:text-stone-400">{noMatchesBlame()}</p>
     {#if emptyProject}
       <p class="max-w-sm text-xs text-stone-400 dark:text-stone-500">
         This project is empty — select rows in the library table and use “Add to project…”,

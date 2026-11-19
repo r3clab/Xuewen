@@ -1,7 +1,7 @@
-import { tick } from 'svelte';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   dropReaderState,
+  findFocus,
   openFind,
   panelWidth,
   reader,
@@ -89,16 +89,21 @@ describe('panelWidth', () => {
 });
 
 describe('openFind', () => {
-  it('opens the bar and focuses that document’s find input', async () => {
+  it('opens the bar and focuses that document’s find input, query selected', () => {
+    const other = document.createElement('input');
     const input = document.createElement('input');
-    input.setAttribute('data-find-input', 'a');
-    document.body.appendChild(input);
+    input.value = 'previous';
+    document.body.append(other, input);
+    const detachOther = findFocus('b').attach(other);
+    const detach = findFocus('a').attach(input);
     openFind('a');
     expect(reader.find['a']).toBe(true);
-    await tick(); // tick
-    await tick(); // Allow callback to complete
     expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 'previous'.length]);
+    detach();
+    detachOther();
     input.remove();
+    other.remove();
   });
 });
 

@@ -1,19 +1,21 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use tempfile::TempDir;
+
 use super::{
     fails, library, library_with, ok, spawn_xuewen, stderr, stdout, xuewen, xuewen_with_stdin,
 };
 use crate::support;
 
 /// A library with paper `p1` and both agent backends on the stub runner.
-async fn configured() -> PathBuf {
-    let (_pool, config) = library_with(&format!(
-        "[ai.agent]\nrunner = {:?}\n\n[ai.agent.claude_code]\n\n[ai.agent.codex]\nmodel = \"gpt-5.2-codex\"\n",
-        support::stub_runner_path()
+async fn configured() -> (PathBuf, TempDir) {
+    let runner = toml::Value::from(support::stub_runner_path().display().to_string());
+    let (_pool, config, dir) = library_with(&format!(
+        "[ai.agent]\nrunner = {runner}\n\n[ai.agent.claude_code]\n\n[ai.agent.codex]\nmodel = \"gpt-5.2-codex\"\n"
     ))
     .await;
-    config
+    (config, dir)
 }
 
 fn history(config: &Path) -> String {
@@ -22,7 +24,7 @@ fn history(config: &Path) -> String {
 
 #[tokio::test]
 async fn a_question_streams_its_answer_and_saves_the_exchange() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     let out = xuewen(&config, &["ask", "p1", "what is this?"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "Hello from claude_code\n");
@@ -41,7 +43,7 @@ async fn a_question_streams_its_answer_and_saves_the_exchange() {
 
 #[tokio::test]
 async fn model_picks_the_backend_and_rejects_unknown_ones() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     assert_eq!(
         ok(&config, &["ask", "p1", "hi", "--model", "codex"]),
         "Hello from codex\n"
@@ -56,7 +58,7 @@ async fn model_picks_the_backend_and_rejects_unknown_ones() {
 
 #[tokio::test]
 async fn a_failed_turn_exits_nonzero_and_saves_nothing() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     let err = fails(&config, &["ask", "p1", "please fail"]);
     assert!(err.contains("boom"), "got: {err}");
     assert!(history(&config).starts_with("no conversation yet"));
@@ -64,7 +66,7 @@ async fn a_failed_turn_exits_nonzero_and_saves_nothing() {
 
 #[tokio::test]
 async fn without_a_question_each_input_line_is_a_turn() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     let out = xuewen_with_stdin(
         &config,
         &["ask", "p1"],
@@ -90,11 +92,11 @@ async fn without_a_question_each_input_line_is_a_turn() {
 
 #[tokio::test]
 async fn ask_needs_a_configured_agent_and_an_active_paper() {
-    let (_pool, unconfigured) = library().await;
+    let (_pool, unconfigured, _dir) = library().await;
     let err = fails(&unconfigured, &["ask", "p1", "hi"]);
     assert!(err.contains("agent ask is not configured"), "got: {err}");
 
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     ok(&config, &["delete", "p1", "--yes"]);
     let err = fails(&config, &["ask", "p1", "hi"]);
     assert!(err.contains("p1 is in the trash"), "got: {err}");
@@ -102,13 +104,13 @@ async fn ask_needs_a_configured_agent_and_an_active_paper() {
 
 #[tokio::test]
 async fn chat_models_lists_backends_default_first() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     assert_eq!(
         ok(&config, &["chat", "models"]),
         "claude_code  Claude Code  (default)\ncodex  Codex, gpt-5.2-codex\n"
     );
 
-    let (_pool, unconfigured) = library().await;
+    let (_pool, unconfigured, _dir) = library().await;
     assert_eq!(
         ok(&unconfigured, &["chat", "models"]),
         "agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]\n"
@@ -117,7 +119,7 @@ async fn chat_models_lists_backends_default_first() {
 
 #[tokio::test]
 async fn chat_clear_forgets_the_conversation() {
-    let config = configured().await;
+    let (config, _dir) = configured().await;
     ok(&config, &["ask", "p1", "hi"]);
     assert_eq!(
         ok(&config, &["chat", "clear", "p1", "--yes"]),
@@ -157,7 +159,7 @@ mod signals {
 
     #[tokio::test]
     async fn ctrl_c_ends_a_one_shot_with_130_and_kills_the_agent() {
-        let config = configured().await;
+        let (config, _dir) = configured().await;
         let mut child = spawn_xuewen(&config, &["ask", "p1", "orphan"]);
         let mut out = BufReader::new(child.stdout.take().unwrap());
         let pid = grandchild_pid(&mut out);
@@ -169,7 +171,7 @@ mod signals {
 
     #[tokio::test]
     async fn ctrl_c_mid_answer_cancels_only_that_turn() {
-        let config = configured().await;
+        let (config, _dir) = configured().await;
         let mut child = spawn_xuewen(&config, &["ask", "p1"]);
         let mut stdin = child.stdin.take().unwrap();
         let mut out = BufReader::new(child.stdout.take().unwrap());

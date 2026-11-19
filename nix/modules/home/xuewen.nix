@@ -22,22 +22,15 @@ let
     inherit lib pkgs;
     modules = "homeModules";
     environmentFileExample = "/run/user/1000/secrets/xuewen.env";
+    dataDirDefault = {
+      default = "${config.xdg.dataHome}/xuewen";
+      defaultText = lib.literalExpression ''"''${config.xdg.dataHome}/xuewen"'';
+    };
   };
   xw = shared.mkXuewen cfg;
 in
 {
-  options.services.xuewen = shared.options // {
-    dataDir = lib.mkOption {
-      type = lib.types.str;
-      default = "${config.xdg.dataHome}/xuewen";
-      defaultText = lib.literalExpression ''"''${config.xdg.dataHome}/xuewen"'';
-      description = ''
-        State directory holding the inbox, library, SQLite database, search
-        index and vector store. Created automatically before the service
-        starts.
-      '';
-    };
-  };
+  options.services.xuewen = shared.options;
 
   config = lib.mkIf cfg.enable {
     inherit (xw) assertions warnings;
@@ -52,15 +45,21 @@ in
       Service = {
         # The data dir lives under $HOME, so create it before first launch
         # rather than through system tmpfiles.
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${cfg.dataDir}";
+        ExecStartPre = lib.escapeShellArgs [
+          "${pkgs.coreutils}/bin/mkdir"
+          "-p"
+          cfg.dataDir
+        ];
         ExecStart = xw.execStart;
         WorkingDirectory = cfg.dataDir;
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-        # A user unit inherits no useful PATH, so pdftotext, git, and (when
-        # Agent Ask is on) node and ripgrep are resolved from an explicit one.
+        # A user unit inherits no useful PATH, so Agent Ask's tools are
+        # resolved from an explicit one.
         Environment = lib.mapAttrsToList (k: v: "${k}=${v}") (
           {
             RUST_LOG = "info";
+          }
+          // lib.optionalAttrs (xw.runtimePackages != [ ]) {
             PATH = lib.makeBinPath xw.runtimePackages;
           }
           // xw.environment

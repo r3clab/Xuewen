@@ -8,29 +8,6 @@
   import { removePaper } from '$app/actions';
   import { toast } from '$shared/ui/toasts.svelte';
 
-  // Two-step delete lives inside the menu (mirrors DeletePaperButton /
-  // the pill bar's PillMenu) so a right-click delete still needs a confirm.
-  let mode = $state<'menu' | 'delete'>('menu');
-  let busy = $state(false);
-  let confirmEl = $state<HTMLDivElement | null>(null);
-
-  // Every fresh open starts on the action list, never mid-delete-confirm —
-  // including a retarget (right-click on a second row) that swaps the paper
-  // without the always-mounted menu ever closing in between.
-  $effect(() => {
-    void contextMenu.paper; // re-run when the target paper changes
-    if (contextMenu.open) {
-      mode = 'menu';
-      busy = false;
-    }
-  });
-
-  // Switching to the delete confirm moves focus onto its first button, so
-  // Enter-ing "Delete…" flows straight into confirm-or-cancel by keyboard.
-  $effect(() => {
-    if (mode === 'delete') confirmEl?.querySelector<HTMLElement>('button')?.focus();
-  });
-
   async function doCopy() {
     const paper = contextMenu.paper;
     closeContextMenu();
@@ -53,19 +30,20 @@
   async function doDelete() {
     const paper = contextMenu.paper;
     if (!paper) return;
-    busy = true;
+    contextMenu.step = 'deleting';
     // removePaper never rejects — the Deleted/Undo toast (or the failure
     // toast) is its own; the menu just closes either way.
     await removePaper(paper.id);
-    closeContextMenu();
-    busy = false;
+    if (contextMenu.paper === paper) closeContextMenu();
   }
 
   const itemClasses =
     'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-stone-600 hover:bg-parchment hover:text-ink dark:text-stone-300 dark:hover:bg-stone-800';
 </script>
 
-{#if contextMenu.open && contextMenu.paper}
+<!-- Two-step delete lives inside the menu (mirrors DeletePaperButton and the
+     pill bar's PillMenu) so a right-click delete still needs a confirm. -->
+{#if contextMenu.paper}
   <ContextMenuShell
     x={contextMenu.x}
     y={contextMenu.y}
@@ -73,7 +51,7 @@
     width="w-44"
     onClose={closeContextMenu}
   >
-    {#if mode === 'menu'}
+    {#if contextMenu.step === 'actions'}
       <button type="button" role="menuitem" onclick={() => void doCopy()} class={itemClasses}>
         <Copy size={13} /> Copy BibTeX
       </button>
@@ -84,20 +62,21 @@
       <button
         type="button"
         role="menuitem"
-        onclick={() => (mode = 'delete')}
+        onclick={() => (contextMenu.step = 'confirm-delete')}
         class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-600/10 dark:text-red-400"
       >
         <Trash size={13} /> Delete…
       </button>
-    {:else if busy}
+    {:else if contextMenu.step === 'deleting'}
       <span class="block px-2 py-1.5 text-xs text-stone-500 dark:text-stone-400">Deleting…</span>
     {:else}
       <p class="px-1 py-0.5 text-xs text-stone-600 dark:text-stone-300">Delete this paper?</p>
-      <div bind:this={confirmEl} class="mt-1 flex justify-end gap-1">
+      <div class="mt-1 flex justify-end gap-1">
         <ConfirmButtons
+          autofocus
           confirmLabel="Delete"
           onConfirm={() => void doDelete()}
-          onCancel={() => (mode = 'menu')}
+          onCancel={() => (contextMenu.step = 'actions')}
         />
       </div>
     {/if}

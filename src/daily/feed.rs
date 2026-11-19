@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 
 use crate::http::HttpClient;
+use crate::library::model::canonical_arxiv;
 use crate::text::collapse_ws;
 
 /// A new arXiv paper parsed from the announcement feed.
@@ -27,16 +28,6 @@ pub(crate) async fn fetch_feed(
         categories.join("+")
     );
     http.get_text(&url).await
-}
-
-/// "2507.01234v2" -> "2507.01234"; ids without a version pass through.
-pub(crate) fn strip_version(id: &str) -> String {
-    match id.rfind('v') {
-        Some(i) if i + 1 < id.len() && id[i + 1..].chars().all(|c| c.is_ascii_digit()) => {
-            id[..i].to_string()
-        }
-        _ => id.to_string(),
-    }
 }
 
 /// Parse the rss.arxiv.org Atom feed, keeping `new` announcements (plus
@@ -72,7 +63,7 @@ pub(crate) fn parse_feed(xml: &str, include_cross_list: bool) -> Result<Vec<Cand
         let Some(raw_id) = child_text("id") else {
             continue;
         };
-        let arxiv_id = strip_version(raw_id.trim_start_matches("oai:arXiv.org:"));
+        let arxiv_id = canonical_arxiv(raw_id.trim_start_matches("oai:arXiv.org:"));
         let Some(title) = child_text("title") else {
             continue;
         };
@@ -200,13 +191,6 @@ Abstract: New version.</summary>
 </feed>"#;
         let err = parse_feed(xml, false).unwrap_err().to_string();
         assert!(err.contains("categories"), "got: {err}");
-    }
-
-    #[test]
-    fn strip_version_handles_old_style_ids() {
-        assert_eq!(strip_version("2507.00001v12"), "2507.00001");
-        assert_eq!(strip_version("cs/0501001v2"), "cs/0501001");
-        assert_eq!(strip_version("2507.00001"), "2507.00001");
     }
 
     #[tokio::test]

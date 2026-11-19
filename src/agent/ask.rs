@@ -65,14 +65,14 @@ pub(crate) async fn start(
     // clone job racing that detach can leave a stray `repo/` behind. Trusting
     // disk alone would expose that orphaned checkout; requiring status = 'ready'
     // (and that the directory is actually present) does not.
-    let repo_ready = matches!(
-        store::get_paper_code(pool, &paper.id).await,
-        Ok(Some(c)) if c.status == store::CodeStatus::Ready
-    );
+    let repo_ready = store::get_paper_code(pool, &paper.id)
+        .await
+        .context("attached repo for send")?
+        .is_some_and(|c| c.status == store::CodeStatus::Ready);
     let has_repo = repo_ready
         && tokio::fs::try_exists(ws.join("repo"))
             .await
-            .unwrap_or(false);
+            .context("attached repo checkout")?;
     let treq = TurnRequest {
         backend: backend.id.clone(),
         model: backend.model.clone(),
@@ -82,7 +82,7 @@ pub(crate) async fn start(
         transcript: history
             .iter()
             .map(|r| TurnMessage {
-                role: r.role.clone(),
+                role: r.role,
                 content: r.content.clone(),
             })
             .collect(),

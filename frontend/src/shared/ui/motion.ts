@@ -13,31 +13,21 @@ export const SPRINGS = {
   pane: { stiffness: 0.18, damping: 0.85 },
 } as const;
 
+/// Whether motion should complete instantly (the accessibility preference).
 export function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-/// Whether motion should complete instantly: under reduced motion
-/// (accessibility) and under vitest (jsdom runs transitions on rAF; anything
-/// time-based leaves elements lingering and makes DOM assertions flaky).
-export function instantMotion(): boolean {
-  return import.meta.env.MODE === 'test' || prefersReducedMotion();
-}
-
-/// Resolve a duration. 0 under instantMotion().
+/// Resolve a duration. 0 under reduced motion.
 export function dur(ms: number): number {
-  return instantMotion() ? 0 : ms;
+  return prefersReducedMotion() ? 0 : ms;
 }
 
 /// Drive a Spring toward `target`, snapping instead of animating under
-/// instantMotion() — the one home for that branch, so every spring surface
+/// reduced motion — the one home for that branch, so every spring surface
 /// honors the same policy.
 export function springTo(spring: Spring<number>, target: number): void {
-  if (instantMotion()) {
+  if (prefersReducedMotion()) {
     void spring.set(target, { instant: true });
   } else {
     spring.target = target;

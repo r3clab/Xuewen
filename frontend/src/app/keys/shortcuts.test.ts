@@ -1,18 +1,17 @@
-import { tick } from 'svelte';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleKeydown, isEditable } from './shortcuts';
 import { cancelLeader, leader } from './leader.svelte';
 import { registerAnnotationCommands, type AnnotationCommands } from '$features/reader/annotations/commands';
 import { chat } from '$features/reader/ask/chat.svelte';
 import { registerPdfCopy } from '$features/reader/pdfCopy';
-import { identifyState } from '$features/identify/state.svelte';
-import { importState } from '$features/importing/queue.svelte';
 import { library } from '$features/library/state.svelte';
 import { selection, viewer } from '$features/reader/tabs/state.svelte';
 import { shell } from '$app/shell.svelte';
-import { dock } from '$features/reader/dock/state.svelte';
-import { finder } from '$features/library/search/state.svelte';
+import { composerFocus, dock } from '$features/reader/dock/state.svelte';
+import { finder, searchFocus } from '$features/library/search/state.svelte';
+import { pushLayer } from '$shared/ui/escape';
 import { reader } from '$features/reader/state.svelte';
+import { readerRegion, registerReaderStage } from '$features/reader/scroll';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 
 function paper(id: string): PaperSummary {
@@ -29,19 +28,27 @@ function key(k: string, opts: Partial<KeyboardEvent> & { target?: EventTarget } 
   return e;
 }
 
+const layers: (() => void)[] = [];
+
+/// What an open surface does on mount: push itself onto the Esc stack.
+function openLayer(close: () => void = () => {}, modal = false): void {
+  layers.push(pushLayer(close, { modal }));
+}
+
+afterEach(() => {
+  for (const pop of layers.splice(0)) pop();
+});
+
 beforeEach(() => {
   library.papers = [paper('a'), paper('b'), paper('c')];
   viewer.tabs = [];
   viewer.activeId = null;
   dock.open = false;
-  dock.entry = null;
   selection.id = null;
   viewer.zen = false;
   finder.open = false;
   cancelLeader();
-  importState.open = false;
   shell.helpOpen = false;
-  identifyState.open = false;
   chat.available = false;
   localStorage.clear();
   for (const k of Object.keys(reader.find)) delete reader.find[k];
@@ -83,8 +90,8 @@ describe('handleKeydown', () => {
     expect(selection.id).toBe(null);
   });
 
-  it('every key is inert while the picker owns the screen', () => {
-    finder.open = true;
+  it('every key is inert while a modal dialog owns the screen', () => {
+    openLayer(() => {}, true);
     handleKeydown(key('j'));
     expect(selection.id).toBe(null);
   });
@@ -148,15 +155,20 @@ describe('handleKeydown', () => {
     chat.available = true;
     handleKeydown(key('j'));
     handleKeydown(key('Enter'));
+    const composer = document.createElement('textarea');
+    document.body.append(composer);
+    const detach = composerFocus.attach(composer);
     handleKeydown(key('c'));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('ask');
-    // c asks for the composer, so a repeat re-requests focus rather than
+    expect(document.activeElement).toBe(composer);
+    // c asks for the composer, so a repeat moves focus back rather than
     // closing the panel it was asked to type into.
-    dock.entry = null;
+    composer.blur();
     handleKeydown(key('c'));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('ask');
+    expect(document.activeElement).toBe(composer);
+    detach();
+    composer.remove();
   });
 
   it('Escape closes the dock before exiting zen', () => {
@@ -181,7 +193,6 @@ describe('handleKeydown', () => {
     handleKeydown(key('Enter'));
     handleKeydown(key('i'));
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('record');
     handleKeydown(key('i'));
     expect(dock.open).toBe(false);
   });
@@ -218,15 +229,15 @@ describe('handleKeydown', () => {
     expect(viewer.zen).toBe(false);
   });
 
-  it('/ exits zen and focuses the search input', async () => {
+  it('/ exits zen and focuses the search input', () => {
     const input = document.createElement('input');
-    input.setAttribute('data-search-input', '');
     document.body.appendChild(input);
+    const detach = searchFocus.attach(input);
     viewer.zen = true;
     handleKeydown(key('/'));
     expect(viewer.zen).toBe(false);
-    await tick();
     expect(document.activeElement).toBe(input);
+    detach();
     input.remove();
   });
 
@@ -237,49 +248,42 @@ describe('handleKeydown', () => {
     expect(viewer.tabs).toHaveLength(0);
   });
 
-  // A keydown that bubbled out of a shadow DOM (e.g. the PDF viewer): the
-  // browser retargets `target` to the non-editable host, but composedPath()[0]
-  // is the real element inside the shadow tree.
-  function shadowKey(k: string, realTarget: EventTarget, host: EventTarget): KeyboardEvent {
-    const e = new KeyboardEvent('keydown', { key: k });
-    Object.defineProperty(e, 'target', { value: host });
-    Object.defineProperty(e, 'composedPath', { value: () => [realTarget, host, window] });
-    return e;
-  }
-
-  it('ignores shortcuts when a shadow-DOM input (viewer find box) is the real target', () => {
-    handleKeydown(key('j'));
-    handleKeydown(key('Enter'));
-    expect(viewer.activeId).toBe('a');
-    const host = document.createElement('embedpdf-container'); // non-editable shadow host
-    const input = document.createElement('input'); // real target inside the shadow tree
-    handleKeydown(shadowKey('x', input, host));
-    expect(viewer.tabs).toHaveLength(1); // NOT closed — the key belongs to the find box
-  });
-
-  it('Enter on a shadow-DOM button activates the button only, not the selection', () => {
-    handleKeydown(key('j')); // selection = first paper
-    const host = document.createElement('embedpdf-container');
-    const btn = document.createElement('button'); // real target inside the shadow tree
-    handleKeydown(shadowKey('Enter', btn, host));
-    expect(viewer.tabs).toHaveLength(0); // guard sees the button, not its host
-  });
-
-  it('still fires shortcuts when the real shadow target is non-editable (viewport)', () => {
-    handleKeydown(key('j'));
-    handleKeydown(key('Enter'));
-    const host = document.createElement('embedpdf-container');
-    const viewport = document.createElement('div'); // non-editable
-    handleKeydown(shadowKey('x', viewport, host));
-    expect(viewer.tabs).toHaveLength(0); // closed — shortcuts still work while reading
-  });
-
-  it('single-key shortcuts are inert while a modal is open', () => {
-    importState.open = true;
+  it('single-key shortcuts are inert while a modal is open, and Esc closes it', () => {
+    const close = vi.fn();
+    openLayer(close, true);
     handleKeydown(key('j'));
     expect(selection.id).toBe(null);
-    handleKeydown(key('Escape')); // the modal owns Esc
-    expect(importState.open).toBe(true); // handler must not touch it
+    handleKeydown(key('Escape'));
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape closes the innermost open surface before the dock or zen', () => {
+    // E.g. a tag editor inside the dock, or the translate popover over a
+    // zen reader: Esc cancels that and nothing else.
+    handleKeydown(key('j'));
+    handleKeydown(key('Enter'));
+    viewer.zen = true;
+    dock.open = true;
+    const outer = vi.fn();
+    const inner = vi.fn();
+    openLayer(outer);
+    openLayer(inner);
+    const e = key('Escape', { cancelable: true });
+    handleKeydown(e);
+    expect(inner).toHaveBeenCalledTimes(1);
+    expect(outer).not.toHaveBeenCalled();
+    expect(e.defaultPrevented).toBe(true);
+    expect(dock.open).toBe(true);
+    expect(viewer.zen).toBe(true);
+  });
+
+  it('Escape abandons a pending chord before closing a surface', () => {
+    const close = vi.fn();
+    openLayer(close);
+    handleKeydown(key(' '));
+    handleKeydown(key('Escape'));
+    expect(leader.pending).toEqual([]);
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('? opens the shortcut help overlay', () => {
@@ -290,12 +294,6 @@ describe('handleKeydown', () => {
   it('? is inert while focus is in a text control', () => {
     handleKeydown(key('?', { target: document.createElement('input') }));
     expect(shell.helpOpen).toBe(false);
-  });
-
-  it('single-key shortcuts are inert while the help overlay is open', () => {
-    shell.helpOpen = true;
-    handleKeydown(key('z'));
-    expect(viewer.zen).toBe(false);
   });
 
   it('cmd+f opens the find bar for the active paper', () => {
@@ -317,7 +315,7 @@ describe('handleKeydown', () => {
   it('cmd+f is inert while a modal is open', () => {
     viewer.tabs = [{ id: 'a', title: 'A', name: null }];
     viewer.activeId = 'a';
-    importState.open = true;
+    openLayer(() => {}, true);
     handleKeydown(key('f', { metaKey: true, cancelable: true }));
     expect(reader.find['a']).toBeUndefined();
   });
@@ -332,10 +330,11 @@ describe('cmd+c in the reader', () => {
     viewer.activeId = 'a';
   }
 
+  let unregisterCopier: () => void;
   beforeEach(() => {
     copied = 0;
     hasSel = true;
-    registerPdfCopy({
+    unregisterCopier = registerPdfCopy({
       attach: () => () => {},
       hasSelection: () => hasSel,
       fetchPending: () => false,
@@ -349,7 +348,7 @@ describe('cmd+c in the reader', () => {
 
   // Registered globally by PdfDeck in the app, so it must not leak into the
   // sibling test files that share this module.
-  afterEach(() => registerPdfCopy(null));
+  afterEach(() => unregisterCopier());
 
   it('copies the PDF selection and swallows the browser copy', () => {
     openReader();
@@ -410,7 +409,7 @@ describe('cmd+c in the reader', () => {
 
   it('is inert while a modal is open', () => {
     openReader();
-    shell.helpOpen = true;
+    openLayer(() => {}, true);
     const e = key('c', { metaKey: true, cancelable: true });
     handleKeydown(e);
     expect(copied).toBe(0);
@@ -423,7 +422,6 @@ describe('cmd+c in the reader', () => {
     handleKeydown(key('c'));
     expect(copied).toBe(0);
     expect(dock.open).toBe(true);
-    expect(dock.entry).toBe('ask');
   });
 });
 
@@ -452,15 +450,16 @@ describe('annotation keys in the reader', () => {
     viewer.activeId = 'a';
   }
 
+  let unregisterCommands: () => void;
   beforeEach(() => {
     calls.length = 0;
     acted = true;
-    registerAnnotationCommands(commands);
+    unregisterCommands = registerAnnotationCommands(commands);
   });
 
   // Registered globally by PdfDeck in the app, so it must not leak into the
   // sibling test files that share this module.
-  afterEach(() => registerAnnotationCommands(null));
+  afterEach(() => unregisterCommands());
 
   it('Delete and Backspace remove the selected mark, and swallow the key', () => {
     openReader();
@@ -517,7 +516,7 @@ describe('annotation keys in the reader', () => {
 
   it('cmd+z is inert while a modal is open', () => {
     openReader();
-    importState.open = true;
+    openLayer(() => {}, true);
     handleKeydown(key('z', { metaKey: true, cancelable: true }));
     expect(calls).toEqual([]);
   });
@@ -542,5 +541,73 @@ describe('annotation keys in the reader', () => {
     handleKeydown(key('Escape'));
     expect(dock.open).toBe(false);
     expect(viewer.zen).toBe(true);
+  });
+});
+
+describe('scroll keys in the reader', () => {
+  const stage = {
+    scrollBy: vi.fn(),
+    getViewportSize: () => ({ width: 800, height: 600 }),
+    goToFirstPage: vi.fn(),
+    goToLastPage: vi.fn(),
+  };
+  let region: HTMLElement;
+  let cleanup: (() => void)[];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    viewer.tabs = [{ id: 'a', title: 'A', name: null }];
+    viewer.activeId = 'a';
+    region = document.createElement('div');
+    region.innerHTML = '<div role="toolbar"><button>Zoom in</button></div><input aria-label="Page" />';
+    document.body.append(region);
+    // As PdfDeck looks it up: the active tab's Stage, none on the library.
+    cleanup = [registerReaderStage(() => (viewer.activeId === null ? null : stage)), readerRegion(region), () => region.remove()];
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+
+  afterEach(() => {
+    for (const undo of cleanup.splice(0)) undo();
+  });
+
+  it('scroll the paper with focus on the page, and keep the browser from scrolling too', () => {
+    for (const k of ['ArrowDown', 'PageDown', 'End']) {
+      const e = key(k, { cancelable: true, target: document.body });
+      handleKeydown(e);
+      expect(e.defaultPrevented).toBe(true);
+    }
+    expect(stage.scrollBy).toHaveBeenCalledWith({ top: 40, behavior: 'instant' });
+    expect(stage.scrollBy).toHaveBeenCalledWith({ top: 525, behavior: 'smooth' });
+    expect(stage.goToLastPage).toHaveBeenCalled();
+  });
+
+  it('stay out of a text field and out of a key a widget already took', () => {
+    const input = region.querySelector('input')!;
+    input.focus();
+    handleKeydown(key('ArrowDown', { target: input }));
+    const button = region.querySelector('button')!;
+    button.focus();
+    const roved = key('ArrowRight', { cancelable: true, target: button });
+    roved.preventDefault();
+    handleKeydown(roved);
+    expect(stage.scrollBy).not.toHaveBeenCalled();
+  });
+
+  it('leave the keys alone outside the reader and on the library', () => {
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    outside.focus();
+    handleKeydown(key('PageDown', { target: outside }));
+    outside.remove();
+    viewer.activeId = null;
+    handleKeydown(key('ArrowDown', { target: document.body }));
+    expect(stage.scrollBy).not.toHaveBeenCalled();
+  });
+
+  it('keep Space as the leader', () => {
+    handleKeydown(key(' ', { cancelable: true, target: document.body }));
+    expect(leader.pending).toEqual([' ']);
+    expect(stage.scrollBy).not.toHaveBeenCalled();
+    cancelLeader();
   });
 });

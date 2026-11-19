@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use serde_json::json;
+use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{
-    fails, library, library_with, ok, stderr, stdout, write_config_with, xuewen_with_stdin,
-};
+use super::{fails, library, library_with, ok, stderr, stdout, xuewen_with_stdin};
+use crate::support;
 
 async fn llm(status: u16) -> MockServer {
     let upstream = MockServer::start().await;
@@ -18,13 +20,13 @@ async fn llm(status: u16) -> MockServer {
     upstream
 }
 
-async fn config_for(upstream: &MockServer) -> std::path::PathBuf {
-    let (_pool, config) = library_with(&format!(
-        "[ai]\nbase_url = {:?}\napi_key = \"k\"\n\n[ai.translate]\nmodel = \"mock-1\"\n",
-        upstream.uri()
+async fn config_for(upstream: &MockServer) -> (PathBuf, TempDir) {
+    let base_url = toml::Value::from(upstream.uri());
+    let (_pool, config, dir) = library_with(&format!(
+        "[ai]\nbase_url = {base_url}\napi_key = \"k\"\n\n[ai.translate]\nmodel = \"mock-1\"\n"
     ))
     .await;
-    config
+    (config, dir)
 }
 
 async fn sent_text(upstream: &MockServer) -> String {
@@ -39,7 +41,7 @@ async fn sent_text(upstream: &MockServer) -> String {
 #[tokio::test]
 async fn arguments_are_translated_as_one_text() {
     let upstream = llm(200).await;
-    let config = config_for(&upstream).await;
+    let (config, _dir) = config_for(&upstream).await;
     assert_eq!(
         ok(&config, &["translate", "hello", "world", "--to", "zh"]),
         "你好\n"
@@ -50,7 +52,7 @@ async fn arguments_are_translated_as_one_text() {
 #[tokio::test]
 async fn stdin_is_read_without_text_or_with_a_dash() {
     let upstream = llm(200).await;
-    let config = config_for(&upstream).await;
+    let (config, _dir) = config_for(&upstream).await;
     for args in [&["translate"][..], &["translate", "-"]] {
         let out = xuewen_with_stdin(&config, args, "  hello\nthere\n");
         assert!(out.status.success(), "{args:?}: {}", stderr(&out));
@@ -62,7 +64,7 @@ async fn stdin_is_read_without_text_or_with_a_dash() {
 #[tokio::test]
 async fn blank_text_is_refused_before_any_call() {
     let upstream = llm(200).await;
-    let config = config_for(&upstream).await;
+    let (config, _dir) = config_for(&upstream).await;
     let out = xuewen_with_stdin(&config, &["translate"], " \n");
     assert!(!out.status.success());
     assert!(stderr(&out).contains("empty text"), "got: {}", stderr(&out));
@@ -72,7 +74,7 @@ async fn blank_text_is_refused_before_any_call() {
 #[tokio::test]
 async fn provider_failures_and_unknown_names_are_reported() {
     let upstream = llm(500).await;
-    let config = config_for(&upstream).await;
+    let (config, _dir) = config_for(&upstream).await;
     for (args, expected) in [
         (&["translate", "hello"][..], "translation failed: "),
         (
@@ -91,17 +93,27 @@ async fn provider_failures_and_unknown_names_are_reported() {
 
 #[tokio::test]
 async fn an_unconfigured_translate_says_what_to_set() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     let err = fails(&config, &["translate", "hello"]);
     assert!(
         err.contains("translate is not configured — set [ai.translate] (LLM) or [translate.deepl]"),
         "got: {err}"
     );
 
-    let config = write_config_with(
+    let config = support::write_config(
         config.parent().unwrap(),
         "[ai]\napi_key = \"k\"\n\n[ai.translate]\n",
     );
     let err = fails(&config, &["translate", "hello"]);
     assert!(err.contains("[ai.translate] has no model"), "got: {err}");
+
+    let config = support::write_config(
+        config.parent().unwrap(),
+        "[translate.deepl]\napi_key_env = \"XUEWEN_TEST_DEEPL_UNSET\"\n",
+    );
+    let err = fails(&config, &["translate", "hello"]);
+    assert!(
+        err.contains("[translate.deepl] has no API key — set $XUEWEN_TEST_DEEPL_UNSET"),
+        "got: {err}"
+    );
 }

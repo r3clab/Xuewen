@@ -3,7 +3,7 @@ use clap::Subcommand;
 
 use super::output::confirm;
 use super::Ctx;
-use crate::agent::history;
+use crate::agent::history::{self, ChatRole};
 
 #[derive(Subcommand)]
 pub(super) enum ChatCmd {
@@ -44,9 +44,9 @@ async fn show_history(ctx: &Ctx, paper: &str) -> Result<()> {
         if i > 0 {
             println!();
         }
-        let who = match row.role.as_str() {
-            "user" => "you",
-            _ => row.model.as_deref().unwrap_or("agent"),
+        let who = match row.role {
+            ChatRole::User => "you",
+            ChatRole::Assistant => row.model.as_deref().unwrap_or("agent"),
         };
         println!("{who}, {}:", row.created_at);
         for tool in row.tools().unwrap_or_default() {

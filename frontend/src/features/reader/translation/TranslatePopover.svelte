@@ -2,10 +2,12 @@
   import { closeTranslate, requestTranslate, translateBox } from './state.svelte';
   import { copyText } from '$shared/browser/clipboard';
   import { appSettings } from '$shared/api/settings.svelte';
-  import { openDock } from '$features/reader/dock/state.svelte';
+  import { askInDock } from '$features/reader/dock/state.svelte';
   import { chat } from '$features/reader/ask/chat.svelte';
   import { clickOutside } from '$shared/ui/clickOutside';
-  import { anchoredPosition } from '$shared/ui/popoverPosition';
+  import { closeOnScroll } from '$shared/ui/closeOnScroll';
+  import { escapeLayer } from '$shared/ui/escape';
+  import { aboveAnchor } from '$shared/ui/popoverPosition';
   import { toast } from '$shared/ui/toasts.svelte';
   import type { TranslateProvider } from '$shared/api/generated/TranslateProvider';
 
@@ -14,9 +16,6 @@
   const targetLabel = $derived(appSettings.translate.target_lang ?? 'zh');
   const sourceLabel = $derived(translateBox.sourceLang ? translateBox.sourceLang.toUpperCase() : null);
   const directionLabel = $derived(sourceLabel ? `${sourceLabel} → ${targetLabel}` : `→ ${targetLabel}`);
-
-  // Clamp to the viewport (shared flip/clamp policy — see popoverPosition).
-  const pos = $derived(anchoredPosition(translateBox.x, translateBox.y, { maxW: 320, belowOffset: 12 }));
 
   function pick(p: TranslateProvider) {
     if (p === translateBox.provider) return;
@@ -32,25 +31,20 @@
   }
   function askAbout() {
     chat.draft = `Explain this passage:\n\n"${translateBox.source}"`;
-    openDock('ask');
     closeTranslate();
-  }
-  function onWindowKeydown(e: KeyboardEvent) {
-    if (translateBox.open && e.key === 'Escape') closeTranslate();
+    askInDock();
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onscroll={closeTranslate} />
-
 {#if translateBox.open}
   <div
+    {@attach aboveAnchor(translateBox.x, translateBox.y, 12)}
+    {@attach escapeLayer(closeTranslate)}
+    {@attach closeOnScroll(closeTranslate)}
     use:clickOutside={closeTranslate}
     role="dialog"
     aria-label="Translation"
     class="fixed z-50 w-80 max-w-[calc(100vw-1rem)] rounded-xl border border-stone-200 bg-paper shadow-2xl dark:border-stone-800 dark:bg-soot"
-    style:left="{pos.left}px"
-    style:top="{pos.top}px"
-    style:transform={pos.below ? 'none' : 'translateY(-100%)'}
   >
     <div class="flex items-center gap-2 border-b border-stone-200 px-3 py-2 dark:border-stone-800">
       <span class="font-serif text-amber-700 dark:text-amber-500">譯</span>

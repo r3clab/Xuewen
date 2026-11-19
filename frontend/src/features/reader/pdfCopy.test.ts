@@ -305,19 +305,20 @@ describe('fetchPending', () => {
 
   it('pdfSelectionFetchPending reads the registered copier and is false without one', () => {
     expect(pdfSelectionFetchPending('a')).toBe(false); // no copier registered
-    registerPdfCopy(copier);
+    const unregister = registerPdfCopy(copier);
     h.docs.a.change();
     expect(pdfSelectionFetchPending('a')).toBe(true);
-    registerPdfCopy(null);
+    unregister();
     expect(pdfSelectionFetchPending('a')).toBe(false);
   });
 });
 
 describe('attachPdfSelection', () => {
-  afterEach(() => registerPdfCopy(null));
+  let unregister = () => {};
+  afterEach(() => unregister());
 
   it('attaches to the registered copier', () => {
-    registerPdfCopy(copier);
+    unregister = registerPdfCopy(copier);
     const doc = fakeSelection('c', h.pending);
     const detach = attachPdfSelection('c', doc.source);
     h.setActive('c');

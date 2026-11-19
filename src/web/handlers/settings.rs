@@ -4,8 +4,9 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 
 use crate::app::App;
-use crate::config::TranslateProvider;
+use crate::config::{TranslateProvider, TranslateTrigger};
 use crate::web::error::ApiError;
+use crate::web::extract::ApiJson;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -57,8 +58,8 @@ struct TranslateSettings {
     #[ts(optional)]
     target_lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "\"auto\" | \"manual\"")]
-    trigger: Option<&'static str>,
+    #[ts(optional)]
+    trigger: Option<TranslateTrigger>,
 }
 
 impl TranslateSettings {
@@ -80,15 +81,13 @@ impl From<&crate::translate::TranslateService> for TranslateSettings {
             providers: Some(svc.providers()),
             default_provider: Some(svc.default_provider()),
             target_lang: Some(svc.target_lang().to_string()),
-            trigger: Some(match svc.trigger() {
-                crate::config::TranslateTrigger::Auto => "auto",
-                crate::config::TranslateTrigger::Manual => "manual",
-            }),
+            trigger: Some(svc.trigger()),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct ProxyCookieBody {
     cookie: String,
 }
@@ -120,7 +119,7 @@ async fn get_settings(State(app): State<App>) -> Result<Response, ApiError> {
 /// Store (overwrite) the EZproxy cookie.
 async fn set_proxy_cookie(
     State(app): State<App>,
-    Json(body): Json<ProxyCookieBody>,
+    ApiJson(body): ApiJson<ProxyCookieBody>,
 ) -> Result<Response, ApiError> {
     app.set_proxy_cookie(&body.cookie)
         .await

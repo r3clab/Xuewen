@@ -6,10 +6,13 @@
 //! strictly validated — a false None costs one LLM entry; a false Some
 //! shows a wrong popover.
 
+use chrono::Datelike;
 use regex::Regex;
 use std::sync::LazyLock;
 
 use super::StructuredReference;
+use crate::library::model::canonical_arxiv;
+use crate::metadata::identify::ARXIV_ID;
 
 /// `[12]` / `12.` entry markers left on entries by the frontend extraction.
 /// The `12.` form requires trailing whitespace so "1.5 Gbps…" survives.
@@ -35,11 +38,13 @@ pub(super) struct UniversalFields {
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://[^\s<>]+").unwrap());
 static DOI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b10\.\d{4,9}/[^\s<>]+").unwrap());
 static ARXIV_NEW_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(\d{4}\.\d{4,5})(?:v\d+)?\b").unwrap());
+    LazyLock::new(|| Regex::new(&format!(r"\b{ARXIV_ID}\b")).unwrap());
 static ARXIV_OLD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b([a-z-]+(?:\.[A-Z]{2})?/\d{7})\b").unwrap());
 static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:19|20)\d{2}\b").unwrap());
 static RANGE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+\s*[-–—]\s*\d+").unwrap());
+/// The latest year a reference can carry: next year's, for in-press work.
+static MAX_YEAR: LazyLock<i64> = LazyLock::new(|| i64::from(chrono::Utc::now().year()) + 1);
 
 pub(super) fn universal_fields(entry: &str) -> UniversalFields {
     let trim_trail = |s: &str| s.trim_end_matches(['.', ',', ';', ')']).to_string();
@@ -49,8 +54,8 @@ pub(super) fn universal_fields(entry: &str) -> UniversalFields {
     // evidence enough (DOI suffixes and decimals produce lookalikes).
     let arxiv_id = if entry.to_lowercase().contains("arxiv") {
         ARXIV_NEW_RE
-            .captures(entry)
-            .map(|c| c[1].to_string())
+            .find(entry)
+            .map(|m| canonical_arxiv(m.as_str()))
             .or_else(|| ARXIV_OLD_RE.captures(entry).map(|c| c[1].to_string()))
     } else {
         None
@@ -66,7 +71,7 @@ pub(super) fn universal_fields(entry: &str) -> UniversalFields {
     let year = YEAR_RE
         .find_iter(&cleaned)
         .filter_map(|m| m.as_str().parse::<i64>().ok())
-        .filter(|y| (1900..=2035).contains(y))
+        .filter(|y| (1900..=*MAX_YEAR).contains(y))
         .last();
     UniversalFields {
         year,
@@ -157,14 +162,6 @@ pub(super) enum Style {
     Plain,
 }
 
-impl Style {
-    /// Every variant, so `detect_style` can tally votes without an
-    /// enum-as-index invariant. A variant missing here panics the vote
-    /// (`position(..).expect`) the first time that style is seen — which the
-    /// per-style detection tests do on every run.
-    pub(super) const ALL: [Style; 4] = [Style::Ieee, Style::Acm, Style::Lncs, Style::Plain];
-}
-
 /// IEEE titles are quoted (straight or curly).
 pub(super) static QUOTED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"["\u{201C}]([^"\u{201C}\u{201D}]{4,}?)["\u{201D}]"#).unwrap());
@@ -212,17 +209,17 @@ pub(super) fn detect_style(entries: &[&str], venue: Option<&str>) -> Option<Styl
     if entries.is_empty() {
         return None;
     }
-    let mut counts = [0usize; Style::ALL.len()];
+    let mut votes: Vec<(Style, usize)> = Vec::new();
     for e in entries {
         let style = style_of_entry(e);
-        counts[Style::ALL
-            .iter()
-            .position(|&s| s == style)
-            .expect("Style::ALL lists every variant")] += 1;
+        match votes.iter_mut().find(|(s, _)| *s == style) {
+            Some((_, n)) => *n += 1,
+            None => votes.push((style, 1)),
+        }
     }
-    let (best, &max) = counts.iter().enumerate().max_by_key(|(_, c)| **c).unwrap();
+    let (best, max) = votes.into_iter().max_by_key(|&(_, n)| n).unwrap();
     if max * 10 >= entries.len() * 6 {
-        return Some(Style::ALL[best]);
+        return Some(best);
     }
     venue.and_then(venue_family_style)
 }
@@ -413,6 +410,15 @@ mod tests {
             u.url.as_deref(),
             Some("https://doi.org/10.48550/arXiv.1412.6980")
         );
+    }
+
+    #[test]
+    fn years_run_up_to_next_year() {
+        let next = i64::from(chrono::Utc::now().year()) + 1;
+        let at = |y: i64| universal_fields(&format!("A. Author. Title. In CCS, {y}.")).year;
+        assert_eq!(at(next), Some(next));
+        assert_eq!(at(next + 1), None);
+        assert_eq!(at(1900), Some(1900));
     }
 
     #[test]

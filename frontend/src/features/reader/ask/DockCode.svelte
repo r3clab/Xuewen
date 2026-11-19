@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getPaperCode, removePaperCode, setPaperCode } from './api';
   import type { PaperCodeStatus } from '$shared/api/generated/PaperCodeStatus';
+  import { errorMessage } from '$shared/errors';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
   import Spinner from '$shared/ui/Spinner.svelte';
 
@@ -13,25 +14,28 @@
   let error = $state<string | null>(null);
   let confirmingDetach = $state(false);
 
+  /// Only the newest request's answer may land: a status read overtaken by an
+  /// attach or a detach must not resurrect the status it replaced.
+  let latest = 0;
+
   async function refresh() {
+    const ticket = ++latest;
     try {
       const r = await getPaperCode(id);
+      if (ticket !== latest) return;
       code = r.code ?? null;
       loaded = true;
     } catch (e) {
-      error = (e as Error).message;
+      if (ticket === latest) error = errorMessage(e, 'loading the code status failed');
     }
   }
 
-  // Load on mount / paper change, and poll every 2s while a clone runs.
+  void refresh();
+  // The clone runs server-side and reports progress only through GET
+  // .../code, so poll while it runs (paused while an attach/detach is in
+  // flight, whose answer supersedes any read).
   $effect(() => {
-    void id;
-    loaded = false;
-    code = null;
-    void refresh();
-  });
-  $effect(() => {
-    if (code?.status !== 'cloning') return;
+    if (busy || code?.status !== 'cloning') return;
     const t = setInterval(() => void refresh(), 2000);
     return () => clearInterval(t);
   });
@@ -41,12 +45,14 @@
     if (!u) return;
     busy = true;
     error = null;
+    latest++;
     try {
       const r = await setPaperCode(id, u);
       code = r.code;
+      loaded = true;
       url = '';
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'attaching the repo failed');
     } finally {
       busy = false;
     }
@@ -55,11 +61,13 @@
   async function detach() {
     busy = true;
     error = null;
+    latest++;
     try {
       await removePaperCode(id);
       code = null;
+      loaded = true;
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'removing the repo failed');
     } finally {
       busy = false;
       confirmingDetach = false;

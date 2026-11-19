@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+use crate::agent::code::CloneLimits;
 use crate::agent::AgentService;
 use crate::annotations::AnnotationsService;
 use crate::citations::CitationsService;
@@ -51,12 +52,12 @@ struct Inner {
     /// Present only when the server was started to allow uploads (`serve`),
     /// or once a CLI command first asks for it.
     ingest: Option<Lazy<Ingest>>,
-    /// Present when a search index/service was opened (serve). `None` in
-    /// read-only test routers -> /api/search answers 503.
+    /// Present when a search index/service was opened (serve, watch). `None`
+    /// in read-only test routers -> /api/search answers 503.
     search: Option<Arc<SearchService>>,
-    /// Present when `serve` holds the vector store: its address is published
-    /// through it, and it is closed at shutdown so the lock goes even if a
-    /// task outlives the grace period.
+    /// Present when this process holds the vector store (serve, watch): a
+    /// server publishes its address through it, and it is closed at shutdown
+    /// so the lock goes even if a task outlives the grace period.
     vectors: Option<VectorStore>,
     /// Present when daily arXiv recommendations are configured (`serve`).
     /// `None` -> /api/daily answers 503.
@@ -83,7 +84,7 @@ struct Inner {
     summary: Lazy<Arc<SummaryService>, String>,
     /// Extra repo-clone hosts permitted beyond the built-in forges.
     clone_allowed_hosts: Vec<String>,
-    max_repo_mb: u64,
+    clone_limits: CloneLimits,
     tasks: Tasks,
     /// Set when a mutation would have woken the indexer but this process
     /// runs none (the CLI), so the caller can catch the index up itself.
@@ -108,7 +109,11 @@ impl App {
     }
 
     pub(crate) fn for_cli(cfg: &Config, pool: SqlitePool) -> App {
-        builder::cli(cfg, pool)
+        builder::cli(cfg, pool).build()
+    }
+
+    pub(crate) async fn for_watch(cfg: &Config, pool: SqlitePool) -> Result<App> {
+        builder::watch(cfg, pool).await
     }
 
     pub fn builder(pool: SqlitePool, library_root: PathBuf) -> AppBuilder {
@@ -201,10 +206,16 @@ impl App {
         &self.inner.preview
     }
 
-    pub(crate) fn wake_search(&self) {
+    /// The one notification every library mutation sends, so each service
+    /// that derives data from the library catches up.
+    pub(crate) fn library_changed(&self) {
         match &self.inner.search {
             Some(s) => s.wake(),
             None => self.inner.index_dirty.store(true, Ordering::SeqCst),
+        }
+        // Only a service built `Ready` has a worker loop to wake.
+        if let Lazy::Ready(s) = &self.inner.summary {
+            s.wake();
         }
     }
 

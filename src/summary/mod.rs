@@ -2,15 +2,32 @@
 //! returns a five-part `Summary`. Used by the daily feed and by per-paper
 //! library summaries (`SummaryService`).
 
+use std::path::Path;
+
 use anyhow::Result;
+
+use crate::pdf::Pages;
 
 mod service;
 pub mod store;
 
 pub(crate) use service::{run, SummaryService};
 
-/// Chars of extracted PDF text included in the full-text prompt.
-pub(crate) const FULL_TEXT_CAP: usize = 40_000;
+/// Pages a summary is written from: the paper proper, not its appendices.
+const SOURCE_PAGES: u32 = 12;
+/// Chars of that text included in the prompt.
+const FULL_TEXT_CAP: usize = 40_000;
+
+/// The text a summary of the PDF at `pdf` is generated from. Blocking: it
+/// runs `pdftotext`.
+pub(crate) fn source_text(pdf: &Path, title: &str) -> Result<String> {
+    crate::pdf::paper_text(pdf, Some(title), Pages::First(SOURCE_PAGES))
+}
+
+/// `source_text` for a PDF held in memory.
+pub(crate) async fn source_text_from_bytes(pdf: Vec<u8>, title: &str) -> Result<String> {
+    crate::pdf::paper_text_from_bytes(pdf, Some(title), SOURCE_PAGES).await
+}
 
 const SYSTEM: &str =
     "You summarize scientific papers accurately and concisely for a researcher's daily feed.";

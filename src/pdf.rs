@@ -28,7 +28,15 @@ fn run_pdftotext(path: &Path, extra_args: &[&str]) -> Result<String> {
         .arg(path)
         .arg("-") // write to stdout
         .output()
-        .map_err(|e| anyhow!("failed to run pdftotext (is poppler-utils installed?): {e}"))?;
+        .map_err(spawn_failed)?;
+    pdftotext_text(out)
+}
+
+fn spawn_failed(e: std::io::Error) -> anyhow::Error {
+    anyhow!("failed to run pdftotext (is poppler-utils installed?): {e}")
+}
+
+fn pdftotext_text(out: std::process::Output) -> Result<String> {
     if !out.status.success() {
         return Err(PdftotextFailed {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -43,10 +51,62 @@ pub(crate) fn extract_text(path: &Path, last_page: u32) -> Result<String> {
     run_pdftotext(path, &["-f", "1", "-l", &last_page.to_string()])
 }
 
-/// Extract text from the whole document (no page limit), pages separated by
-/// form feeds (`\f`), using the `pdftotext` binary.
-pub(crate) fn extract_text_all(path: &Path) -> Result<String> {
-    run_pdftotext(path, &[])
+/// `extract_text` for a PDF held in memory, piped through `pdftotext - -`.
+pub(crate) async fn extract_text_from_bytes(pdf: Vec<u8>, last_page: u32) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("pdftotext")
+        .args(["-f", "1", "-l", &last_page.to_string(), "-", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(spawn_failed)?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Fed concurrently with draining the output: pdftotext may block writing
+    // a full stdout pipe before it has read all of its input. A write that
+    // fails because pdftotext gave up on the input early is reported by its
+    // exit status instead.
+    let feed = async move {
+        let _ = stdin.write_all(&pdf).await;
+    };
+    let ((), out) = tokio::join!(feed, child.wait_with_output());
+    pdftotext_text(out?)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Pages {
+    All,
+    First(u32),
+}
+
+/// A paper's text as everything derived from it reads it — the search index,
+/// summaries, the agent's workspace: `pdftotext` output, pages separated by
+/// form feeds (`\f`), with the small-caps artifact of the paper's own title
+/// repaired.
+pub(crate) fn paper_text(path: &Path, title: Option<&str>, pages: Pages) -> Result<String> {
+    let text = match pages {
+        Pages::All => run_pdftotext(path, &[])?,
+        Pages::First(last_page) => extract_text(path, last_page)?,
+    };
+    Ok(title_repaired(text, title))
+}
+
+/// `paper_text` for a PDF held in memory, up to `last_page`.
+pub(crate) async fn paper_text_from_bytes(
+    pdf: Vec<u8>,
+    title: Option<&str>,
+    last_page: u32,
+) -> Result<String> {
+    let text = extract_text_from_bytes(pdf, last_page).await?;
+    Ok(title_repaired(text, title))
+}
+
+fn title_repaired(text: String, title: Option<&str>) -> String {
+    match title {
+        Some(title) => repair_smallcaps(&text, title),
+        None => text,
+    }
 }
 
 /// Repair pdftotext's small-caps artifact for a paper's own name: a word
@@ -55,7 +115,7 @@ pub(crate) fn extract_text_all(path: &Path) -> Result<String> {
 /// summaries parrot "RTC ON"). For every distinctive token of the resolved
 /// title (≥4 chars, ≥2 uppercase), rejoin two-piece uppercase splits of that
 /// token — both pieces ≥2 chars so ordinary words are never glued together.
-pub(crate) fn repair_smallcaps(text: &str, title: &str) -> String {
+fn repair_smallcaps(text: &str, title: &str) -> String {
     let mut out = text.to_string();
     for token in title.split(|c: char| !c.is_ascii_alphanumeric()) {
         if token.len() < 4 || token.chars().filter(|c| c.is_ascii_uppercase()).count() < 2 {
@@ -83,48 +143,13 @@ pub(crate) fn repair_smallcaps(text: &str, title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use printpdf::*;
-
-    /// A single-page PDF page carrying one Helvetica line near the top.
-    fn text_page(line: &str) -> PdfPage {
-        let ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(12.0),
-            },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(15.0), Mm(280.0)),
-            },
-            Op::ShowText {
-                items: vec![TextItem::Text(line.to_string())],
-            },
-            Op::EndTextSection,
-        ];
-        PdfPage::new(Mm(210.0), Mm(297.0), ops)
-    }
-
-    fn write_pdf(path: &Path, line: &str) {
-        let mut doc = PdfDocument::new("t");
-        let bytes = doc
-            .with_pages(vec![text_page(line)])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(path, bytes).unwrap();
-    }
-
-    fn write_two_page_pdf(path: &Path, line1: &str, line2: &str) {
-        let mut doc = PdfDocument::new("t");
-        let bytes = doc
-            .with_pages(vec![text_page(line1), text_page(line2)])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(path, bytes).unwrap();
-    }
+    use crate::testutil::write_pdf;
 
     #[test]
     fn extracts_known_text() {
         let dir = tempfile::tempdir().unwrap();
         let pdf = dir.path().join("sample.pdf");
-        write_pdf(&pdf, "Attention Is All You Need");
+        write_pdf(&pdf, &["Attention Is All You Need"]);
         let text = extract_text(&pdf, 1).unwrap();
         assert!(
             text.contains("Attention Is All You Need"),
@@ -132,15 +157,56 @@ mod tests {
         );
     }
 
-    #[test]
-    fn extract_text_all_returns_every_page_with_separators() {
+    #[tokio::test]
+    async fn extracts_text_from_bytes_up_to_the_last_page() {
         let dir = tempfile::tempdir().unwrap();
         let pdf = dir.path().join("two.pdf");
-        write_two_page_pdf(&pdf, "First Page Words", "Second Page Words");
-        let text = extract_text_all(&pdf).unwrap();
+        write_pdf(&pdf, &["First Page Words", "Second Page Words"]);
+        let bytes = std::fs::read(&pdf).unwrap();
+        let first = extract_text_from_bytes(bytes.clone(), 1).await.unwrap();
+        assert!(first.contains("First Page Words"), "got: {first:?}");
+        assert!(!first.contains("Second Page Words"), "got: {first:?}");
+        let both = extract_text_from_bytes(bytes, 2).await.unwrap();
+        assert!(both.contains("Second Page Words"), "got: {both:?}");
+
+        let err = extract_text_from_bytes(b"this is not a pdf".to_vec(), 1)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<PdftotextFailed>().is_some(),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn paper_text_returns_every_page_with_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("two.pdf");
+        write_pdf(&pdf, &["First Page Words", "Second Page Words"]);
+        let text = paper_text(&pdf, None, Pages::All).unwrap();
         assert!(text.contains("First Page Words"));
         assert!(text.contains("Second Page Words"));
         assert!(text.contains('\u{0c}'), "pdftotext page separator expected");
+
+        let first = paper_text(&pdf, None, Pages::First(1)).unwrap();
+        assert!(first.contains("First Page Words"));
+        assert!(!first.contains("Second Page Words"));
+    }
+
+    #[tokio::test]
+    async fn paper_text_repairs_its_own_titles_smallcaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("one.pdf");
+        write_pdf(&pdf, &["we present RTC ON here"]);
+        let title = Some("RTCON: Fuzzing RTOS Kernels");
+        let text = paper_text(&pdf, title, Pages::All).unwrap();
+        assert!(text.contains("we present RTCON here"), "got: {text:?}");
+        let raw = paper_text(&pdf, None, Pages::All).unwrap();
+        assert!(raw.contains("RTC ON"));
+        let from_bytes = paper_text_from_bytes(std::fs::read(&pdf).unwrap(), title, 1)
+            .await
+            .unwrap();
+        assert_eq!(from_bytes, text);
     }
 
     #[test]

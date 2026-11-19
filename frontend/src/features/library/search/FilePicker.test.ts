@@ -15,6 +15,7 @@ import * as api from '$features/library/api';
 import FilePicker from './FilePicker.svelte';
 import { library } from '$features/library/state.svelte';
 import { finder } from './state.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
 import { viewer } from '$features/reader/tabs/state.svelte';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 
@@ -46,7 +47,7 @@ describe('FilePicker corpus', () => {
     library.papers = [corpus[0]];
     render(FilePicker);
     await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
-    expect(api.listPapers).toHaveBeenCalledWith({ q: '', status: 'all', sort: 'added_desc', project: 'all' });
+    expect(api.listPapers).toHaveBeenCalledWith({ sort: 'added_desc' });
   });
 
   it('falls back to the loaded list until the fetch resolves', () => {
@@ -116,11 +117,28 @@ describe('FilePicker keyboard', () => {
   });
 
   it('closes on Escape without opening anything', async () => {
+    window.addEventListener('keydown', dismissTopLayer);
     render(FilePicker);
     await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
     await userEvent.keyboard('{Escape}');
     expect(finder.open).toBe(false);
     expect(viewer.tabs).toHaveLength(0);
+    window.removeEventListener('keydown', dismissTopLayer);
+  });
+
+  it('opens as a modal dialog with the cursor in the query', () => {
+    render(FilePicker);
+    expect(screen.getByRole('dialog', { name: 'Find paper' })).toHaveAttribute('open');
+    expect(document.activeElement).toBe(screen.getByRole('combobox'));
+  });
+
+  it('moves the highlight home whenever the query changes', async () => {
+    render(FilePicker);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}');
+    expect(screen.getAllByRole('option')[2]).toHaveAttribute('aria-selected', 'true');
+    await userEvent.keyboard('e');
+    expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true');
   });
 });
 

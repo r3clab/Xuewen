@@ -1,8 +1,9 @@
-import { getPaper, getStats, listPapers, setStar } from './api';
+import { exportPapers, getPaper, getStats, listPapers, setStar } from './api';
 import { searchPapers } from '$features/library/search/api';
-import { hasSearchTerms, parseQuery } from '$features/library/search/query';
-import { filters, searchMeta, searchOpts } from '$features/library/search/state.svelte';
-import { cachedDetail, library, patchDetail, setDetail, stats } from './state.svelte';
+import { engines, filters, searchMeta } from '$features/library/search/state.svelte';
+import { bibFormat, cachedDetail, library, patchDetail, setDetail, stats } from './state.svelte';
+import { downloadBlob } from '$shared/browser/download';
+import { errorMessage } from '$shared/errors';
 import { toast } from '$shared/ui/toasts.svelte';
 import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 
@@ -20,29 +21,38 @@ export async function loadPapers(opts?: { keywordOnly?: boolean }): Promise<void
   library.loading = true;
   library.error = null;
   try {
-    const parsed = parseQuery(filters.q);
-    if (!hasSearchTerms(parsed)) {
-      // Qualifier-only (or empty) query → plain filtered list. The parsed
-      // filters are already cached on `filters`; q itself must not leak in.
-      const papers = await listPapers({ ...filters, q: '' });
+    if (!filters.searching) {
+      // Qualifier-only (or empty) query: the plain filtered, sorted list.
+      const papers = await listPapers({ q: filters.q, sort: filters.sort });
       if (my !== seq) return; // a newer request superseded this one
       library.papers = papers;
       searchMeta.byId = {};
     } else {
-      const keywordOnly = Boolean(opts?.keywordOnly) || !searchOpts.semantic;
-      const resp = await searchPapers(filters.q, { ...searchOpts }, keywordOnly);
+      const keywordOnly = Boolean(opts?.keywordOnly) || !engines.semantic;
+      const resp = await searchPapers(filters.q, engines, keywordOnly);
       if (my !== seq) return;
       library.papers = resp.results.map((r) => r.paper);
       searchMeta.byId = Object.fromEntries(resp.results.map((r) => [r.paper.id, r.match]));
       searchMeta.semantic = { available: resp.semantic.available, reason: resp.semantic.reason };
     }
   } catch (e) {
-    if (my === seq) library.error = (e as Error).message;
+    if (my === seq) library.error = errorMessage(e, 'loading the library failed');
   } finally {
     if (my === seq) {
       library.loading = false;
       library.loaded = true;
     }
+  }
+}
+
+/// Download the rows the table shows, in its order, as one .bib file — the
+/// same set whether it came from a filter or a ranked search.
+export async function exportShownPapers(): Promise<void> {
+  try {
+    const blob = await exportPapers({ ids: library.papers.map((p) => p.id), format: bibFormat.value });
+    downloadBlob(blob, 'xuewen.bib');
+  } catch (e) {
+    toast('error', `Couldn't export: ${errorMessage(e, 'export failed')}`);
   }
 }
 
@@ -69,8 +79,8 @@ export async function toggleStar(paperId: string): Promise<void> {
   } catch (e) {
     if (row) row.starred = prev;
     patchDetail(paperId, { starred: prev });
-    toast('error', `Couldn't update star: ${(e as Error).message}`);
+    toast('error', `Couldn't update star: ${errorMessage(e, 'star failed')}`);
     return;
   }
-  if (filters.starred !== undefined) await loadPapers();
+  if (filters.starred) await loadPapers();
 }

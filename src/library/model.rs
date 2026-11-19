@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identifier {
@@ -25,16 +25,18 @@ impl Identifier {
 
 /// Canonical DOI: lowercase. DOIs compare case-insensitively by spec, but a
 /// PDF banner prints whatever case the publisher chose, while Crossref returns
-/// lowercase — stored as-is the two never matched (`papers::find_by_identifier`
-/// additionally tolerates legacy mixed-case rows with COLLATE NOCASE).
+/// lowercase — stored as-is the two would never match.
 pub(crate) fn canonical_doi(doi: &str) -> String {
     doi.to_ascii_lowercase()
 }
 
+/// arXiv's abstract page and PDF for an id: `{base}/{id}`.
+pub(crate) const ARXIV_ABS_BASE: &str = "https://arxiv.org/abs";
+pub(crate) const ARXIV_PDF_BASE: &str = "https://arxiv.org/pdf";
+
 /// Canonical arXiv id: the trailing `v<N>` version suffix is stripped —
 /// `1706.03762v5` and `1706.03762` are the same work, and a versioned stored
-/// id would never dedupe against a bare one (`papers::find_by_identifier`
-/// additionally tolerates legacy versioned rows).
+/// id would never dedupe against a bare one.
 pub(crate) fn canonical_arxiv(id: &str) -> String {
     let id = id.trim();
     match id.rfind(['v', 'V']) {
@@ -89,9 +91,21 @@ impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Authors {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, sqlx::Type, ts_rs::TS)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ts_rs::TS,
+    clap::ValueEnum,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
 #[ts(export)]
 pub enum PaperStatus {
     Resolved,
@@ -148,12 +162,10 @@ pub struct Paper {
     pub cite_key: Option<String>,
     pub added_at: String,
     pub deleted_at: Option<String>,
-    #[sqlx(default)]
     pub starred: bool,
     /// Manual "known as" name (the system/tool the paper proposes, e.g.
     /// "RVSpec"). Lives outside `PaperMeta` on purpose: identify/refresh
     /// replace the whole metadata block, and this field must survive that.
-    #[sqlx(default)]
     pub name: Option<String>,
     #[sqlx(flatten)]
     #[serde(flatten)]
@@ -178,6 +190,44 @@ impl std::fmt::Display for NameError {
 }
 
 impl std::error::Error for NameError {}
+
+/// Storing the name of a uniquely named row — a project or a tag — failed.
+#[derive(Debug)]
+pub enum NameWriteError {
+    /// Another row of this kind (`"project"`, `"tag"`) already has the name.
+    Taken(&'static str),
+    Db(sqlx::Error),
+}
+
+impl NameWriteError {
+    pub(crate) fn of(kind: &'static str) -> impl FnOnce(sqlx::Error) -> Self {
+        move |e| {
+            if crate::db::violates_unique(&e) {
+                NameWriteError::Taken(kind)
+            } else {
+                NameWriteError::Db(e)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for NameWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameWriteError::Taken(kind) => write!(f, "a {kind} with that name already exists"),
+            NameWriteError::Db(_) => f.write_str("saving the name failed"),
+        }
+    }
+}
+
+impl std::error::Error for NameWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            NameWriteError::Taken(_) => None,
+            NameWriteError::Db(e) => Some(e),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

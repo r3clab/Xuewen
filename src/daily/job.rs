@@ -1,14 +1,13 @@
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::Utc;
 use futures_util::StreamExt;
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::{feed, score, store, DailyService, ARXIV_ABS_BASE, ARXIV_PDF_BASE};
-use crate::summary::{generate_summary, FULL_TEXT_CAP};
+use super::store::{self, DailyStatus};
+use super::{feed, score, DailyService};
+use crate::library::model::{ARXIV_ABS_BASE, ARXIV_PDF_BASE};
+use crate::summary::generate_summary;
 
-/// Pages of the PDF fed to the summary prompt.
-const SUMMARY_PDF_PAGES: u32 = 12;
 /// Candidates summarized concurrently (each = PDF fetch + LLM call). Bounded
 /// so a run doesn't hammer arXiv or trip the LLM rate limit.
 const SUMMARY_CONCURRENCY: usize = 4;
@@ -55,7 +54,7 @@ async fn run_once_with_deadline(
         Err(_) => Err(anyhow!("daily run timed out after {}s", deadline.as_secs())),
     };
     let (status, found, error) = match outcome {
-        Ok(PipelineOutcome { found: 0, .. }) => ("empty", 0, None),
+        Ok(PipelineOutcome { found: 0, .. }) => (DailyStatus::Empty, 0, None),
         Ok(PipelineOutcome {
             found,
             kept,
@@ -71,19 +70,19 @@ async fn run_once_with_deadline(
             } else {
                 None
             };
-            ("ok", found, error)
+            (DailyStatus::Ok, found, error)
         }
         Err(e) => {
             tracing::error!("daily run {batch_date} failed: {e:#}");
-            ("failed", 0, Some(format!("{e:#}")))
+            (DailyStatus::Failed, 0, Some(format!("{e:#}")))
         }
     };
     let run = store::DailyRun {
         batch_date: batch_date.to_string(),
-        status: status.to_string(),
+        status,
         papers_found: found,
         error,
-        ran_at: Utc::now().to_rfc3339(),
+        ran_at: crate::db::now_rfc3339(),
     };
     if let Err(e) = store::record_run(&svc.pool, &run).await {
         tracing::error!("recording daily run {batch_date}: {e:#}");
@@ -148,7 +147,7 @@ async fn pipeline(svc: &DailyService, batch_date: &str) -> Result<PipelineOutcom
             .into_iter()
             .enumerate()
             .map(|(i, (s, c))| async move {
-                let full_text = match fetch_pdf_text(svc, &c.arxiv_id).await {
+                let full_text = match fetch_pdf_text(svc, &c.arxiv_id, &c.title).await {
                     Ok(t) => Some(t),
                     Err(e) => {
                         tracing::warn!("PDF text for {}: {e:#}", c.arxiv_id);
@@ -168,7 +167,6 @@ async fn pipeline(svc: &DailyService, batch_date: &str) -> Result<PipelineOutcom
                     abstract_text: c.abstract_text,
                     categories: c.categories,
                     score: s as f64,
-                    tldr: summary.as_ref().map(|sum| sum.tldr.clone()),
                     summary,
                     code_url,
                     abs_url: format!("{ARXIV_ABS_BASE}/{}", c.arxiv_id),
@@ -189,34 +187,16 @@ async fn pipeline(svc: &DailyService, batch_date: &str) -> Result<PipelineOutcom
     })
 }
 
-/// Download the paper's PDF and return the text of its first pages,
-/// capped for the prompt. Any failure here is per-paper and non-fatal.
-async fn fetch_pdf_text(svc: &DailyService, arxiv_id: &str) -> Result<String> {
+/// Download the paper's PDF and return the text a summary is written from.
+/// Any failure here is per-paper and non-fatal.
+async fn fetch_pdf_text(svc: &DailyService, arxiv_id: &str, title: &str) -> Result<String> {
     let url = format!("{}/{}", svc.pdf_base, arxiv_id);
     let resp = svc.plain_http.get(&url).timeout(PDF_TIMEOUT).send().await?;
     if !resp.status().is_success() {
         bail!("PDF download {url}: {}", resp.status());
     }
-    let bytes = resp.bytes().await?;
-    if bytes.len() > PDF_MAX_BYTES {
-        bail!("PDF too large: {} bytes", bytes.len());
-    }
-    let path = std::env::temp_dir().join(format!("xuewen-daily-{}.pdf", uuid::Uuid::now_v7()));
-    // The image may lack /tmp entirely; pdftotext is a blocking subprocess —
-    // both belong on the blocking pool, not an async worker.
-    tokio::task::spawn_blocking(move || -> Result<String> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let result = (|| -> Result<String> {
-            std::fs::write(&path, &bytes)?;
-            let text = crate::pdf::extract_text(&path, SUMMARY_PDF_PAGES)?;
-            Ok(text.chars().take(FULL_TEXT_CAP).collect())
-        })();
-        let _ = std::fs::remove_file(&path);
-        result
-    })
-    .await?
+    let bytes = crate::http::read_body_capped(resp, PDF_MAX_BYTES).await?;
+    crate::summary::source_text_from_bytes(bytes, title).await
 }
 
 async fn prune_old(svc: &DailyService, batch_date: &str) -> Result<()> {
@@ -279,11 +259,8 @@ Abstract: Very similar to the library.</summary>
   <title>cs.AI updates on arXiv.org</title>
 </feed>"#;
 
-    async fn pool_with_library_paper() -> sqlx::SqlitePool {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", dir.path().join("t.db").display());
-        let pool = crate::db::connect(&url).await.unwrap();
-        std::mem::forget(dir);
+    async fn pool_with_library_paper() -> (tempfile::TempDir, sqlx::SqlitePool) {
+        let (dir, pool) = crate::testutil::temp_pool().await;
         let p = crate::library::model::Paper {
             id: "lib1".into(),
             content_hash: "h".into(),
@@ -308,7 +285,7 @@ Abstract: Very similar to the library.</summary>
             },
         };
         crate::library::papers::insert(&pool, &p).await.unwrap();
-        pool
+        (dir, pool)
     }
 
     fn cfg() -> DailyConfig {
@@ -321,16 +298,21 @@ Abstract: Very similar to the library.</summary>
         }
     }
 
-    async fn service(server: &MockServer, pool: sqlx::SqlitePool) -> std::sync::Arc<DailyService> {
-        DailyService::for_tests(
+    async fn service(
+        server: &MockServer,
+        pool: sqlx::SqlitePool,
+    ) -> (tempfile::TempDir, std::sync::Arc<DailyService>) {
+        let (dir, vectors) = crate::testutil::temp_vectors(4).await;
+        let svc = DailyService::for_tests(
             cfg(),
             pool,
             Embedder::for_tests(&format!("{}/v1", server.uri()), "m", 4),
-            crate::testutil::temp_vectors(4).await,
+            vectors,
             LlmClient::new(&format!("{}/v1", server.uri()), "m", None),
             &format!("{}/atom", server.uri()),
             &format!("{}/pdf", server.uri()),
-        )
+        );
+        (dir, svc)
     }
 
     /// lib1's summary vector: parallel to candidate B, orthogonal to A.
@@ -348,7 +330,7 @@ Abstract: Very similar to the library.</summary>
 
     #[tokio::test]
     async fn full_run_dedupes_ranks_and_stores() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
@@ -385,11 +367,11 @@ Abstract: Very similar to the library.</summary>
             .mount(&server)
             .await;
 
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         seed_library_vector(&svc).await;
         let run = run_once(&svc, "2026-07-10").await;
 
-        assert_eq!(run.status, "ok");
+        assert_eq!(run.status, DailyStatus::Ok);
         assert_eq!(run.papers_found, 2, "library paper must be deduped");
         let (date, papers) = store::latest_batch(&pool).await.unwrap().unwrap();
         assert_eq!(date, "2026-07-10");
@@ -400,7 +382,7 @@ Abstract: Very similar to the library.</summary>
         );
         assert_eq!(papers[0].rank, 1);
         assert!(papers[0].score > papers[1].score);
-        assert_eq!(papers[0].tldr.as_deref(), Some("A TLDR."));
+        assert_eq!(papers[0].tldr(), Some("A TLDR."));
         let s = papers[0].summary.as_ref().expect("summary stored");
         assert_eq!(s.tldr, "A TLDR.");
         assert_eq!(s.problem, "Gap.");
@@ -411,12 +393,12 @@ Abstract: Very similar to the library.</summary>
         assert_eq!(papers[0].abs_url, "https://arxiv.org/abs/2507.00003");
         assert_eq!(papers[0].pdf_url, "https://arxiv.org/pdf/2507.00003");
         let recorded = store::get_run(&pool, "2026-07-10").await.unwrap().unwrap();
-        assert_eq!(recorded.status, "ok");
+        assert_eq!(recorded.status, DailyStatus::Ok);
     }
 
     #[tokio::test]
     async fn all_summaries_failing_is_recorded_on_ok_run() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
@@ -449,21 +431,21 @@ Abstract: Very similar to the library.</summary>
             .mount(&server)
             .await;
 
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         seed_library_vector(&svc).await;
         let run = run_once(&svc, "2026-07-10").await;
 
-        assert_eq!(run.status, "ok");
+        assert_eq!(run.status, DailyStatus::Ok);
         assert!(run.error.unwrap().contains("2/2 summaries failed"));
         let (_, papers) = store::latest_batch(&pool).await.unwrap().unwrap();
         assert!(papers
             .iter()
-            .all(|p| p.summary.is_none() && p.tldr.is_none()));
+            .all(|p| p.summary.is_none() && p.tldr().is_none()));
     }
 
     #[tokio::test]
     async fn run_deadline_records_timed_out_failure() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
@@ -474,10 +456,10 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         let run =
             run_once_with_deadline(&svc, "2026-07-10", std::time::Duration::from_millis(50)).await;
-        assert_eq!(run.status, "failed");
+        assert_eq!(run.status, DailyStatus::Failed);
         assert!(run.error.unwrap().contains("timed out"));
         // The failure is recorded, so the scheduler's hourly retry will fire.
         assert!(store::get_run(&pool, "2026-07-10").await.unwrap().is_some());
@@ -485,47 +467,47 @@ Abstract: Very similar to the library.</summary>
 
     #[tokio::test]
     async fn empty_feed_records_empty_run() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
             .respond_with(ResponseTemplate::new(200).set_body_string(EMPTY_FEED))
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
-        assert_eq!(run.status, "empty");
+        assert_eq!(run.status, DailyStatus::Empty);
         assert_eq!(run.papers_found, 0);
         assert!(store::latest_batch(&pool).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn feed_failure_records_failed_run() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
-        assert_eq!(run.status, "failed");
+        assert_eq!(run.status, DailyStatus::Failed);
         assert!(run.error.is_some());
     }
 
     #[tokio::test]
     async fn missing_library_vectors_fail_with_clear_error() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
             .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
             .mount(&server)
             .await;
-        let svc = service(&server, pool.clone()).await;
+        let (_vectors, svc) = service(&server, pool.clone()).await;
         let run = run_once(&svc, "2026-07-10").await;
-        assert_eq!(run.status, "failed");
+        assert_eq!(run.status, DailyStatus::Failed);
         assert!(
             run.error.unwrap().contains("no indexed library papers"),
             "error should tell the user to build the index"
@@ -534,7 +516,7 @@ Abstract: Very similar to the library.</summary>
 
     #[tokio::test]
     async fn run_guarded_refuses_concurrent_runs() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         // Slow feed keeps the first run in flight.
         Mock::given(method("GET"))
@@ -546,15 +528,79 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool).await;
+        let (_vectors, svc) = service(&server, pool).await;
         assert!(svc.spawn_run("2026-07-10".into(), &crate::tasks::Tasks::new()));
         assert!(svc.is_running());
         assert!(svc.run_guarded("2026-07-10").await.is_none());
     }
 
+    async fn stalled_feed() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/atom/cs.AI+cs.LG"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(EMPTY_FEED)
+                    .set_delay(std::time::Duration::from_secs(600)),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn assert_shutdown_is_prompt(tasks: &crate::tasks::Tasks) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tasks.shutdown(std::time::Duration::from_secs(600)),
+        )
+        .await
+        .expect("shutdown must not wait out an in-flight run");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_triggered_run() {
+        let (_db, pool) = pool_with_library_paper().await;
+        let server = stalled_feed().await;
+        let (_vectors, svc) = service(&server, pool).await;
+        let tasks = crate::tasks::Tasks::new();
+        assert!(svc.spawn_run("2026-07-10".into(), &tasks));
+        assert_shutdown_is_prompt(&tasks).await;
+        assert!(!svc.is_running());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_scheduled_run() {
+        let (_db, pool) = pool_with_library_paper().await;
+        let server = stalled_feed().await;
+        let (_dir, vectors) = crate::testutil::temp_vectors(4).await;
+        let svc = DailyService::for_tests(
+            DailyConfig {
+                run_at: "00:00".into(),
+                ..cfg()
+            },
+            pool,
+            Embedder::for_tests(&format!("{}/v1", server.uri()), "m", 4),
+            vectors,
+            LlmClient::new(&format!("{}/v1", server.uri()), "m", None),
+            &format!("{}/atom", server.uri()),
+            &format!("{}/pdf", server.uri()),
+        );
+        let tasks = crate::tasks::Tasks::new();
+        tasks.spawn(crate::daily::scheduler::run(svc.clone(), tasks.token()));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !svc.is_running() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the boot catch-up starts a run");
+        assert_shutdown_is_prompt(&tasks).await;
+        assert!(!svc.is_running());
+    }
+
     #[tokio::test]
     async fn run_flag_clears_when_run_future_is_dropped() {
-        let pool = pool_with_library_paper().await;
+        let (_db, pool) = pool_with_library_paper().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/atom/cs.AI+cs.LG"))
@@ -565,7 +611,7 @@ Abstract: Very similar to the library.</summary>
             )
             .mount(&server)
             .await;
-        let svc = service(&server, pool).await;
+        let (_vectors, svc) = service(&server, pool).await;
         {
             let fut = svc.run_guarded("2026-07-10");
             tokio::pin!(fut);

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import FilterPills from './FilterPills.svelte';
 import { projects, tags } from '$features/library/organization/state.svelte';
 import { filters } from './state.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
 
 const project = { id: 'pr1', name: 'NLP', paper_count: 3, created_at: '' };
 const tag = { id: 't1', name: 'nlp/eval', paper_count: 2, created_at: '' };
@@ -32,15 +33,16 @@ function fetchCalls(): [string, { method?: string } | undefined][] {
 
 beforeEach(() => {
   filters.q = '';
-  filters.status = 'all';
   filters.sort = 'year_desc';
-  filters.project = 'all';
-  filters.tag = undefined;
-  filters.starred = undefined;
   projects.items = [project];
   tags.items = [tag];
   vi.unstubAllGlobals();
   stubFetch();
+});
+
+beforeEach(() => {
+  window.addEventListener('keydown', dismissTopLayer);
+  return () => window.removeEventListener('keydown', dismissTopLayer);
 });
 
 const projectZone = { props: { zone: 'projects' as const } };
@@ -71,7 +73,7 @@ describe('FilterPills pill context menu', () => {
   it('left-clicking a pill still toggles the filter, not the menu', async () => {
     render(FilterPills, projectZone);
     await userEvent.click(screen.getByRole('button', { name: 'NLP 3' }));
-    await waitFor(() => expect(filters.project).toBe('pr1'));
+    await waitFor(() => expect(filters.project?.id).toBe('pr1'));
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
@@ -118,6 +120,22 @@ describe('FilterPills pill context menu', () => {
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('the delete confirm takes focus, so Enter confirms', async () => {
+    render(FilterPills, projectZone);
+    await fireEvent.contextMenu(screen.getByRole('button', { name: 'NLP 3' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Delete' }));
+  });
+
+  it('Escape in the rename field steps back to the actions, keeping the menu', async () => {
+    render(FilterPills, projectZone);
+    await fireEvent.contextMenu(screen.getByRole('button', { name: 'NLP 3' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Rename NLP' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
   });
 
   it('a successful delete does not leave the next rename stuck busy', async () => {

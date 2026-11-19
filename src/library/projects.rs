@@ -4,8 +4,8 @@ use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 
-use super::model::NameError;
-use crate::db::now_rfc3339;
+use super::model::{NameError, NameWriteError};
+use crate::db::{escape_like, now_rfc3339};
 
 /// A named group of related papers. Column names match the `projects` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow, ts_rs::TS)]
@@ -26,8 +26,6 @@ pub struct ProjectSummary {
     pub paper_count: i64,
 }
 
-pub(crate) const NAME_TAKEN: &str = "a project with that name already exists";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectName(String);
 
@@ -45,7 +43,7 @@ impl ProjectName {
     }
 }
 
-pub async fn create(pool: &SqlitePool, name: &ProjectName) -> Result<Project> {
+pub async fn create(pool: &SqlitePool, name: &ProjectName) -> Result<Project, NameWriteError> {
     let project = Project {
         id: uuid::Uuid::now_v7().to_string(),
         name: name.as_str().to_string(),
@@ -56,7 +54,8 @@ pub async fn create(pool: &SqlitePool, name: &ProjectName) -> Result<Project> {
         .bind(&project.name)
         .bind(&project.created_at)
         .execute(pool)
-        .await?;
+        .await
+        .map_err(NameWriteError::of("project"))?;
     Ok(project)
 }
 
@@ -91,16 +90,16 @@ pub(crate) async fn update(
     pool: &SqlitePool,
     id: &str,
     name: Option<&ProjectName>,
-) -> Result<Option<Project>> {
-    let p = sqlx::query_as::<_, Project>(
+) -> Result<Option<Project>, NameWriteError> {
+    sqlx::query_as::<_, Project>(
         "UPDATE projects SET name = COALESCE(?1, name) WHERE id = ?2 \
          RETURNING id, name, created_at",
     )
     .bind(name.map(ProjectName::as_str))
     .bind(id)
     .fetch_optional(pool)
-    .await?;
-    Ok(p)
+    .await
+    .map_err(NameWriteError::of("project"))
 }
 
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<bool> {
@@ -206,11 +205,11 @@ pub(crate) async fn find_one(pool: &SqlitePool, sel: &str) -> Result<Project> {
     if let Some(p) = get(pool, sel).await? {
         return Ok(p);
     }
-    let pattern = format!("{sel}%");
-    let mut matches = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id LIKE ?")
-        .bind(&pattern)
-        .fetch_all(pool)
-        .await?;
+    let mut matches =
+        sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id LIKE ? ESCAPE '\\'")
+            .bind(format!("{}%", escape_like(sel)))
+            .fetch_all(pool)
+            .await?;
     match matches.len() {
         0 => bail!("no project named or id-prefixed {sel:?}"),
         1 => Ok(matches.pop().unwrap()),
@@ -221,7 +220,6 @@ pub(crate) async fn find_one(pool: &SqlitePool, sel: &str) -> Result<Project> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::is_unique_violation;
     use crate::testutil::temp_pool;
 
     fn name(raw: &str) -> ProjectName {
@@ -236,9 +234,10 @@ mod tests {
         assert_eq!(p.name, "Survey");
 
         // Case-insensitive unique name.
-        let dup = create(&pool, &name("survey")).await;
-        assert!(dup.is_err());
-        assert!(is_unique_violation(&dup.unwrap_err()));
+        assert!(matches!(
+            create(&pool, &name("survey")).await,
+            Err(NameWriteError::Taken("project"))
+        ));
 
         // List with counts (zero members yet).
         let list = list(&pool).await.unwrap();
@@ -268,6 +267,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renaming_onto_an_existing_project_name_is_taken() {
+        let (_dir, pool) = temp_pool().await;
+        create(&pool, &name("Survey")).await.unwrap();
+        let other = create(&pool, &name("Other")).await.unwrap();
+        assert!(matches!(
+            update(&pool, &other.id, Some(&name("SURVEY"))).await,
+            Err(NameWriteError::Taken("project"))
+        ));
+    }
+
+    #[tokio::test]
     async fn find_one_project_by_name_then_prefix() {
         let (_dir, pool) = temp_pool().await;
         let p = create(&pool, &name("My Survey")).await.unwrap();
@@ -278,5 +288,7 @@ mod tests {
         assert_eq!(find_one(&pool, &p.id[..8]).await.unwrap().id, p.id);
         // Miss.
         assert!(find_one(&pool, "nope").await.is_err());
+        // A LIKE wildcard is a literal character, not "any project".
+        assert!(find_one(&pool, "%").await.is_err());
     }
 }

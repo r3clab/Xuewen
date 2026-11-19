@@ -8,6 +8,8 @@
 <script lang="ts">
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
   import ContextMenuShell from '$shared/ui/ContextMenuShell.svelte';
+  import { errorMessage } from '$shared/errors';
+  import { focusOnMount } from '$shared/ui/focus';
 
   let {
     kind,
@@ -29,17 +31,8 @@
 
   let mode = $state<'menu' | 'rename' | 'delete'>('menu');
   let renameValue = $state('');
-  let renameInput = $state<HTMLInputElement | null>(null);
-  let confirmEl = $state<HTMLDivElement | null>(null);
   let busy = $state(false);
   let error = $state<string | null>(null);
-
-  // Rename focuses its input; the delete confirm focuses its first button so
-  // Enter-ing "Delete" flows straight into confirm-or-cancel by keyboard.
-  $effect(() => {
-    if (mode === 'rename') renameInput?.focus();
-    else if (mode === 'delete') confirmEl?.querySelector<HTMLElement>('button')?.focus();
-  });
 
   function backToMenu() {
     mode = 'menu';
@@ -47,9 +40,7 @@
   }
 
   // Escape steps back one level (delete-confirm/rename → action list →
-  // closed). The rename input handles its own Escape and stops propagation,
-  // so the shell's listener only sees it from the action list and the
-  // delete confirm.
+  // closed).
   function onEscape() {
     if (mode === 'menu') onClose();
     else backToMenu();
@@ -72,7 +63,7 @@
       await onRename(next);
       onClose();
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'rename failed');
     } finally {
       busy = false;
     }
@@ -81,10 +72,6 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       void submitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      backToMenu();
     }
   }
 
@@ -99,7 +86,7 @@
       await onDelete();
       onClose();
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'delete failed');
     } finally {
       busy = false;
     }
@@ -134,7 +121,7 @@
     </button>
   {:else if mode === 'rename'}
     <input
-      bind:this={renameInput}
+      {@attach focusOnMount}
       bind:value={renameValue}
       type="text"
       aria-label={`Rename ${name}`}
@@ -162,8 +149,9 @@
     <span class="block px-1 py-0.5 text-xs text-stone-500 dark:text-stone-400">Deleting…</span>
   {:else}
     <p class="px-1 text-xs text-stone-600 dark:text-stone-300">Delete this {kind}?</p>
-    <div bind:this={confirmEl} class="mt-1 flex justify-end gap-1">
+    <div class="mt-1 flex justify-end gap-1">
       <ConfirmButtons
+        autofocus
         confirmLabel="Delete"
         onConfirm={() => void confirmDelete()}
         onCancel={backToMenu}

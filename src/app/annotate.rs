@@ -15,7 +15,7 @@ impl App {
         annotations::validate_new(&new).map_err(Error::Invalid)?;
         self.paper(paper_id, Trash::Allow).await?;
         let a = self.annotations().put(paper_id, annotation_id, new).await?;
-        self.wake_search();
+        self.library_changed();
         Ok(a)
     }
 
@@ -27,14 +27,14 @@ impl App {
         if !self.annotations().delete(paper_id, annotation_id).await? {
             return Err(Error::not_found());
         }
-        self.wake_search();
+        self.library_changed();
         Ok(())
     }
 
     pub(crate) async fn clear_annotations(&self, paper_id: &str) -> Result<u64, Error> {
         self.paper(paper_id, Trash::Allow).await?;
         let n = self.annotations().delete_all(paper_id).await?;
-        self.wake_search();
+        self.library_changed();
         Ok(n)
     }
 }

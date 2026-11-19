@@ -1,51 +1,52 @@
-import {
-  type ParsedQuery,
-  FIELD_KEYS,
-  SEMANTIC_FIELD_KEYS,
-  hasSearchTerms,
-  parseQuery,
-} from './query';
-import type { Filters, SearchOpts } from './types';
+import { type FieldKey, FIELD_KEYS, SEMANTIC_FIELD_KEYS, hasSearchTerms, parseQuery } from './query';
+import { projects } from '$features/library/organization/state.svelte';
+import { FocusTarget } from '$shared/ui/focus';
+import type { Engine } from './types';
+import type { PaperStatus } from '$shared/api/generated/PaperStatus';
 import type { Project } from '$shared/api/generated/Project';
 import type { SearchMatch } from '$shared/api/generated/SearchMatch';
 import type { SemanticAvailability } from '$shared/api/generated/SemanticAvailability';
+import type { Sort } from '$shared/api/generated/Sort';
 
-export const filters = $state<Filters>({
-  q: '',
-  status: 'all',
-  sort: 'year_desc',
-  project: 'all',
-  tag: undefined,
-  starred: undefined,
-});
+/// The library view's query. The search box string is the single source of
+/// truth for every filter — pills, the status control and the field toggles
+/// all edit it — so everything else here is read off its parse.
+class LibraryQuery {
+  q = $state('');
+  /// A query parameter rather than a qualifier; relevance search ignores it.
+  sort = $state<Sort>('year_desc');
 
-/// The search box string is the single source of truth; project/tag/starred/
-/// status on `filters` (and the field toggles on `searchOpts`) are a cache of
-/// its parse — `project:` names resolve to ids via the loaded projects list
-/// (unresolved names pass through verbatim and simply match nothing).
-export function syncFiltersFromQuery(projects: Project[]): ParsedQuery {
-  const p = parseQuery(filters.q);
-  filters.tag = p.tag ?? undefined;
-  filters.starred = p.starred || undefined;
-  filters.status = p.status ?? 'all';
-  filters.project = p.project
-    ? (projects.find((pr) => pr.name.toLowerCase() === p.project!.toLowerCase())?.id ?? p.project)
-    : 'all';
-  for (const k of FIELD_KEYS) {
-    searchOpts[k] = p.fields === null || p.fields.includes(k);
+  readonly parsed = $derived(parseQuery(this.q));
+  /// Free text or author terms: the query goes through the search engines
+  /// (relevance-ranked, with snippets) rather than only filtering the list.
+  readonly searching = $derived(hasSearchTerms(this.parsed));
+  /// The project `project:` names, matched case-insensitively as the server
+  /// does; null when absent or when the name matches no project.
+  readonly project = $derived.by((): Project | null => {
+    const name = this.parsed.project?.toLowerCase();
+    return name === undefined ? null : (projects.items.find((p) => p.name.toLowerCase() === name) ?? null);
+  });
+  /// The fields the query searches: every one unless `in:` narrows it.
+  readonly fields = $derived<readonly FieldKey[]>(this.parsed.fields ?? FIELD_KEYS);
+
+  get tag(): string | null {
+    return this.parsed.tag;
   }
-  return p;
+  get starred(): boolean {
+    return this.parsed.starred;
+  }
+  get status(): PaperStatus | null {
+    return this.parsed.status;
+  }
 }
 
-export const searchOpts = $state<SearchOpts>({
-  title: true,
-  authors: true,
-  abstract: true,
-  body: true,
-  notes: true,
-  keyword: true,
-  semantic: true,
-});
+export const filters = new LibraryQuery();
+
+/// Which search engines run; at least one is always on.
+export const engines = $state<Record<Engine, boolean>>({ keyword: true, semantic: true });
+
+/// The search box, for the keymap's `/`.
+export const searchFocus = new FocusTarget();
 
 /// Match info per paper id for the current search, plus the semantic tier's
 /// availability (from the last response or /api/search/status).
@@ -61,45 +62,32 @@ export const finder = $state<{ open: boolean }>({ open: false });
 /// Semantic chip is disabled when the backend can't serve it or the field
 /// selection makes it meaningless (nothing embedded is selected).
 export function semanticBlocked(): boolean {
-  const noEmbedded = !SEMANTIC_FIELD_KEYS.some((f) => searchOpts[f]);
+  const noEmbedded = !SEMANTIC_FIELD_KEYS.some((f) => filters.fields.includes(f));
   return noEmbedded || !searchMeta.semantic.available;
-}
-
-/// Whether the query goes through the search engines (free text or author
-/// terms) rather than only filtering the list: results are then relevance-
-/// ranked, sort is ignored, and match snippets exist.
-export function relevanceSearchActive(): boolean {
-  return hasSearchTerms(parseQuery(filters.q));
 }
 
 /// Whether any list filter deviates from the default view — i.e. whether an
 /// empty list means "nothing matches" rather than "the library is empty".
 export function anyFilterActive(): boolean {
-  return (
-    filters.q.trim() !== '' ||
-    filters.status !== 'all' ||
-    filters.project !== 'all' ||
-    filters.tag !== undefined ||
-    filters.starred !== undefined
-  );
+  return filters.q.trim() !== '';
 }
 
-/// Human-readable names for every non-default list filter — what an empty
-/// state should blame ("No papers match X · Y").
-function activeFilterLabels(projects: Project[]): string[] {
+/// Human-readable names for every active filter — what an empty state should
+/// blame ("No papers match X · Y").
+function activeFilterLabels(): string[] {
+  const p = filters.parsed;
   const labels: string[] = [];
-  if (filters.q.trim()) labels.push(`“${filters.q.trim()}”`);
-  if (filters.project !== 'all')
-    labels.push(projects.find((p) => p.id === filters.project)?.name ?? 'the selected project');
-  if (filters.tag) labels.push(filters.tag);
-  if (filters.starred !== undefined) labels.push('starred');
-  if (filters.status !== 'all')
-    labels.push(filters.status === 'needs_review' ? 'needs review' : filters.status);
+  if (p.text.trim()) labels.push(`“${p.text.trim()}”`);
+  for (const author of p.authors) labels.push(`author ${author}`);
+  if (p.project) labels.push(filters.project?.name ?? p.project);
+  if (p.tag) labels.push(p.tag);
+  if (p.starred) labels.push('starred');
+  if (p.status) labels.push(p.status === 'needs_review' ? 'needs review' : p.status);
   return labels;
 }
 
 /// The filtered-empty sentence the Welcome hero shows above its Clear-filters
 /// button.
-export function noMatchesBlame(projects: Project[]): string {
-  return `No papers match ${activeFilterLabels(projects).join(' · ')}.`;
+export function noMatchesBlame(): string {
+  return `No papers match ${activeFilterLabels().join(' · ')}.`;
 }

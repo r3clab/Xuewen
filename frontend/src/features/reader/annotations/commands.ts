@@ -37,9 +37,11 @@ export interface HistoryScopeLike {
 }
 
 export interface AnnotationCommandOptions {
-  /// The document's annotation capability, or null until it is ready.
+  /// The document's annotation capability, or null unless it is open and
+  /// ready. Looked up per call, never kept, so a document that closed since
+  /// answers null instead of a capability that refuses.
   marks: (documentId: string) => MarkScope | null;
-  /// The document's history capability, or null until it is ready.
+  /// The document's history capability, on the same terms.
   history: (documentId: string) => HistoryScopeLike | null;
   /// Read at call time, never captured: the active tab changes under us.
   activeDocumentId: () => string | null;
@@ -58,17 +60,6 @@ export interface AnnotationCommands {
   redo(): boolean;
 }
 
-/// A capability whose document closes under a keystroke refuses with
-/// `not-ready`; an exception escaping handleKeydown would take the rest of the
-/// keymap down with it, so a refusal is a no-op instead.
-function attempt<T>(run: () => T, fallback: T): T {
-  try {
-    return run();
-  } catch {
-    return fallback;
-  }
-}
-
 export function createAnnotationCommands(opts: AnnotationCommandOptions): AnnotationCommands {
   function marks(): MarkScope | null {
     const id = opts.activeDocumentId();
@@ -80,54 +71,47 @@ export function createAnnotationCommands(opts: AnnotationCommandOptions): Annota
     return id === null ? null : opts.history(id);
   }
 
-  function selectedCount(scope: MarkScope): number {
-    return attempt(() => scope.selection.getSelected().length, 0);
+  /// The active document's marks, when any are selected.
+  function selection(): MarkScope['selection'] | null {
+    const scope = marks();
+    return scope && scope.selection.getSelected().length > 0 ? scope.selection : null;
   }
 
   return {
     hasSelection(): boolean {
-      const scope = marks();
-      return scope !== null && selectedCount(scope) > 0;
+      return selection() !== null;
     },
 
     deleteSelection(): boolean {
-      const scope = marks();
-      if (!scope || selectedCount(scope) === 0) return false;
+      const selected = selection();
+      if (!selected) return false;
       // Through the plugin, never the store: the plugin records the undo step
       // and fires the delete events sync.ts turns into sidecar DELETEs.
       // Removing the row directly would leave the mark drawn on the page until
       // the tab was reopened. A refused delete puts the mark back by itself.
-      return attempt(() => {
-        void scope.selection.delete().catch(() => {});
-        return true;
-      }, false);
+      void selected.delete().catch(() => {});
+      return true;
     },
 
     clearSelection(): boolean {
-      const scope = marks();
-      if (!scope || selectedCount(scope) === 0) return false;
-      return attempt(() => {
-        scope.selection.clear();
-        return true;
-      }, false);
+      const selected = selection();
+      if (!selected) return false;
+      selected.clear();
+      return true;
     },
 
     undo(): boolean {
       const h = history();
-      if (!h || !attempt(() => h.canUndo(), false)) return false;
-      return attempt(() => {
-        h.undo();
-        return true;
-      }, false);
+      if (!h?.canUndo()) return false;
+      h.undo();
+      return true;
     },
 
     redo(): boolean {
       const h = history();
-      if (!h || !attempt(() => h.canRedo(), false)) return false;
-      return attempt(() => {
-        h.redo();
-        return true;
-      }, false);
+      if (!h?.canRedo()) return false;
+      h.redo();
+      return true;
     },
   };
 }
@@ -138,15 +122,13 @@ export function createAnnotationCommands(opts: AnnotationCommandOptions): Annota
 /// inert outside the reader.
 let current: AnnotationCommands | null = null;
 
-export function registerAnnotationCommands(commands: AnnotationCommands | null): void {
+/// Publish the live commands; the returned function withdraws exactly these,
+/// never a set registered after them.
+export function registerAnnotationCommands(commands: AnnotationCommands): () => void {
   current = commands;
-}
-
-/// Clear on teardown by identity, not blindly: should a replacement PdfDeck
-/// ever mount before the outgoing one tears down, a blind `register(null)`
-/// would unregister the live commands and leave every binding silently inert.
-export function unregisterAnnotationCommands(commands: AnnotationCommands): void {
-  if (current === commands) current = null;
+  return () => {
+    if (current === commands) current = null;
+  };
 }
 
 export function annotationSelectionActive(): boolean {

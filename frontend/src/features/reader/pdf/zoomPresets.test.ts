@@ -21,15 +21,25 @@ describe('ZOOM_PRESETS', () => {
 });
 
 describe('isActivePreset', () => {
-  it('matches a numeric preset to the displayed whole percent', () => {
+  const fixed = (zoomLevel: number) => ({ zoomLevel, zoomMode: 'custom' as const });
+
+  it('matches a fixed zoom to the level at the displayed whole percent', () => {
     const hundred = ZOOM_PRESETS[2];
-    expect(isActivePreset(hundred, 1)).toBe(true);
-    expect(isActivePreset(hundred, 1.004)).toBe(true); // rounds to 100%
-    expect(isActivePreset(hundred, 1.2)).toBe(false);
+    expect(isActivePreset(hundred, fixed(1))).toBe(true);
+    expect(isActivePreset(hundred, fixed(1.004))).toBe(true); // rounds to 100%
+    expect(isActivePreset(hundred, fixed(1.2))).toBe(false);
   });
 
-  it('never marks fit modes active', () => {
-    expect(isActivePreset(ZOOM_PRESETS[6], 1)).toBe(false);
-    expect(isActivePreset(ZOOM_PRESETS[7], 1)).toBe(false);
+  it('checks the fit mode in force, and no level it lands on', () => {
+    const fitPage = { zoomLevel: 1, zoomMode: ZoomMode.FitPage };
+    expect(isActivePreset(ZOOM_PRESETS[7], fitPage)).toBe(true);
+    expect(isActivePreset(ZOOM_PRESETS[6], fitPage)).toBe(false);
+    expect(isActivePreset(ZOOM_PRESETS[2], fitPage)).toBe(false);
+    expect(isActivePreset(ZOOM_PRESETS[7], fixed(1))).toBe(false);
+  });
+
+  it('puts every level on the ladder the zoom buttons walk', () => {
+    const ladder = [0.5, 2 / 3, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+    for (const p of ZOOM_PRESETS) if (typeof p.level === 'number') expect(ladder).toContain(p.level);
   });
 });

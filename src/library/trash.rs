@@ -63,9 +63,14 @@ mod tests {
         // Soft-delete a: hidden from list/papers::stats/papers::all; b remains.
         assert!(soft_delete(&pool, &a.id).await.unwrap());
         assert!(!soft_delete(&pool, &a.id).await.unwrap()); // idempotent: already trashed
-        let listed = papers::list(&pool, None, None, &papers::PaperFilter::default())
-            .await
-            .unwrap();
+        let listed = papers::list(
+            &pool,
+            None,
+            papers::Sort::default(),
+            &papers::PaperFilter::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, b.id);
         assert_eq!(papers::stats(&pool).await.unwrap().0, 1); // total counts only active
@@ -104,10 +109,15 @@ mod tests {
             .deleted_at
             .is_none());
         assert_eq!(
-            papers::list(&pool, None, None, &papers::PaperFilter::default())
-                .await
-                .unwrap()
-                .len(),
+            papers::list(
+                &pool,
+                None,
+                papers::Sort::default(),
+                &papers::PaperFilter::default()
+            )
+            .await
+            .unwrap()
+            .len(),
             1
         );
     }

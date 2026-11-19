@@ -1,8 +1,10 @@
 /// Roving focus for a `role="menu"` popover (WAI menu pattern), wired once
-/// in ContextMenuShell for every cursor-anchored menu.
+/// in ContextMenuShell for every cursor-anchored menu and in the reader
+/// toolbar's ToolbarMenu. Items are any `menuitem`, `menuitemradio` or
+/// `menuitemcheckbox`.
 
 export function menuItems(menuEl: HTMLElement | null): HTMLElement[] {
-  return menuEl ? Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]')) : [];
+  return menuEl ? Array.from(menuEl.querySelectorAll<HTMLElement>('[role^="menuitem"]')) : [];
 }
 
 /// ArrowUp/ArrowDown cycle through the menu's items with wrap-around;

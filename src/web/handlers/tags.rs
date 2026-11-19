@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, put};
@@ -10,7 +10,9 @@ use super::papers::TagRef;
 use crate::app::{App, Trash};
 use crate::library::tags::{self, TagName};
 use crate::web::error::ApiError;
+use crate::web::extract::{ApiJson, ApiPath};
 use serde::Deserialize;
+use ts_rs::TS;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -28,15 +30,16 @@ async fn list_tags(State(app): State<App>) -> Result<Response, ApiError> {
     Ok(Json(tags).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, TS)]
+#[ts(export)]
 struct TagNameBody {
     name: String,
 }
 
 async fn add_paper_tag(
     State(app): State<App>,
-    Path(paper_id): Path<String>,
-    Json(body): Json<TagNameBody>,
+    ApiPath(paper_id): ApiPath<String>,
+    ApiJson(body): ApiJson<TagNameBody>,
 ) -> Result<Response, ApiError> {
     let name = TagName::parse(&body.name)?;
     // Pre-check the paper so a bad id is a clean 404, not an FK-violation 500.
@@ -49,7 +52,7 @@ async fn add_paper_tag(
 
 async fn remove_paper_tag(
     State(app): State<App>,
-    Path((paper_id, tag_id)): Path<(String, String)>,
+    ApiPath((paper_id, tag_id)): ApiPath<(String, String)>,
 ) -> Result<Response, ApiError> {
     if !tags::remove_paper(app.pool(), &paper_id, &tag_id)
         .await
@@ -62,22 +65,20 @@ async fn remove_paper_tag(
 
 async fn rename_tag(
     State(app): State<App>,
-    Path(id): Path<String>,
-    Json(body): Json<TagNameBody>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<TagNameBody>,
 ) -> Result<Response, ApiError> {
     let name = TagName::parse(&body.name)?;
-    match tags::rename(app.pool(), &id, &name).await {
-        Ok(Some(t)) => Ok(Json(TagRef::from(t)).into_response()),
-        Ok(None) => Err(ApiError::NotFound),
-        Err(e) => Err(ApiError::conflict_or_internal(
-            e,
-            "rename_tag",
-            "a tag with that name already exists",
-        )),
-    }
+    let tag = tags::rename(app.pool(), &id, &name)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(TagRef::from(tag)).into_response())
 }
 
-async fn delete_tag(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn delete_tag(
+    State(app): State<App>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Response, ApiError> {
     if !tags::delete(app.pool(), &id).await.context("delete_tag")? {
         return Err(ApiError::NotFound);
     }

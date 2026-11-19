@@ -18,7 +18,6 @@ const detail = {
 beforeEach(() => {
   viewer.activeId = 'p1';
   dock.open = true;
-  dock.entry = null;
   viewer.zen = false;
   appSettings.foldAbstract = false;
   chat.available = true;

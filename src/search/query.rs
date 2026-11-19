@@ -2,6 +2,12 @@
 //! status:resolved in:title author:smith "phrase" free text`.
 //! Parsing never errors — anything malformed degrades to free text.
 
+use anyhow::Result;
+use sqlx::SqlitePool;
+
+use crate::library::model::PaperStatus;
+use crate::library::papers::PaperFilter;
+use crate::library::projects;
 use crate::search::fts::FieldSel;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -16,8 +22,7 @@ pub(crate) struct ParsedQuery {
     /// Project NAME (resolution to id happens at the call boundary).
     pub(crate) project: Option<String>,
     pub(crate) starred: bool,
-    /// Normalized: "resolved" | "needs_review".
-    pub(crate) status: Option<String>,
+    pub(crate) status: Option<PaperStatus>,
 }
 
 /// One whitespace-separated token; quotes group spaces. `raw` is the exact
@@ -82,13 +87,11 @@ pub(crate) fn parse(raw: &str) -> ParsedQuery {
             Some("project") => q.project = Some(t.value),
             Some("author") => q.authors.push(t.value),
             Some("is") if t.value.eq_ignore_ascii_case("starred") => q.starred = true,
-            Some("status") => {
-                let v = t.value.to_ascii_lowercase().replace('-', "_");
-                match v.as_str() {
-                    "resolved" | "needs_review" => q.status = Some(v),
-                    _ => text.push(t.raw),
-                }
-            }
+            Some("status") => match t.value.to_ascii_lowercase().replace('-', "_").as_str() {
+                "resolved" => q.status = Some(PaperStatus::Resolved),
+                "needs_review" => q.status = Some(PaperStatus::NeedsReview),
+                _ => text.push(t.raw),
+            },
             Some("in") => {
                 let sel = fields.get_or_insert(FieldSel::none());
                 // `select` is shared with the `fields=` CSV so the qualifier
@@ -106,130 +109,113 @@ pub(crate) fn parse(raw: &str) -> ParsedQuery {
     q
 }
 
-/// Keyword-tier query: author terms as Tantivy field-scoped phrases, then
-/// the free text. Embedded quotes are stripped (they'd break the phrase).
-pub(crate) fn compose_keyword_query(authors: &[String], text: &str) -> String {
-    let mut parts: Vec<String> = authors
-        .iter()
-        .map(|a| format!("authors:\"{}\"", a.replace('"', "")))
-        .collect();
-    if !text.is_empty() {
-        parts.push(text.to_string());
+impl ParsedQuery {
+    /// The list restrictions the qualifiers spell. A `project:` name that
+    /// names no project binds the name itself, which can never equal a
+    /// project id, so the list filters to nothing rather than ignoring it.
+    pub(crate) async fn filter(&self, pool: &SqlitePool) -> Result<PaperFilter> {
+        let project = match &self.project {
+            Some(name) => Some(
+                projects::find_by_name(pool, name)
+                    .await?
+                    .map_or_else(|| name.clone(), |p| p.id),
+            ),
+            None => None,
+        };
+        Ok(PaperFilter {
+            status: self.status,
+            project,
+            tag: self.tag.clone(),
+            starred: self.starred.then_some(true),
+        })
     }
-    parts.join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
-    #[test]
-    fn bare_words_are_free_text() {
-        let p = parse("attention is all you need");
-        assert_eq!(p.text, "attention is all you need");
-        assert!(p.authors.is_empty() && p.tag.is_none() && p.project.is_none());
-        assert!(!p.starred && p.status.is_none() && p.fields.is_none());
+    /// The parse as the shared fixture spells it, field for field.
+    fn as_fixture(p: &ParsedQuery) -> Value {
+        let fields = p.fields.map(|f| {
+            [
+                ("title", f.title),
+                ("authors", f.authors),
+                ("abstract", f.abstract_text),
+                ("body", f.body),
+                ("notes", f.notes),
+            ]
+            .into_iter()
+            .filter_map(|(name, on)| on.then_some(name))
+            .collect::<Vec<_>>()
+        });
+        json!({
+            "text": p.text,
+            "authors": p.authors,
+            "fields": fields,
+            "tag": p.tag,
+            "project": p.project,
+            "starred": p.starred,
+            "status": p.status,
+        })
     }
 
-    #[test]
-    fn single_tag() {
-        let p = parse("tag:nlp");
-        assert_eq!(p.tag.as_deref(), Some("nlp"));
-        assert_eq!(p.text, "");
-    }
-
-    #[test]
-    fn quoted_values_and_all_filter_keys() {
-        let p = parse(r#"tag:"deep learning" project:Thesis is:starred status:needs-review"#);
-        assert_eq!(p.tag.as_deref(), Some("deep learning"));
-        assert_eq!(p.project.as_deref(), Some("Thesis"));
-        assert!(p.starred);
-        assert_eq!(p.status.as_deref(), Some("needs_review"));
-        assert_eq!(p.text, "");
-    }
-
-    #[test]
-    fn in_tokens_union_fields() {
-        let p = parse("in:title in:abstract transformers");
-        let f = p.fields.unwrap();
-        assert!(f.title && f.abstract_text && !f.authors && !f.body && !f.notes);
-        assert_eq!(p.text, "transformers");
-    }
-
-    #[test]
-    fn in_notes_scopes_to_annotation_notes() {
-        let p = parse("in:notes attention");
-        let f = p.fields.unwrap();
-        assert!(f.notes && !f.title && !f.authors && !f.abstract_text && !f.body);
-        assert_eq!(p.text, "attention");
-    }
-
-    #[test]
-    fn author_terms_repeat() {
-        let p = parse(r#"author:smith author:"ada lovelace" attention"#);
-        assert_eq!(p.authors, vec!["smith", "ada lovelace"]);
-        assert_eq!(p.text, "attention");
-    }
-
-    #[test]
-    fn repeated_filter_key_keeps_last() {
-        assert_eq!(parse("tag:a tag:b").tag.as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn unknown_keys_and_values_degrade_to_text() {
-        let p = parse("foo:bar is:open in:everything tag:");
-        assert_eq!(p.text, "foo:bar is:open in:everything tag:");
-        assert!(p.tag.is_none() && !p.starred && p.fields.is_none());
-    }
-
-    #[test]
-    fn quoted_phrases_pass_through() {
-        assert_eq!(
-            parse(r#""exact phrase" more"#).text,
-            r#""exact phrase" more"#
+    /// The fixture the frontend's mirror of this parser runs against too
+    /// (frontend/src/features/library/search/query.test.ts).
+    fn fixture() -> Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/features/library/search/query_cases.json"
         );
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
     #[test]
-    fn keys_case_insensitive_values_preserved() {
-        let p = parse("TAG:NLP In:Title");
-        assert_eq!(p.tag.as_deref(), Some("NLP"));
-        assert!(p.fields.unwrap().title);
+    fn parses_every_shared_case() {
+        let fixture = fixture();
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            assert_eq!(as_fixture(&parse(input)), case["parsed"], "{input:?}");
+        }
     }
 
     #[test]
-    fn empty_input() {
-        let p = parse("");
-        assert_eq!(p.text, "");
-        assert!(p.tag.is_none() && p.authors.is_empty() && p.fields.is_none());
+    fn semantic_fields_match_the_shared_spec() {
+        let fixture = fixture();
+        let spec: Vec<&str> = fixture["semantic_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for name in ["title", "authors", "abstract", "body", "notes"] {
+            let mut only = FieldSel::none();
+            assert!(only.select(name));
+            assert_eq!(only.semantic_applicable(), spec.contains(&name), "{name}");
+        }
     }
 
-    #[test]
-    fn unclosed_quote_runs_to_end() {
-        assert_eq!(parse(r#"tag:"unclosed"#).tag.as_deref(), Some("unclosed"));
-    }
+    #[tokio::test]
+    async fn filter_resolves_a_project_name_and_keeps_an_unknown_one() {
+        let (_dir, pool) = crate::testutil::temp_pool().await;
+        let thesis = crate::library::projects::create(
+            &pool,
+            &crate::library::projects::ProjectName::parse("Thesis").unwrap(),
+        )
+        .await
+        .unwrap();
+        let f = parse("project:thesis tag:nlp is:starred status:resolved")
+            .filter(&pool)
+            .await
+            .unwrap();
+        assert_eq!(f.project.as_deref(), Some(thesis.id.as_str()));
+        assert_eq!(f.tag.as_deref(), Some("nlp"));
+        assert_eq!(f.starred, Some(true));
+        assert_eq!(f.status, Some(PaperStatus::Resolved));
 
-    #[test]
-    fn splits_only_on_ascii_whitespace_nbsp_stays_in_token() {
-        // Pasted-from-PDF text carries NBSP; splitting is ASCII-only, so it
-        // stays inside the value. The TS mirror pins the same case — JS `\s`
-        // would split there and desync the pill bar from the server filter.
-        let p = parse("tag:deep\u{00A0}learning");
-        assert_eq!(p.tag.as_deref(), Some("deep\u{00A0}learning"));
-        assert_eq!(p.text, "");
-    }
-
-    #[test]
-    fn compose_prepends_author_scoped_terms() {
-        assert_eq!(
-            compose_keyword_query(&["smith".into()], "attention"),
-            r#"authors:"smith" attention"#
-        );
-        assert_eq!(compose_keyword_query(&[], "x"), "x");
-        assert_eq!(
-            compose_keyword_query(&[r#"a "b""#.into()], ""),
-            r#"authors:"a b""#
-        );
+        let unknown = parse("project:nosuch").filter(&pool).await.unwrap();
+        assert_eq!(unknown.project.as_deref(), Some("nosuch"));
+        assert_eq!(unknown.starred, None);
     }
 }

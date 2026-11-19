@@ -4,16 +4,7 @@ metadata:
   name: xuewen-config
 data:
   xuewen.toml: |
-    inbox_dir     = "/data/inbox"
-    library_root  = "/data/library"
-    database_url  = "sqlite:/data/library.db"
-
-    [preview]
-    cache_dir = "/data/preview-cache"
-
-    [search]
-    index_dir  = "/data/search-index"
-    vector_dir = "/data/search-vectors"
+    data_dir = "/data"
 
     [ai]
     api_key_env = "OPENAI_API_KEY"

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::builder::PossibleValuesParser;
 use sqlx::SqlitePool;
 
 use super::{output, Ctx};
@@ -22,18 +21,29 @@ pub(super) struct FilterArgs {
     #[arg(long)]
     pub(super) query: Option<String>,
     /// Only papers with this status.
-    #[arg(long, value_parser = PossibleValuesParser::new(papers::STATUS_KEYS))]
-    pub(super) status: Option<String>,
+    #[arg(long, value_enum)]
+    pub(super) status: Option<PaperStatus>,
 }
 
 impl FilterArgs {
+    pub(super) fn is_empty(&self) -> bool {
+        let FilterArgs {
+            project,
+            tag,
+            starred,
+            query,
+            status,
+        } = self;
+        project.is_none() && tag.is_none() && !starred && query.is_none() && status.is_none()
+    }
+
     pub(super) async fn resolve(&self, pool: &SqlitePool) -> Result<papers::PaperFilter> {
         let project = match &self.project {
             Some(sel) => Some(projects::find_one(pool, sel).await?.id),
             None => None,
         };
         Ok(papers::PaperFilter {
-            status: self.status.clone(),
+            status: self.status,
             project,
             tag: self.tag.clone(),
             starred: self.starred.then_some(true),
@@ -46,8 +56,8 @@ pub(super) struct ListArgs {
     #[command(flatten)]
     filters: FilterArgs,
     /// Sort order.
-    #[arg(long, value_parser = PossibleValuesParser::new(papers::SORT_KEYS))]
-    sort: Option<String>,
+    #[arg(long, value_enum, default_value_t)]
+    sort: papers::Sort,
 }
 
 #[derive(clap::Args)]
@@ -58,13 +68,7 @@ pub(super) struct ShowArgs {
 
 pub(super) async fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     let filter = args.filters.resolve(&ctx.pool).await?;
-    let papers = papers::list(
-        &ctx.pool,
-        args.filters.query.as_deref(),
-        args.sort.as_deref(),
-        &filter,
-    )
-    .await?;
+    let papers = papers::list(&ctx.pool, args.filters.query.as_deref(), args.sort, &filter).await?;
     if papers.is_empty() {
         println!("no papers");
     }

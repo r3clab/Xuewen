@@ -17,9 +17,9 @@ import { pageTextPlugin } from './pageText';
 /// fetched from a CDN, the reader works offline, and the backend serves the
 /// 8 MB wasm `immutable` (cache_control_for in src/web/assets.rs).
 ///
-/// The default Hebrew/Arabic fallback fonts are left out, as 2.x's
-/// `fontFallback: null` left out every font fetch: a glyph a paper doesn't
-/// embed renders as the engine's own substitute.
+/// The default Hebrew/Arabic fallback fonts are left out, of the engine and of
+/// the build (vite.config.ts): a glyph a paper doesn't embed renders as the
+/// engine's own substitute, and no font is ever fetched for it.
 export const ENGINE_OPTIONS = { defaultFallbackFonts: false } as const;
 
 export function createEngine() {

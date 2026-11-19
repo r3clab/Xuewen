@@ -4,7 +4,7 @@ import { initColumnWidths } from '$features/library/table/columnWidths.svelte';
 import { loadPapers, loadStats } from '$features/library/actions';
 import { loadProjects, loadTags } from '$features/library/organization/actions';
 import { loadSearchStatus } from '$features/library/search/actions';
-import { initTabs } from '$features/reader/tabs/state.svelte';
+import { initTabs, persistTabs } from '$features/reader/tabs/state.svelte';
 import { initPdfAppearance, initTheme } from '$shared/ui/theme.svelte';
 import { initDock } from '$features/reader/dock/state.svelte';
 import { loadSettings } from '$shared/api/settings.svelte';
@@ -16,6 +16,7 @@ export function initApp(): void {
   initColumnWidths();
   initAnnotationTools();
   void initTabs();
+  persistTabs();
   loadStats();
   loadProjects();
   // Here, not with the filter pills: a session restored onto a PDF tab never

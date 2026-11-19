@@ -2,21 +2,55 @@ use crate::library::model::Identifier;
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// A new-style arXiv id, `YYMM.NNNNN` with an optional version: the one
+/// definition every arXiv-id pattern is built from.
+pub(crate) const ARXIV_ID: &str = r"\d{4}\.\d{4,5}(?:v\d+)?";
+
 static DOI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+").unwrap());
-static ARXIV_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)arxiv:\s*(\d{4}\.\d{4,5}(?:v\d+)?)").unwrap());
+/// An id behind an explicit "arXiv:" marker or an arxiv.org abs/pdf URL. The
+/// context is required: a bare number in prose is not evidence of an id.
+static ARXIV_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/)({ARXIV_ID})"
+    ))
+    .unwrap()
+});
+static ARXIV_BARE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!("^{ARXIV_ID}$")).unwrap());
 
+/// The first DOI in `text` that is not a template placeholder.
 pub(crate) fn extract_doi(text: &str) -> Option<String> {
-    DOI_RE.find(text).map(|m| {
-        m.as_str()
-            .trim_end_matches(['.', ',', ')', ';'])
-            .to_string()
+    DOI_RE
+        .find_iter(text)
+        .map(|m| m.as_str().trim_end_matches(['.', ',', ')', ';']))
+        .find(|doi| !is_placeholder_doi(doi))
+        .map(str::to_string)
+}
+
+/// A DOI whose suffix is only filler letters, as LaTeX templates print until
+/// the publisher assigns one (acmart's `10.1145/nnnnnnn.nnnnnnn`, the
+/// `XXXXXXX.XXXXXXX` of others). Every paper built from the template carries
+/// the same string, so taking it for an identifier would dedupe them all
+/// into one work.
+fn is_placeholder_doi(doi: &str) -> bool {
+    doi.split_once('/').is_some_and(|(_, suffix)| {
+        suffix
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .all(|c| matches!(c, 'n' | 'N' | 'x' | 'X'))
     })
 }
 
-fn extract_arxiv(text: &str) -> Option<String> {
+/// The arXiv id `text` names behind a marker or URL, as printed (a version
+/// suffix included).
+pub(crate) fn extract_arxiv(text: &str) -> Option<String> {
     ARXIV_RE.captures(text).map(|c| c[1].to_string())
+}
+
+/// Whether `s` is an arXiv id and nothing else.
+pub(crate) fn is_arxiv_id(s: &str) -> bool {
+    ARXIV_BARE_RE.is_match(s)
 }
 
 /// Prefer a DOI (published record) over an arXiv id (preprint) when both
@@ -155,6 +189,27 @@ mod tests {
     }
 
     #[test]
+    fn skips_template_placeholder_dois() {
+        for placeholder in [
+            "10.1145/nnnnnnn.nnnnnnn",
+            "10.1145/XXXXXXX.XXXXXXX",
+            "10.1109/xxxx",
+        ] {
+            assert_eq!(extract_doi(placeholder), None, "{placeholder}");
+        }
+        // A real DOI after the template's placeholder is still found.
+        assert_eq!(
+            extract_doi("https://doi.org/10.1145/nnnnnnn.nnnnnnn\ndoi:10.1145/3292500.3330701")
+                .as_deref(),
+            Some("10.1145/3292500.3330701")
+        );
+        assert_eq!(
+            identify("ACM Reference Format: https://doi.org/10.1145/nnnnnnn.nnnnnnn"),
+            Identifier::None
+        );
+    }
+
+    #[test]
     fn finds_arxiv() {
         assert_eq!(
             extract_arxiv("arXiv:1706.03762v5").as_deref(),
@@ -164,6 +219,23 @@ mod tests {
             extract_arxiv("arXiv: 2001.00001").as_deref(),
             Some("2001.00001")
         );
+        assert_eq!(
+            extract_arxiv("see https://arxiv.org/abs/1706.03762v2").as_deref(),
+            Some("1706.03762v2")
+        );
+        assert_eq!(
+            extract_arxiv("https://arxiv.org/pdf/2001.00001").as_deref(),
+            Some("2001.00001")
+        );
+        assert_eq!(extract_arxiv("paper 1706.03762 in prose"), None);
+    }
+
+    #[test]
+    fn bare_arxiv_id_is_the_whole_input() {
+        assert!(is_arxiv_id("1706.03762"));
+        assert!(is_arxiv_id("1706.03762v5"));
+        assert!(!is_arxiv_id("see 1706.03762"));
+        assert!(!is_arxiv_id("1706.037"));
     }
 
     #[test]

@@ -2,7 +2,8 @@ import { identifyPaper, identifySearch } from './api';
 import { classifyIdentifyInput } from './input';
 import { identifyState, resetIdentifyFields } from './state.svelte';
 import { loadPapers, loadStats } from '$features/library/actions';
-import { markLibraryChanged, setDetail } from '$features/library/state.svelte';
+import { setDetail } from '$features/library/state.svelte';
+import { errorMessage } from '$shared/errors';
 import type { IdentifyBody } from '$shared/api/generated/IdentifyBody';
 import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 
@@ -51,7 +52,7 @@ export async function runIdentifySearch(): Promise<void> {
     }
   } catch (e) {
     if (session !== identifySession) return;
-    identifyState.error = (e as Error).message;
+    identifyState.error = errorMessage(e, 'lookup failed');
   } finally {
     if (session === identifySession) identifyState.busy = false;
   }
@@ -73,7 +74,6 @@ export async function applyIdentify(onApplied: (id: string, d: PaperDetail) => v
     // The server applied the match: refresh caches and lists regardless of
     // whether this identify session is still the live one...
     setDetail(id, detail);
-    markLibraryChanged(); // identify can change the paper's title
     onApplied(id, detail);
     if (session === identifySession) {
       // ...but only the live session may close the modal.
@@ -84,7 +84,7 @@ export async function applyIdentify(onApplied: (id: string, d: PaperDetail) => v
     await loadStats();
   } catch (e) {
     if (session !== identifySession) return;
-    identifyState.error = (e as Error).message;
+    identifyState.error = errorMessage(e, 'identify failed');
   } finally {
     if (session === identifySession) identifyState.busy = false;
   }

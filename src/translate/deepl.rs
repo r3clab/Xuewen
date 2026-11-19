@@ -8,36 +8,35 @@ use crate::http::{HttpClient, RetryPolicy};
 
 pub(crate) struct DeeplTranslator {
     base_url: String,
-    api_key_env: Option<String>,
+    api_key: String,
     /// Shared retrying transport with a bounded timeout: `/api/translate`
     /// answers synchronously, so a hung DeepL endpoint must not hang it.
     http: HttpClient,
 }
 
 impl DeeplTranslator {
-    pub(crate) fn new(cfg: &DeeplConfig) -> Self {
+    pub(crate) fn new(cfg: &DeeplConfig) -> Option<Self> {
+        let api_key = match cfg.resolve_key() {
+            Ok(k) => k,
+            Err(reason) => {
+                tracing::warn!("{reason} — DeepL translate disabled");
+                return None;
+            }
+        };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("building DeepL HTTP client");
-        Self {
+        Some(Self {
             base_url: cfg.plan.base_url().to_string(),
-            api_key_env: cfg.api_key_env.clone(),
+            api_key,
             http: HttpClient::new(client, RetryPolicy::interactive()),
-        }
+        })
     }
 
     #[cfg(test)]
     fn set_base_url_for_test(&mut self, url: String) {
         self.base_url = url;
-    }
-
-    fn key(&self) -> Result<String> {
-        let env = self.api_key_env.as_deref().unwrap_or("DEEPL_API_KEY");
-        std::env::var(env)
-            .ok()
-            .filter(|k| !k.trim().is_empty())
-            .ok_or_else(|| anyhow!("DeepL API key env `{env}` is not set"))
     }
 }
 
@@ -60,12 +59,11 @@ struct DeeplItem {
 #[async_trait]
 impl super::Translator for DeeplTranslator {
     async fn translate(&self, text: &str, target: &str) -> Result<(String, Option<String>)> {
-        let key = self.key()?;
         let url = format!("{}/v2/translate", self.base_url.trim_end_matches('/'));
         let req = self
             .http
             .post(&url)
-            .header("Authorization", format!("DeepL-Auth-Key {key}"))
+            .header("Authorization", format!("DeepL-Auth-Key {}", self.api_key))
             .json(&serde_json::json!({
                 "text": [text],
                 "target_lang": deepl_target(target),
@@ -91,29 +89,45 @@ mod tests {
     use super::*;
     use crate::config::{DeeplConfig, DeeplPlan};
     use crate::translate::Translator;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn translator(base_url: String) -> DeeplTranslator {
+        let cfg = DeeplConfig {
+            api_key: Some("secret".into()),
+            api_key_env: None,
+            plan: DeeplPlan::Free,
+        };
+        let mut t = DeeplTranslator::new(&cfg).unwrap();
+        t.set_base_url_for_test(base_url);
+        t
+    }
+
+    #[test]
+    fn no_translator_without_a_key() {
+        let cfg = DeeplConfig {
+            api_key_env: Some("XUEWEN_TEST_DEEPL_UNSET".into()),
+            ..Default::default()
+        };
+        assert!(DeeplTranslator::new(&cfg).is_none());
+    }
 
     #[tokio::test]
     async fn posts_to_deepl_and_parses_translation() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v2/translate"))
+            .and(header("Authorization", "DeepL-Auth-Key secret"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "translations": [{ "detected_source_language": "EN", "text": "你好世界" }]
             })))
             .mount(&server)
             .await;
 
-        std::env::set_var("DEEPL_KEY_TEST", "secret");
-        let cfg = DeeplConfig {
-            api_key_env: Some("DEEPL_KEY_TEST".into()),
-            plan: DeeplPlan::Free,
-        };
-        let mut t = DeeplTranslator::new(&cfg);
-        t.set_base_url_for_test(server.uri());
-
-        let (text, src) = t.translate("hello world", "zh").await.unwrap();
+        let (text, src) = translator(server.uri())
+            .translate("hello world", "zh")
+            .await
+            .unwrap();
         assert_eq!(text, "你好世界");
         assert_eq!(src.as_deref(), Some("EN"));
     }
@@ -138,15 +152,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("DEEPL_KEY_TEST", "secret");
-        let cfg = DeeplConfig {
-            api_key_env: Some("DEEPL_KEY_TEST".into()),
-            plan: DeeplPlan::Free,
-        };
-        let mut t = DeeplTranslator::new(&cfg);
-        t.set_base_url_for_test(server.uri());
-
-        let (text, src) = t.translate("hello", "zh").await.unwrap();
+        let (text, src) = translator(server.uri())
+            .translate("hello", "zh")
+            .await
+            .unwrap();
         assert_eq!(text, "你好");
         assert_eq!(src, None);
     }

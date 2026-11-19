@@ -1,12 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Marker, Reference } from './references';
+import type { CitedReference } from '$shared/api/generated/CitedReference';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 import type { StructuredReference } from '$shared/api/generated/StructuredReference';
 
-vi.mock(import('$features/library/api'), () => ({
-  listPapers: vi.fn(),
-}));
 vi.mock(import('./api'), () => ({
+  matchCitations: vi.fn(),
   parseCitations: vi.fn(),
 }));
 vi.mock(import('./load'), () => ({
@@ -14,8 +13,6 @@ vi.mock(import('./load'), () => ({
 }));
 
 import * as api from './api';
-import * as libraryApi from '$features/library/api';
-import { markLibraryChanged } from '$features/library/state.svelte';
 import { runCitationPipeline, type CitationPipelineUpdate } from './pipeline';
 import { loadCitations, type CitationSource } from './load';
 
@@ -62,11 +59,16 @@ function run(hooks: Partial<Parameters<typeof runCitationPipeline>[2]> = {}) {
   return { updates, done };
 }
 
+// Stands in for the server's matcher: a reference cites the library's one
+// paper when its text or parsed title contains that paper's title.
+function matchAdam(refs: CitedReference[]): (PaperSummary | null)[] {
+  return refs.map((r) => (r.text.includes(ADAM) || r.title === ADAM ? paper('p1', ADAM) : null));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  markLibraryChanged();
-  vi.mocked(libraryApi.listPapers).mockResolvedValue([paper('p1', ADAM)]);
-  vi.mocked(api.parseCitations).mockResolvedValue(null);
+  vi.mocked(api.matchCitations).mockImplementation(async (refs) => matchAdam(refs));
+  vi.mocked(api.parseCitations).mockResolvedValue([]);
 });
 
 describe('runCitationPipeline', () => {
@@ -88,18 +90,37 @@ describe('runCitationPipeline', () => {
     expect(api.parseCitations).toHaveBeenCalledWith('d1', [raw.rawText]);
   });
 
-  it('keeps raw text when the structured parse is unavailable', async () => {
+  it('keeps raw text and the raw matches when the structured parse fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const raw = ref(0, `D. Kingma, J. Ba. ${ADAM}. ICLR 2015.`);
     vi.mocked(loadCitations).mockResolvedValue({ references: [raw], markers: [] });
+    vi.mocked(api.parseCitations).mockRejectedValue(new Error('parsing citations failed: 500'));
     const { updates, done } = run();
     await done;
     expect(updates[2].citations?.references).toEqual([raw]);
+    expect(updates[2].matches?.get(0)?.id).toBe('p1');
+    expect(api.matchCitations).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
-  it('skips the parse entirely when extraction found no references', async () => {
-    vi.mocked(loadCitations).mockResolvedValue({ references: [], markers: [] });
-    const { done } = run();
+  it('matches again on the titles the structured parse found', async () => {
+    const raw = ref(0, 'D. Kingma, J. Ba. Adam: a method for stochastic optimization (2015)');
+    vi.mocked(loadCitations).mockResolvedValue({ references: [raw], markers: [] });
+    vi.mocked(api.parseCitations).mockResolvedValue([structured({ title: ADAM })]);
+    const { updates, done } = run();
     await done;
+    expect(updates[1].matches?.size).toBe(0);
+    expect(api.matchCitations).toHaveBeenLastCalledWith([{ text: raw.rawText, title: ADAM }]);
+    expect(updates[2].matches?.get(0)?.id).toBe('p1');
+  });
+
+  it('asks the server nothing when extraction found no references', async () => {
+    vi.mocked(loadCitations).mockResolvedValue({ references: [], markers: [] });
+    const { updates, done } = run();
+    await done;
+    expect(updates).toHaveLength(1);
+    expect(api.matchCitations).not.toHaveBeenCalled();
     expect(api.parseCitations).not.toHaveBeenCalled();
   });
 

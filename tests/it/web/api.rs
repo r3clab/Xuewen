@@ -299,15 +299,9 @@ async fn imports_a_pdf_dedups_and_rejects_non_pdf() {
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
 
-    // Offline resolver: upstreams refuse instantly, so resolution degrades to
-    // needs_review with no network wait (same trick as the watcher tests).
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    // Offline resolver: every lookup misses, so resolution degrades to
+    // needs_review with no network at all.
+    let resolver = Resolver::offline();
 
     let ingest = support::ingest(
         pool.clone(),
@@ -375,13 +369,7 @@ async fn import_sanitizes_traversal_filenames() {
     std::fs::create_dir_all(&inbox).unwrap();
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    let resolver = Resolver::offline();
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
@@ -432,13 +420,7 @@ async fn import_reports_in_trash_for_deleted_paper() {
     std::fs::create_dir_all(&inbox).unwrap();
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    let resolver = Resolver::offline();
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
@@ -488,16 +470,16 @@ async fn import_reports_same_work_for_known_doi() {
         "Seed",
         PaperStatus::Resolved,
     );
-    existing.meta.doi = Some("10.1000/xyz123".into());
+    existing.meta.doi = Some("10.1145/3292500.3330701".into());
     papers::insert(&pool, &existing).await.unwrap();
 
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/works/10.1145/3292500.3330701"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
+        .mount(&mock)
+        .await;
+    let resolver = Resolver::offline().with_crossref_base(mock.uri());
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
@@ -508,13 +490,15 @@ async fn import_reports_same_work_for_known_doi() {
         App::builder(pool, library.clone()).ingest(ingest).build(),
     ));
 
-    // Upload a different file whose first page carries the same DOI. The
-    // resolver is offline, but the extracted identifier still lands in the
-    // decided fields, so the identifier dedup fires.
+    // Upload a different file whose first page carries the same DOI; Crossref
+    // confirms it, so the identifier dedup fires.
     let pdf_path = dir.path().join("other.pdf");
     support::write_test_pdf(
         &pdf_path,
-        &["A Different Upload", "https://doi.org/10.1000/xyz123"],
+        &[
+            "A Different Upload",
+            "https://doi.org/10.1145/3292500.3330701",
+        ],
     );
     let form = MultipartForm::new().add_part(
         "file",
@@ -541,8 +525,9 @@ async fn identify_search_returns_candidates() {
         .mount(&server)
         .await;
     // Crossref search 404s -> degrade to DBLP-only candidates.
-    let resolver = Resolver::with_bases(None, server.uri(), server.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(server.uri())
+        .with_crossref_base(server.uri())
         .with_dblp_base(server.uri());
     let ingest = support::ingest(
         pool.clone(),
@@ -604,8 +589,9 @@ async fn identify_applies_doi_candidate_and_guards() {
         .respond_with(ResponseTemplate::new(200).set_body_string(CROSSREF_FIXTURE))
         .mount(&mock)
         .await;
-    let resolver = Resolver::with_bases(None, mock.uri(), mock.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(mock.uri())
+        .with_crossref_base(mock.uri())
         .with_dblp_base(mock.uri());
 
     // Seed a needs_review paper whose PDF exists in the library.
@@ -683,13 +669,34 @@ async fn identify_applies_doi_candidate_and_guards() {
         .await
         .assert_status(axum::http::StatusCode::CONFLICT);
 
-    // Bad body (two selectors) -> 400.
+    // Bad body (two selectors) -> 422, naming the one shape it accepts.
     trash::restore(&pool, &q.id).await.unwrap();
-    server
+    let resp = server
         .post(&format!("/api/papers/{}/identify", q.id))
         .json(&serde_json::json!({ "doi": "10.1/x", "arxiv_id": "2001.00001" }))
-        .await
-        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = resp.json();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("provide exactly one of doi, arxiv_id, candidate"),
+        "got: {body}"
+    );
+
+    // Crossref down -> 502, not a misleading "not found".
+    Mock::given(method("GET"))
+        .and(wm_path("/works/10.1/down"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock)
+        .await;
+    let resp = server
+        .post(&format!("/api/papers/{}/identify", q.id))
+        .json(&serde_json::json!({ "doi": "10.1/down" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.json::<serde_json::Value>()["error"], "lookup failed");
 
     // Unresolvable DOI (mock has no route for it -> 404 upstream) -> 404,
     // with an actionable hint pointing at the title-search path.
@@ -716,13 +723,7 @@ async fn identify_applies_candidate_without_network() {
     std::fs::create_dir_all(&inbox).unwrap();
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".to_string(),
-        "http://127.0.0.1:1".to_string(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".to_string());
+    let resolver = Resolver::offline();
 
     let mut p = paper(
         "01890000-0000-7000-8000-00000000c001",
@@ -794,8 +795,9 @@ async fn identify_applies_arxiv_id_via_api() {
         .respond_with(ResponseTemplate::new(200).set_body_string(ARXIV_FIXTURE))
         .mount(&mock)
         .await;
-    let resolver = Resolver::with_bases(None, mock.uri(), mock.uri())
-        .unwrap()
+    let resolver = Resolver::offline()
+        .with_arxiv_base(mock.uri())
+        .with_crossref_base(mock.uri())
         .with_dblp_base(mock.uri());
 
     let mut p = paper(
@@ -838,20 +840,16 @@ async fn settings_report_and_set_proxy_cookie() {
     std::fs::create_dir_all(&inbox).unwrap();
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".into(),
-        "http://127.0.0.1:1".into(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".into());
+    let resolver = Resolver::offline();
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
         resolver,
         // The proxy prefix now rides in the fetcher, mirroring production.
-        xuewen::ingest::fetch::Fetcher::new(Some("https://proxy.uchicago.edu/login?url=".into()))
-            .unwrap(),
+        xuewen::ingest::fetch::Fetcher::new(Some(
+            "https://proxy.uchicago.edu/login?url=".parse().unwrap(),
+        ))
+        .unwrap(),
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool.clone(), library.clone())
@@ -910,13 +908,7 @@ async fn import_url_rejects_unsupported_input() {
     std::fs::create_dir_all(&inbox).unwrap();
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
-    let resolver = Resolver::with_bases(
-        None,
-        "http://127.0.0.1:1".into(),
-        "http://127.0.0.1:1".into(),
-    )
-    .unwrap()
-    .with_dblp_base("http://127.0.0.1:1".into());
+    let resolver = Resolver::offline();
     let ingest = support::ingest(
         pool.clone(),
         dir.path(),
@@ -1002,7 +994,8 @@ async fn projects_crud_membership_and_filter() {
 
     // Filter list by project.
     let filtered: Vec<serde_json::Value> = server
-        .get(&format!("/api/papers?project={pid}"))
+        .get("/api/papers")
+        .add_query_param("q", "project:Survey")
         .await
         .json();
     assert_eq!(filtered.len(), 1);
@@ -1323,12 +1316,6 @@ async fn exports_bibtex_and_biblatex() {
     )
     .await
     .unwrap();
-    let proj = projects::create(&pool, &ProjectName::parse("Survey").unwrap())
-        .await
-        .unwrap();
-    projects::add_paper(&pool, "aaaa1111", &proj.id)
-        .await
-        .unwrap();
     let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Individual (default bibtex). The `paper` helper sets venue=KDD, no dblp_key -> @article.
@@ -1357,40 +1344,36 @@ async fn exports_bibtex_and_biblatex() {
         .await
         .assert_status(axum::http::StatusCode::NOT_FOUND);
 
-    // Batch: whole library has both entries, served as a downloadable .bib file.
-    let all = server.get("/api/papers/export").await;
-    all.assert_status_ok();
-    assert_eq!(all.header("content-type"), "application/x-bibtex");
-    let disposition = all.header("content-disposition");
+    // Batch: exactly the requested papers in the requested order, as a
+    // downloadable .bib file; ids naming no paper are skipped.
+    let both = server
+        .post("/api/papers/export")
+        .json(&serde_json::json!({ "ids": ["bbbb2222", "nope", "aaaa1111"], "format": "bibtex" }))
+        .await;
+    both.assert_status_ok();
+    assert_eq!(both.header("content-type"), "application/x-bibtex");
+    let disposition = both.header("content-disposition");
     let disposition = disposition.to_str().unwrap();
     assert!(disposition.contains("attachment"), "got: {disposition}");
     assert!(disposition.contains("xuewen.bib"), "got: {disposition}");
-    let all_text = all.text();
-    assert!(all_text.contains("@article{aaaa1111,"));
-    assert!(all_text.contains("@article{bbbb2222,"));
+    let both_text = both.text();
+    let second = both_text.find("@article{aaaa1111,").unwrap();
+    let first = both_text.find("@article{bbbb2222,").unwrap();
+    assert!(first < second, "got: {both_text}");
 
-    // Batch filtered by project -> only that project's paper.
-    let scoped = server
-        .get(&format!("/api/papers/export?project={}", proj.id))
+    let one_bl = server
+        .post("/api/papers/export")
+        .json(&serde_json::json!({ "ids": ["aaaa1111"], "format": "biblatex" }))
         .await
         .text();
-    assert!(scoped.contains("aaaa1111"));
-    assert!(!scoped.contains("bbbb2222"));
+    assert!(one_bl.contains("journaltitle = {KDD},"), "got: {one_bl}");
+    assert!(!one_bl.contains("bbbb2222"));
 
-    // format + filter combine: the handler extracts the same query string
-    // twice (FormatParam and the list endpoint's ListParams).
-    let scoped_bl = server
-        .get(&format!(
-            "/api/papers/export?format=biblatex&project={}",
-            proj.id
-        ))
-        .await
-        .text();
-    assert!(
-        scoped_bl.contains("journaltitle = {KDD},"),
-        "got: {scoped_bl}"
-    );
-    assert!(!scoped_bl.contains("bbbb2222"));
+    let unknown_format = server
+        .post("/api/papers/export")
+        .json(&serde_json::json!({ "ids": ["aaaa1111"], "format": "ris" }))
+        .await;
+    assert!(unknown_format.status_code().is_client_error());
 }
 
 #[tokio::test]
@@ -1475,48 +1458,58 @@ async fn list_filters_by_tag_prefix_and_starred() {
         .unwrap();
     let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
-    // ?tag= matches by prefix -> only the tagged paper.
-    let by_tag: Vec<serde_json::Value> = server.get("/api/papers?tag=security").await.json();
-    assert_eq!(by_tag.len(), 1);
-    assert_eq!(by_tag[0]["id"], "aaaa1111");
-
-    // ?starred=true -> only the starred paper (serde parses the bool).
-    let starred: Vec<serde_json::Value> = server.get("/api/papers?starred=true").await.json();
-    assert_eq!(starred.len(), 1);
-    assert_eq!(starred[0]["id"], "bbbb2222");
-
-    // ?project= still works unchanged.
-    let by_project: Vec<serde_json::Value> = server
-        .get(&format!("/api/papers?project={}", proj.id))
-        .await
-        .json();
-    assert_eq!(by_project.len(), 1);
-    assert_eq!(by_project[0]["id"], "aaaa1111");
+    let ids = async |q: &str| -> Vec<String> {
+        server
+            .get("/api/papers")
+            .add_query_param("q", q)
+            .await
+            .json::<Vec<serde_json::Value>>()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // tag: matches by prefix.
+    assert_eq!(ids("tag:security").await, ["aaaa1111"]);
+    assert_eq!(ids("is:starred").await, ["bbbb2222"]);
+    // project: names the project case-insensitively; an unknown name filters
+    // to nothing rather than being ignored.
+    assert_eq!(ids("project:survey").await, ["aaaa1111"]);
+    assert!(ids("project:nosuch").await.is_empty());
+    assert!(ids("status:needs-review").await.is_empty());
+    // Qualifiers compose with the leftover free text.
+    assert_eq!(ids("project:Survey residual").await, ["aaaa1111"]);
+    assert!(ids("project:Survey attention").await.is_empty());
 }
 
-mod search_api {
-    use super::*; // reuse the file's pool/server helpers
-    use xuewen::search::{fts, SearchService};
-
-    // This file's pool/paper helpers are named `support::temp_pool`/`paper`
-    // (not `test_pool`/`insert_sample_paper` as in the brief); these two small
-    // wrappers adapt to that existing local style.
-    async fn test_pool() -> sqlx::SqlitePool {
-        let (dir, pool) = support::temp_pool().await;
-        std::mem::forget(dir); // keep the sqlite file alive for the test's duration
-        pool
-    }
-
-    async fn insert_sample_paper(pool: &sqlx::SqlitePool, id: &str, title: &str) {
-        papers::insert(pool, &paper(id, title, PaperStatus::Resolved))
+#[tokio::test]
+async fn list_sorts_by_a_named_order_and_rejects_unknown_ones() {
+    let (dir, pool) = support::temp_pool().await;
+    for (id, title) in [("aaaa1111", "Beta"), ("bbbb2222", "Alpha")] {
+        papers::insert(&pool, &paper(id, title, PaperStatus::Resolved))
             .await
             .unwrap();
     }
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
+    let by_title: Vec<serde_json::Value> = server
+        .get("/api/papers")
+        .add_query_param("sort", "title")
+        .await
+        .json();
+    assert_eq!(by_title[0]["id"], "bbbb2222");
+    let bogus = server
+        .get("/api/papers")
+        .add_query_param("sort", "bogus")
+        .await;
+    assert!(bogus.status_code().is_client_error());
+}
 
-    async fn server_with_search(pool: sqlx::SqlitePool) -> axum_test::TestServer {
-        let idx = tempfile::tempdir().unwrap();
-        let (fts_idx, _) = fts::FtsIndex::open(idx.path()).unwrap();
-        std::mem::forget(idx);
+mod search_api {
+    use super::*;
+    use std::path::Path;
+    use xuewen::search::{fts, SearchService};
+
+    async fn server_with_search(pool: sqlx::SqlitePool, dir: &Path) -> axum_test::TestServer {
+        let (fts_idx, _) = fts::FtsIndex::open(&dir.join("search-index")).unwrap();
         let svc = SearchService::open_with(pool.clone(), fts_idx, None);
         svc.fts
             .upsert(&fts::PaperDoc {
@@ -1537,9 +1530,14 @@ mod search_api {
 
     #[tokio::test]
     async fn search_returns_papers_with_match_info() {
-        let pool = test_pool().await; // the file's existing helper
-        insert_sample_paper(&pool, "p1", "Fuzzing Firmware").await; // existing helper or add one
-        let server = server_with_search(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        papers::insert(
+            &pool,
+            &paper("p1", "Fuzzing Firmware", PaperStatus::Resolved),
+        )
+        .await
+        .unwrap();
+        let server = server_with_search(pool, dir.path()).await;
 
         let resp = server
             .get("/api/search")
@@ -1550,17 +1548,23 @@ mod search_api {
         assert_eq!(body["semantic"]["available"], false);
         assert_eq!(body["results"][0]["paper"]["id"], "p1");
         assert_eq!(body["results"][0]["match"]["engine"], "keyword");
-        assert!(body["results"][0]["match"]["snippet"]
-            .as_str()
-            .unwrap()
-            .contains("<mark>"));
+        assert_eq!(body["results"][0]["match"]["field"], "title");
+        assert_eq!(
+            body["results"][0]["match"]["snippet"],
+            serde_json::json!([{"text": "Fuzzing", "marked": true}, {"text": " Firmware", "marked": false}])
+        );
     }
 
     #[tokio::test]
     async fn fields_param_restricts_search() {
-        let pool = test_pool().await;
-        insert_sample_paper(&pool, "p1", "Fuzzing Firmware").await;
-        let server = server_with_search(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        papers::insert(
+            &pool,
+            &paper("p1", "Fuzzing Firmware", PaperStatus::Resolved),
+        )
+        .await
+        .unwrap();
+        let server = server_with_search(pool, dir.path()).await;
         let resp = server
             .get("/api/search")
             .add_query_param("q", "dictionaries")
@@ -1573,9 +1577,14 @@ mod search_api {
 
     #[tokio::test]
     async fn status_reports_tiers() {
-        let pool = test_pool().await;
-        insert_sample_paper(&pool, "p1", "Fuzzing Firmware").await;
-        let server = server_with_search(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        papers::insert(
+            &pool,
+            &paper("p1", "Fuzzing Firmware", PaperStatus::Resolved),
+        )
+        .await
+        .unwrap();
+        let server = server_with_search(pool, dir.path()).await;
         let resp = server.get("/api/search/status").await;
         resp.assert_status_ok();
         let body: serde_json::Value = resp.json();
@@ -1585,9 +1594,19 @@ mod search_api {
 
     /// Two papers both matching "fuzzing" in FTS: "a" (tag nlp, starred, in
     /// project "Thesis"), "b" (tag systems, no star, no project).
-    async fn server_with_qualifier_fixtures(pool: sqlx::SqlitePool) -> axum_test::TestServer {
-        insert_sample_paper(&pool, "a", "Fuzzing Firmware").await;
-        insert_sample_paper(&pool, "b", "Fuzzing Kernels").await;
+    async fn server_with_qualifier_fixtures(
+        pool: sqlx::SqlitePool,
+        dir: &Path,
+    ) -> axum_test::TestServer {
+        papers::insert(
+            &pool,
+            &paper("a", "Fuzzing Firmware", PaperStatus::Resolved),
+        )
+        .await
+        .unwrap();
+        papers::insert(&pool, &paper("b", "Fuzzing Kernels", PaperStatus::Resolved))
+            .await
+            .unwrap();
         tags::add_paper(&pool, "a", &TagName::parse("nlp").unwrap())
             .await
             .unwrap();
@@ -1600,9 +1619,7 @@ mod search_api {
             .unwrap();
         projects::add_paper(&pool, "a", &proj.id).await.unwrap();
 
-        let idx = tempfile::tempdir().unwrap();
-        let (fts_idx, _) = fts::FtsIndex::open(idx.path()).unwrap();
-        std::mem::forget(idx);
+        let (fts_idx, _) = fts::FtsIndex::open(&dir.join("search-index")).unwrap();
         let svc = SearchService::open_with(pool.clone(), fts_idx, None);
         for (id, title) in [("a", "Fuzzing Firmware"), ("b", "Fuzzing Kernels")] {
             svc.fts
@@ -1625,8 +1642,8 @@ mod search_api {
 
     #[tokio::test]
     async fn search_query_syntax_filters_by_tag_and_star() {
-        let pool = test_pool().await;
-        let server = server_with_qualifier_fixtures(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        let server = server_with_qualifier_fixtures(pool, dir.path()).await;
         let resp = server
             .get("/api/search")
             .add_query_param("q", "fuzzing tag:nlp is:starred")
@@ -1640,8 +1657,8 @@ mod search_api {
 
     #[tokio::test]
     async fn search_project_qualifier_resolves_name_case_insensitively() {
-        let pool = test_pool().await;
-        let server = server_with_qualifier_fixtures(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        let server = server_with_qualifier_fixtures(pool, dir.path()).await;
         let resp = server
             .get("/api/search")
             .add_query_param("q", "fuzzing project:thesis")
@@ -1665,8 +1682,8 @@ mod search_api {
 
     #[tokio::test]
     async fn search_qualifiers_override_explicit_params() {
-        let pool = test_pool().await;
-        let server = server_with_qualifier_fixtures(pool).await;
+        let (dir, pool) = support::temp_pool().await;
+        let server = server_with_qualifier_fixtures(pool, dir.path()).await;
         let resp = server
             .get("/api/search")
             .add_query_param("q", "fuzzing tag:nlp")
@@ -1684,8 +1701,13 @@ mod search_api {
 
     #[tokio::test]
     async fn search_results_include_tags_and_projects() {
-        let pool = test_pool().await;
-        insert_sample_paper(&pool, "p1", "Fuzzing Firmware").await;
+        let (dir, pool) = support::temp_pool().await;
+        papers::insert(
+            &pool,
+            &paper("p1", "Fuzzing Firmware", PaperStatus::Resolved),
+        )
+        .await
+        .unwrap();
         tags::add_paper(&pool, "p1", &TagName::parse("security/fuzzing").unwrap())
             .await
             .unwrap();
@@ -1693,7 +1715,7 @@ mod search_api {
             .await
             .unwrap();
         projects::add_paper(&pool, "p1", &pr.id).await.unwrap();
-        let server = server_with_search(pool).await;
+        let server = server_with_search(pool, dir.path()).await;
 
         let resp = server
             .get("/api/search")
@@ -1708,7 +1730,7 @@ mod search_api {
 
     #[tokio::test]
     async fn search_without_service_is_503() {
-        let pool = test_pool().await;
+        let (_dir, pool) = support::temp_pool().await;
         let router = support::router(pool, std::path::PathBuf::from("/nonexistent"));
         let server = axum_test::TestServer::new(router);
         let resp = server.get("/api/search").add_query_param("q", "x").await;

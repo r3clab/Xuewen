@@ -39,7 +39,8 @@ The two characters double as the interface marks: **學** (xué, *learning*) is 
 - **Agent Ask** — optional tool-using agent (Claude Code / Codex SDKs) in the reader's Ask thread or `xuewen ask`, grounded in the paper's extracted text and, when attached, its code repository, inside a read-only sandbox.
 - **Daily arXiv recommendations** — a ranked, LLM-summarized feed of new papers
   scored against your library's interests (optional).
-- **Helix-style keymap** — `Space` is a leader key, as in [Helix](https://helix-editor.com): `Space f` opens a file picker that fuzzy-matches a paper's name and title as you type and previews its rendered pages beside the list. `?` lists every binding.
+- **Helix-style keymap** — `Space` is a leader key, as in [Helix](https://helix-editor.com): `Space f` opens a file picker that fuzzy-matches a paper's name and title as you type and previews its rendered pages beside the list.
+  `?` lists every binding.
 - **Citation export** — BibTeX / BibLaTeX for a single paper, a project, or the
   whole library.
 - **Organization** — projects (named groups of papers), free-form tags
@@ -94,8 +95,7 @@ nix build            # ./result/bin/xuewen  (frontend already embedded)
 ## Desktop app (macOS)
 
 The same server and UI, packaged as a native window — a [Tauri](https://tauri.app/) app boots the Axum backend in-process and opens a webview at it, no terminal required.
-Apple Silicon only; download the `.dmg` from
-[GitHub Releases](../../releases).
+Apple Silicon only; download the `.dmg` from [GitHub Releases](../../releases).
 
 **First launch:** the dmg is unsigned, so Gatekeeper blocks a plain double-click.
 Either right-click the app → **Open** (once), or:
@@ -104,7 +104,8 @@ Either right-click the app → **Open** (once), or:
 xattr -d com.apple.quarantine /Applications/Xuewen.app
 ```
 
-**Where data lives:** `~/Library/Application Support/Xuewen/` — `xuewen.toml`, an `env` file for API keys, `xuewen.db`, `library/`, `inbox/`, `search-index/`, `search-vectors/`, and `preview-cache/`.
+**Where data lives:** `~/Library/Application Support/Xuewen/` — `xuewen.toml`, an `env` file for API keys, `library.db`, `library/`, `inbox/`, `search-index/`, `search-vectors/`, and `preview-cache/`.
+Installs created by earlier versions keep their `xuewen.db`, which their `xuewen.toml` names explicitly.
 Logs go to `~/Library/Logs/Xuewen/`.
 First launch creates all of this; existing files are never overwritten.
 
@@ -118,17 +119,23 @@ Semantic search is built in as well: vectors are stored in `search-vectors/`, so
 **Building locally:**
 
 ```sh
-npm --prefix frontend install && npm --prefix frontend run build   # embedded UI (else the dmg ships a placeholder page)
-npm --prefix agent-runner install --omit=dev                       # bundled as a resource, needed for Agent Ask
-bash desktop/scripts/prepare-sidecars.sh   # needs Homebrew poppler + dylibbundler
+bash desktop/scripts/prepare-sidecars.sh   # UI, agent runner, pdftotext and Node from the flake (needs Nix and jq)
 npm --prefix desktop install               # pinned Tauri CLI (does the bundling/signing)
 cd desktop && npx tauri build
 ```
 
 ## Configuration
 
-`xuewen.toml` is read from the working directory (`--config` to override).
-Only three keys are required:
+`xuewen.toml` is read from the working directory; `--config <path>` or the `XUEWEN_CONFIG` environment variable points elsewhere.
+The shortest config names one directory for all data:
+
+```toml
+data_dir = "./data"
+```
+
+`data_dir` supplies every path left out of the config: `inbox/`, `library/`, `library.db`, `search-index/`, `search-vectors/` and `preview-cache/` inside it.
+A key set explicitly always wins over its `data_dir` default.
+Without `data_dir`, three keys are required:
 
 ```toml
 inbox_dir    = "./inbox"
@@ -136,16 +143,19 @@ library_root = "./library"
 database_url = "sqlite:./library.db"
 ```
 
+Relative paths, `data_dir` included, resolve against the directory holding the config file rather than the working directory, and a leading `~` expands to `$HOME`.
+
 Optional sections enable the richer features:
 
 - `[ai.embedding]` — semantic search; needs only an API key.
-  Vectors are stored in-process (no separate server) under `[search].vector_dir` (default `./search-vectors`, `~` expanded like `index_dir`); neither directory may contain the other.
+  Vectors are stored in-process (no separate server) under `[search].vector_dir` (default `search-vectors`, beside the config or under `data_dir`); neither directory may contain the other.
   After changing `[ai.embedding].dims`, recreate the store with `xuewen index rebuild --vectors-only`.
 - `[ai.agent.*]` — the reader's Ask thread / paper chat (a tool-using agent; see
   [Agent Ask setup](#agent-ask-setup)).
+- `[translate]` — translate-on-selection through `[ai.translate]` (an LLM) or `[translate.deepl]`, whose key is `api_key` or else the variable named by `api_key_env` (default `DEEPL_API_KEY`); a DeepL section without a key is skipped with a startup warning.
 - `[daily]` — daily arXiv recommendations.
 - `[proxy]` — institutional paywall access.
-- `[preview]` — where the file picker's rendered page images are cached (defaults to `./preview-cache`).
+- `[preview]` — where the file picker's rendered page images are cached (default `preview-cache`, likewise).
 
 API keys are read from environment variables via `api_key_env` (e.g. `OPENAI_API_KEY`), so they never need to live in the config file.
 `src/config.rs` defines the full set of options.
@@ -164,7 +174,7 @@ repository, inside a read-only per-paper workspace.
 1. **Node ≥ 20** on the machine running `xuewen serve` or `xuewen ask`.
 2. Install the runner's own dependencies once: `npm --prefix agent-runner install` (separate from the frontend's `npm --prefix frontend install`).
    The NixOS and Home Manager modules do this for you — see [Deployment](#deployment).
-   The runner is looked up at `agent-runner/src/runner.mjs` relative to the working directory; run `xuewen ask` from the checkout or set `[ai.agent].runner` to its absolute path.
+   A binary built from a checkout runs that checkout's `agent-runner/src/runner.mjs` from any working directory; anywhere else, set `[ai.agent].runner` (a relative path there resolves against the config file's directory, like every other path).
 3. Enable one or both backends in `xuewen.toml`:
 
    ```toml
@@ -177,6 +187,7 @@ repository, inside a read-only per-paper workspace.
    Neither key is ever written to `xuewen.toml`.
 
 Attaching a repository (Details → Code, `PUT /api/papers/{id}/code`, or `xuewen code set`) does a **local, read-only shallow clone** into `<library_root>/agent/<paper_id>/repo/` for the agent to read from — it is never pushed, modified, or redistributed; it exists only on the machine that holds the library, for as long as it stays attached.
+Only `https://` URLs on GitHub, GitLab, Bitbucket and Codeberg (plus any hosts in `[ai.agent].clone_allowed_hosts`) are accepted, and a clone that outgrows `[ai.agent].max_repo_mb` (default 500) or runs longer than `[ai.agent].clone_timeout_secs` (default 600) is stopped and reported as failed.
 
 **Sandbox boundary, honestly.**
 "Read-only" describes what the agent can't do — it can't write files, run shell commands (Claude Code backend), or reach the network — not what it can read.
@@ -218,7 +229,7 @@ The same binary drives everything from the terminal:
 
 Only one process can hold the vector store at a time.
 While `xuewen serve` (or the desktop app) is running, `xuewen search`, `xuewen index status`, and `xuewen daily run` forward to it over HTTP, so search keeps returning semantic results and the day's run happens in the server.
-`xuewen index rebuild` refuses to run until that server is stopped, and `xuewen watch` started beside it warns and skips indexing.
+`xuewen index rebuild` refuses to run until that server is stopped, and `xuewen watch` started beside it leaves indexing to the server and takes over once the server stops.
 
 Commands that add, change, or remove papers or notes (`ingest`, `import`, `identify`, `refresh`, `delete`, `restore`, `purge`, and annotation edits) bring the full-text index up to date before they return, and `xuewen search` first indexes anything new.
 When another process holds the index, they leave it to that process and say so.

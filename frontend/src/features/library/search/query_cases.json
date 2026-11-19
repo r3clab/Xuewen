@@ -1,0 +1,238 @@
+{
+  "semantic_fields": [
+    "title",
+    "abstract",
+    "body"
+  ],
+  "cases": [
+    {
+      "input": "attention is all you need",
+      "parsed": {
+        "text": "attention is all you need",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "tag:nlp",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": "nlp",
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "tag:\"deep learning\" project:Thesis is:starred status:needs-review",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": "deep learning",
+        "project": "Thesis",
+        "starred": true,
+        "status": "needs_review"
+      }
+    },
+    {
+      "input": "status:resolved",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": "resolved"
+      }
+    },
+    {
+      "input": "status:open",
+      "parsed": {
+        "text": "status:open",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "in:title in:abstract transformers",
+      "parsed": {
+        "text": "transformers",
+        "authors": [],
+        "fields": [
+          "title",
+          "abstract"
+        ],
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "in:body in:title",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": [
+          "title",
+          "body"
+        ],
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "in:notes attention",
+      "parsed": {
+        "text": "attention",
+        "authors": [],
+        "fields": [
+          "notes"
+        ],
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "author:smith author:\"ada lovelace\" attention",
+      "parsed": {
+        "text": "attention",
+        "authors": [
+          "smith",
+          "ada lovelace"
+        ],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "tag:a tag:b",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": "b",
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "foo:bar is:open in:everything tag:",
+      "parsed": {
+        "text": "foo:bar is:open in:everything tag:",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "\"exact phrase\" more",
+      "parsed": {
+        "text": "\"exact phrase\" more",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "TAG:NLP In:Title IS:Starred",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": [
+          "title"
+        ],
+        "tag": "NLP",
+        "project": null,
+        "starred": true,
+        "status": null
+      }
+    },
+    {
+      "input": "",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "  spaced\tout\n  words  ",
+      "parsed": {
+        "text": "spaced out words",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "tag:\"unclosed",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": "unclosed",
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "tag:deep learning",
+      "parsed": {
+        "text": "",
+        "authors": [],
+        "fields": null,
+        "tag": "deep learning",
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    },
+    {
+      "input": "1:2 k-ey:value",
+      "parsed": {
+        "text": "1:2 k-ey:value",
+        "authors": [],
+        "fields": null,
+        "tag": null,
+        "project": null,
+        "starred": false,
+        "status": null
+      }
+    }
+  ]
+}

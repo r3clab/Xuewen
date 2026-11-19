@@ -38,7 +38,7 @@ use crate::search::Semantic;
 #[command(name = "xuewen", version)]
 struct Cli {
     /// Path to the TOML config file.
-    #[arg(long, default_value = "xuewen.toml")]
+    #[arg(long, env = "XUEWEN_CONFIG", default_value = "xuewen.toml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Command,

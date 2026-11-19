@@ -23,9 +23,6 @@ describe('projects state', () => {
   beforeEach(() => {
     projects.items = [];
     filters.q = '';
-    filters.project = 'all';
-    filters.tag = undefined;
-    filters.starred = undefined;
     library.papers = [];
     vi.unstubAllGlobals();
   });
@@ -40,53 +37,41 @@ describe('projects state', () => {
     expect(projects.items[0].name).toBe('Survey');
   });
 
-  it('setProjectFilter sends the project query param', async () => {
+  it('a pill filter reloads the list with the raw query', async () => {
     let lastUrl = '';
     stubFetch((url) => {
       lastUrl = url;
       return [];
     });
-    await setProjectFilter('p1');
-    expect(filters.project).toBe('p1');
-    expect(lastUrl).toContain('project=p1');
+    await setProjectFilter('Survey');
+    expect(lastUrl).toBe('/api/papers?q=project%3ASurvey&sort=year_desc');
   });
 
   it('the project/tag/starred filters combine via query qualifiers', async () => {
     stubFetch(() => []);
+    projects.items = [{ id: 'p1', name: 'Survey', paper_count: 2, created_at: '' }];
 
-    await setProjectFilter('p1');
-    expect(filters.project).toBe('p1');
-    expect(filters.q).toContain('project:p1');
+    await setProjectFilter('Survey');
+    expect(filters.project?.id).toBe('p1');
+    expect(filters.q).toContain('project:Survey');
 
     await setTagFilter('security');
     expect(filters.tag).toBe('security');
-    expect(filters.project).toBe('p1'); // filters AND together now
+    expect(filters.project?.id).toBe('p1'); // filters AND together
 
     await setStarFilter(true);
     expect(filters.starred).toBe(true);
     expect(filters.tag).toBe('security');
 
     // toggling each qualifier off removes only that filter
-    await setProjectFilter('all');
-    expect(filters.project).toBe('all');
+    await setProjectFilter(null);
+    expect(filters.project).toBeNull();
     expect(filters.tag).toBe('security');
-    await setTagFilter(undefined);
-    expect(filters.tag).toBeUndefined();
+    await setTagFilter(null);
+    expect(filters.tag).toBeNull();
     expect(filters.starred).toBe(true);
     await setStarFilter(false);
     expect(filters.q).toBe('');
-  });
-
-  it('setTagFilter and setStarFilter send the matching query params', async () => {
-    let lastUrl = '';
-    stubFetch((url) => {
-      lastUrl = url;
-      return [];
-    });
-    await setTagFilter('ml');
-    expect(lastUrl).toContain('tag=ml');
-    await setStarFilter(true);
-    expect(lastUrl).toContain('starred=true');
   });
 });
 
@@ -95,9 +80,6 @@ describe('global rename/delete clears the per-paper detail cache', () => {
     projects.items = [];
     tags.items = [];
     filters.q = '';
-    filters.project = 'all';
-    filters.tag = undefined;
-    filters.starred = undefined;
     library.papers = [];
     vi.unstubAllGlobals();
   });
@@ -154,9 +136,6 @@ describe('tag/project rename+delete keep the search string in sync', () => {
     projects.items = [];
     tags.items = [];
     filters.q = '';
-    filters.project = 'all';
-    filters.tag = undefined;
-    filters.starred = undefined;
     library.papers = [];
     vi.unstubAllGlobals();
   });
@@ -169,7 +148,7 @@ describe('tag/project rename+delete keep the search string in sync', () => {
 
     await deleteTag('t1');
     expect(filters.q).not.toContain('tag:');
-    expect(filters.tag).toBeUndefined();
+    expect(filters.tag).toBeNull();
   });
 
   it('renameTag rewrites an active tag: qualifier to the new name', async () => {
@@ -219,12 +198,12 @@ describe('tag/project rename+delete keep the search string in sync', () => {
   it('removeProject drops the dead project: qualifier from the query string', async () => {
     stubFetch(() => []);
     projects.items = [{ id: 'p1', name: 'Survey', paper_count: 1, created_at: '' }];
-    await setProjectFilter('p1');
+    await setProjectFilter('Survey');
     expect(filters.q).toContain('project:Survey');
 
     await removeProject('p1');
     expect(filters.q).not.toContain('project:');
-    expect(filters.project).toBe('all');
+    expect(filters.project).toBeNull();
   });
 
   it('renameProject rewrites an active project: qualifier to the new name', async () => {
@@ -232,10 +211,10 @@ describe('tag/project rename+delete keep the search string in sync', () => {
       url === '/api/projects' ? [{ id: 'p1', name: 'Renamed', paper_count: 1 }] : [],
     );
     projects.items = [{ id: 'p1', name: 'Survey', paper_count: 1, created_at: '' }];
-    await setProjectFilter('p1');
+    await setProjectFilter('Survey');
 
     await renameProject('p1', { name: 'Renamed' });
     expect(filters.q).toContain('project:Renamed');
-    expect(filters.project).toBe('p1'); // the new name resolves back to the id
+    expect(filters.project?.id).toBe('p1'); // the new name resolves back to the project
   });
 });

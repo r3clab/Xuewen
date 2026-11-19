@@ -3,59 +3,51 @@ name: Desktop release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   dmg:
     runs-on: macos-14 # arm64
     # Cap the job so a hung tool (e.g. dylibbundler prompting with no stdin)
     # fails fast instead of burning the better part of an hour.
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-desktop-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/**', 'frontend/package-lock.json', 'agent-runner/package-lock.json') }}
+          restore-prefixes-first-match: nix-desktop-${{ runner.os }}-
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # The app is linked by Xcode's toolchain; rustup reads rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Build frontend (embedded into the binary by rust-embed)
-        run: |
-          npm --prefix frontend ci
-          npm --prefix frontend run build
-
-      - name: Install agent-runner production deps (bundled as resources)
-        run: npm --prefix agent-runner ci --omit=dev
-
-      - name: Prepare sidecars (node + pdftotext with relocated dylibs)
-        run: |
-          brew install poppler dylibbundler
-          bash desktop/scripts/prepare-sidecars.sh
+      - name: Stage the frontend, agent runner and sidecars from the flake
+        run: bash desktop/scripts/prepare-sidecars.sh
 
       # The Tauri CLI performs the bundling and ad-hoc signing, so it is
       # pinned via desktop/package.json rather than floated with npx: two
       # builds of the same tag must use the same tool.
       - name: Build .app and .dmg
-        run: |
-          npm ci
-          npx tauri build
         working-directory: desktop
+        run: nix shell --inputs-from .. nixpkgs#nodejs --command sh -c 'npm ci && npx tauri build -- --locked'
 
-      # The dmg is published as a build artifact only. This repo enforces
-      # immutable releases — assets cannot be added to a release after it is
-      # created, and a tag whose release was created can never get another one.
-      # So the release is created atomically WITH the dmg outside CI, once the
-      # build here succeeds:
-      #   gh run download <run-id> -n xuewen-dmg
-      #   gh release create <tag> *.dmg --notes-file <notes>
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xuewen-dmg
-          path: target/release/bundle/dmg/*.dmg
-          if-no-files-found: error
+      # Assets can only be attached to a draft: publishing makes the release
+      # immutable.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --verify-tag --generate-notes
+          gh release upload "$TAG" target/release/bundle/dmg/*.dmg --clobber
+          gh release edit "$TAG" --draft=false

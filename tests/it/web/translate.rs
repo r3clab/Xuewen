@@ -9,7 +9,7 @@ use xuewen::translate::TranslateService;
 
 #[tokio::test]
 async fn translate_returns_503_when_disabled() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(support::router(pool, root));
     server
         .post("/api/translate")
@@ -20,7 +20,7 @@ async fn translate_returns_503_when_disabled() {
 
 #[tokio::test]
 async fn settings_report_translate_disabled_by_default() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(support::router(pool, root));
     let resp = server.get("/api/settings").await;
     resp.assert_status_ok();
@@ -48,7 +48,7 @@ async fn translate_returns_translation_from_mocked_llm() {
         .mount(&upstream)
         .await;
 
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let cfg = translate_cfg(&upstream.uri());
     let translate = std::sync::Arc::new(TranslateService::from_config(&cfg).unwrap());
     let server = {

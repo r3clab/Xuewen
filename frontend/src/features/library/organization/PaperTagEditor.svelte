@@ -2,6 +2,8 @@
   import { X } from '@lucide/svelte';
   import { addTagToPaper, removeTagFromPaper } from './actions';
   import { tags } from './state.svelte';
+  import { errorMessage } from '$shared/errors';
+  import { escapeLayer } from '$shared/ui/escape';
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';
 
   let { d }: { d: PaperDetail } = $props();
@@ -35,7 +37,7 @@
       // Creates the tag if it's new and attaches it either way.
       await addTagToPaper(d.id, trimmed);
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'tag update failed');
     }
   }
 
@@ -50,10 +52,12 @@
       e.preventDefault();
       const pick = highlighted >= 0 ? suggestions[highlighted]?.name : undefined;
       void commit(pick ?? query);
-    } else if (e.key === 'Escape') {
-      query = '';
-      highlighted = -1;
     }
+  }
+
+  function clear() {
+    query = '';
+    highlighted = -1;
   }
 
   async function onRemove(tagId: string) {
@@ -61,7 +65,7 @@
     try {
       await removeTagFromPaper(d.id, tagId);
     } catch (e) {
-      error = (e as Error).message;
+      error = errorMessage(e, 'tag update failed');
     }
   }
 </script>
@@ -88,6 +92,7 @@
 {/if}
 <div class="relative mt-2">
   <input
+    {@attach escapeLayer(clear, { active: () => query !== '' })}
     bind:value={query}
     oninput={onInput}
     onkeydown={onKeydown}

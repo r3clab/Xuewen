@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { flushSync } from 'svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock(import('$features/library/api'), async (importOriginal) => {
   const mod = await importOriginal<typeof import('$features/library/api')>();
@@ -16,7 +17,7 @@ vi.mock(import('$features/library/api'), async (importOriginal) => {
   };
 });
 
-import { activateTab, closeTab, goHome, initTabs, openTab, viewer } from './state.svelte';
+import { activateTab, closeTab, goHome, initTabs, openTab, persistTabs, renameTab, retitleTab, viewer } from './state.svelte';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 
 const TABS_KEY = 'xuewen-tabs';
@@ -33,17 +34,21 @@ function saved(): {
   tabs: { id: string; title: string; name: string | null }[];
   activeId: string | null;
 } {
+  flushSync();
   return JSON.parse(localStorage.getItem(TABS_KEY)!);
 }
 
+let stopPersisting: () => void;
 beforeEach(() => {
   localStorage.clear();
   viewer.tabs = [];
   viewer.activeId = null;
+  stopPersisting = persistTabs();
 });
+afterEach(() => stopPersisting());
 
 describe('tab persistence', () => {
-  it('open/activate/close/goHome all write the tab set to storage', () => {
+  it('every change to the tab set reaches storage', () => {
     openTab(paper('a', 'A'));
     openTab(paper('b', 'B'));
     expect(saved()).toEqual({
@@ -60,6 +65,9 @@ describe('tab persistence', () => {
     expect(saved().activeId).toBe(null);
     closeTab('a');
     expect(saved().tabs).toEqual([{ id: 'b', title: 'B', name: null }]);
+    retitleTab('b', 'B, identified');
+    renameTab('b', 'Bee');
+    expect(saved().tabs).toEqual([{ id: 'b', title: 'B, identified', name: 'Bee' }]);
   });
 
   it("carries the paper's name onto the tab, and through storage", async () => {

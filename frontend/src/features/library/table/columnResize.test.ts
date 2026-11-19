@@ -2,12 +2,8 @@ import type { ActionReturn } from 'svelte/action';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { columnResize, type ColumnResizeParams } from './columnResize';
 
-// jsdom's PointerEvent support has varied by version; fall back to MouseEvent
-// (the handlers only read clientX/button, and pointer capture is try/caught).
-function pointer(type: string, clientX: number): Event {
-  const Ctor: typeof MouseEvent =
-    typeof PointerEvent === 'undefined' ? MouseEvent : (PointerEvent as unknown as typeof MouseEvent);
-  return new Ctor(type, { clientX, button: 0, bubbles: true, cancelable: true });
+function pointer(type: string, clientX: number): PointerEvent {
+  return new PointerEvent(type, { clientX, button: 0, bubbles: true, cancelable: true });
 }
 
 function makeHandle(over: Partial<ColumnResizeParams> = {}) {
@@ -33,9 +29,6 @@ function drag(node: HTMLElement, from: number, to: number) {
 }
 
 afterEach(() => {
-  // jsdom never fires the post-drag click a browser would, so drain any
-  // armed one-shot swallower before the next test's clicks.
-  window.dispatchEvent(new MouseEvent('click'));
   document.body.innerHTML = '';
   document.documentElement.style.cursor = '';
   document.documentElement.style.userSelect = '';
@@ -69,30 +62,20 @@ describe('columnResize', () => {
     expect(document.documentElement.style.userSelect).toBe('');
   });
 
-  it('swallows exactly the click following a real drag', () => {
+  it('leaves its events to the page: an outside press still dismisses, a taken key is marked taken', () => {
     const { node } = makeHandle();
-    const btn = document.createElement('button');
-    const onClick = vi.fn();
-    btn.addEventListener('click', onClick);
-    document.body.appendChild(btn);
-
+    const seen: Event[] = [];
+    const record = (e: Event) => seen.push(e);
+    window.addEventListener('pointerdown', record);
+    window.addEventListener('keydown', record);
     drag(node, 100, 150);
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(onClick).not.toHaveBeenCalled(); // the drag's synthetic click
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(onClick).toHaveBeenCalledOnce(); // one-shot: the next click lands
-  });
-
-  it('a stationary press-and-release does not swallow the next click', () => {
-    const { node } = makeHandle();
-    const btn = document.createElement('button');
-    const onClick = vi.fn();
-    btn.addEventListener('click', onClick);
-    document.body.appendChild(btn);
-
-    drag(node, 100, 101); // within the 3px threshold
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(onClick).toHaveBeenCalledOnce();
+    node.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    window.removeEventListener('pointerdown', record);
+    window.removeEventListener('keydown', record);
+    expect(seen.map((e) => [e.type, e.defaultPrevented])).toEqual([
+      ['pointerdown', true],
+      ['keydown', true],
+    ]);
   });
 
   it('a left-edge handle inverts the drag: pulling left grows the column', () => {
@@ -114,6 +97,15 @@ describe('columnResize', () => {
     const { node, params } = makeHandle();
     node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(params.onAutoFit).toHaveBeenCalledOnce();
+  });
+
+  it('Enter auto-fits from the keyboard', () => {
+    const { node, params } = makeHandle();
+    const e = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    node.dispatchEvent(e);
+    expect(params.onAutoFit).toHaveBeenCalledOnce();
+    expect(e.defaultPrevented).toBe(true);
+    expect(params.onCommit).not.toHaveBeenCalled();
   });
 
   it('destroy removes the listeners', () => {

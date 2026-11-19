@@ -43,15 +43,15 @@ pub(super) async fn identify(ctx: &Ctx, args: IdentifyArgs) -> Result<()> {
     let md = if let Some(doi) = doi {
         identify
             .lookup(&Identifier::doi(doi.clone()))
-            .await
+            .await?
             .ok_or_else(|| anyhow::anyhow!("no Crossref record for doi {doi} — try --title"))?
     } else if let Some(axv) = arxiv {
         identify
             .lookup(&Identifier::arxiv(axv.clone()))
-            .await
+            .await?
             .ok_or_else(|| anyhow::anyhow!("no arXiv record for {axv} — try --title"))?
     } else if let Some(query) = title {
-        let cands = identify.candidates(&query).await;
+        let cands = identify.candidates(&query).await?;
         if cands.is_empty() {
             anyhow::bail!("no candidates found for {query:?}");
         }

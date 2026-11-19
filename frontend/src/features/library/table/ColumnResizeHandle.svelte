@@ -23,11 +23,13 @@
 </script>
 
 <!-- Focusable window-splitter (WAI separator pattern): drag or ArrowLeft/
-     ArrowRight resize the column, double-click auto-fits it. aria-valuemax
-     is deliberately omitted — the ceiling is container-dependent and
-     computing it would mean a clientWidth read on every render. -->
-<!-- svelte-ignore a11y_no_noninteractive_tabindex -- the separator IS the
-     interactive splitter; keyboard resize needs it focusable. -->
+     ArrowRight resize the column, double-click or Enter auto-fits it.
+     aria-valuemax is deliberately omitted — the ceiling is
+     container-dependent and computing it would mean a clientWidth read on
+     every render. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -- Svelte counts every
+     separator as static, but a focusable one is WAI-ARIA's window splitter:
+     keyboard resize needs it focusable. -->
 <div
   role="separator"
   aria-orientation="vertical"

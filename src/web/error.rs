@@ -1,13 +1,18 @@
 //! The one error type web handlers return. Every variant serializes to the
 //! API's single error body shape — `{"error": "<message>"}` — so no handler
-//! can invent a divergent wire format, and `Internal` is the one place a
-//! db/service failure is logged (attach the operation name with
-//! `anyhow::Context` so the log line still says what failed).
+//! can invent a divergent wire format, and this is the one place a failure's
+//! cause is logged (attach the operation name with `anyhow::Context` so the
+//! log line still says what failed).
 
+use axum::extract::multipart::{MultipartError, MultipartRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+
+use crate::ingest::import::ImportError;
+use crate::library::model::NameWriteError;
 
 pub(crate) enum ApiError {
     /// 404 with the generic "not found" body.
@@ -22,10 +27,48 @@ pub(crate) enum ApiError {
     Unprocessable(String),
     /// 503 — the service this endpoint needs isn't configured.
     Unavailable(String),
-    /// 502 — an upstream fetch/provider call failed.
-    BadGateway(&'static str),
-    /// 500, logged here rather than at every call site.
-    Internal(anyhow::Error),
+    /// An extractor refused the request (malformed body, bad path or query
+    /// parameter, oversized upload): axum's own status and description.
+    Rejected { status: StatusCode, message: String },
+    /// 502 — an upstream fetch/provider call failed. `source` is logged,
+    /// never sent.
+    BadGateway {
+        message: &'static str,
+        source: Option<anyhow::Error>,
+    },
+    /// 500. `source` is logged, never sent.
+    Internal {
+        message: &'static str,
+        source: anyhow::Error,
+    },
+}
+
+impl ApiError {
+    pub(crate) fn bad_gateway(message: &'static str, source: anyhow::Error) -> Self {
+        ApiError::BadGateway {
+            message,
+            source: Some(source),
+        }
+    }
+
+    pub(crate) fn context<C>(ctx: C) -> impl FnOnce(crate::app::error::Error) -> ApiError
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+    {
+        move |e| match e {
+            crate::app::error::Error::Internal(e) => e.context(ctx).into(),
+            e => e.into(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(source: anyhow::Error) -> Self {
+        ApiError::Internal {
+            message: "internal error",
+            source,
+        }
+    }
 }
 
 impl From<crate::app::error::Error> for ApiError {
@@ -36,7 +79,26 @@ impl From<crate::app::error::Error> for ApiError {
             Error::Invalid(m) => ApiError::BadRequest(m),
             Error::Unprocessable(m) => ApiError::Unprocessable(m),
             Error::Unavailable(m) => ApiError::Unavailable(m),
-            Error::Internal(e) => ApiError::Internal(e),
+            Error::LookupFailed(e) => ApiError::bad_gateway("lookup failed", e),
+            Error::Import(e) => e.into(),
+            Error::Internal(e) => e.into(),
+        }
+    }
+}
+
+impl From<ImportError> for ApiError {
+    fn from(e: ImportError) -> Self {
+        match e {
+            ImportError::Unsupported => ApiError::BadRequest("unsupported input".into()),
+            ImportError::CookieExpired => ApiError::BadGateway {
+                message: "proxy session expired — refresh your cookie",
+                source: None,
+            },
+            ImportError::Network(e) => ApiError::bad_gateway("fetch failed", e),
+            ImportError::Ingest(source) => ApiError::Internal {
+                message: "import failed",
+                source,
+            },
         }
     }
 }
@@ -47,38 +109,38 @@ impl From<crate::library::model::NameError> for ApiError {
     }
 }
 
-impl ApiError {
-    pub(crate) fn conflict_or_internal(
-        e: anyhow::Error,
-        ctx: &'static str,
-        message: &'static str,
-    ) -> Self {
-        if crate::db::is_unique_violation(&e) {
-            ApiError::Conflict {
-                message: message.to_string(),
+impl From<NameWriteError> for ApiError {
+    fn from(e: NameWriteError) -> Self {
+        match e {
+            NameWriteError::Taken(_) => ApiError::Conflict {
+                message: e.to_string(),
                 id: None,
+            },
+            NameWriteError::Db(e) => anyhow::Error::new(e).into(),
+        }
+    }
+}
+
+macro_rules! rejected_by_axum {
+    ($($rejection:ty),*) => {$(
+        impl From<$rejection> for ApiError {
+            fn from(r: $rejection) -> Self {
+                ApiError::Rejected {
+                    status: r.status(),
+                    message: r.body_text(),
+                }
             }
-        } else {
-            ApiError::Internal(e.context(ctx))
         }
-    }
-
-    pub(crate) fn context<C>(ctx: C) -> impl FnOnce(crate::app::error::Error) -> ApiError
-    where
-        C: std::fmt::Display + Send + Sync + 'static,
-    {
-        move |e| match e {
-            crate::app::error::Error::Internal(e) => ApiError::Internal(e.context(ctx)),
-            e => e.into(),
-        }
-    }
+    )*};
 }
 
-impl From<anyhow::Error> for ApiError {
-    fn from(e: anyhow::Error) -> Self {
-        ApiError::Internal(e)
-    }
-}
+rejected_by_axum!(
+    JsonRejection,
+    PathRejection,
+    QueryRejection,
+    MultipartRejection,
+    MultipartError
+);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -95,12 +157,18 @@ impl IntoResponse for ApiError {
             ),
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": m })),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, json!({ "error": m })),
-            ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, json!({ "error": m })),
-            ApiError::Internal(e) => {
-                tracing::error!("{e:#}");
+            ApiError::Rejected { status, message } => (status, json!({ "error": message })),
+            ApiError::BadGateway { message, source } => {
+                if let Some(e) = source {
+                    tracing::warn!("{message}: {e:#}");
+                }
+                (StatusCode::BAD_GATEWAY, json!({ "error": message }))
+            }
+            ApiError::Internal { message, source } => {
+                tracing::error!("{message}: {source:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": "internal error"}),
+                    json!({ "error": message }),
                 )
             }
         };

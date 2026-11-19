@@ -52,10 +52,3 @@ export async function buildAnnotatedPdf(paperId: string, rows: Annotation[], dep
     await deps.close(documentId).catch(() => {});
   }
 }
-
-/// Plugin errors are Errors with a message; anything else thrown on the way
-/// gets a generic one rather than "[object Object]".
-export function exportErrorMessage(e: unknown): string {
-  const message = e instanceof Error ? e.message : null;
-  return message ? message : 'exporting the annotated PDF failed';
-}

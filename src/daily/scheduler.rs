@@ -3,7 +3,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Timelike, Utc};
 use tokio_util::sync::CancellationToken;
 
-use super::{store, DailyService};
+use super::store::{self, DailyStatus};
+use super::DailyService;
 
 /// Parse `[daily].run_at` as 24h "HH:MM".
 pub(crate) fn parse_run_at(s: &str) -> anyhow::Result<(u32, u32)> {
@@ -27,17 +28,11 @@ pub(crate) fn today() -> String {
     batch_date(Utc::now())
 }
 
-/// Whether a day's run status means that day is done: "ok" and "empty" are,
-/// a missing or "failed" run is not.
-pub(crate) fn settled(status: Option<&str>) -> bool {
-    matches!(status, Some("ok") | Some("empty"))
-}
-
 /// A run is due when we are past today's `run_at` and today's run is
 /// missing (boot catch-up) or failed (hourly retry).
-fn run_due(now: DateTime<Utc>, run_at: (u32, u32), today_status: Option<&str>) -> bool {
+fn run_due(now: DateTime<Utc>, run_at: (u32, u32), today_status: Option<DailyStatus>) -> bool {
     let past = (now.hour(), now.minute()) >= run_at;
-    past && !settled(today_status)
+    past && !today_status.is_some_and(DailyStatus::settled)
 }
 
 /// Seconds until the next occurrence of `run_at` (UTC), capped at 3600 so
@@ -71,8 +66,13 @@ pub(crate) async fn run(svc: Arc<DailyService>, cancel: CancellationToken) {
                 None
             }
         };
-        if run_due(now, run_at, status.as_deref()) {
-            if let Some(run) = svc.run_guarded(&today).await {
+        if run_due(now, run_at, status) {
+            let run = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                run = svc.run_guarded(&today) => run,
+            };
+            if let Some(run) = run {
                 tracing::info!("daily run {run}");
             }
         }
@@ -111,10 +111,10 @@ mod tests {
         // After run_at with no run yet (boot catch-up): due.
         assert!(run_due(at(15, 0), (9, 0), None));
         // Failed earlier today: due again (hourly retry).
-        assert!(run_due(at(10, 0), (9, 0), Some("failed")));
+        assert!(run_due(at(10, 0), (9, 0), Some(DailyStatus::Failed)));
         // Succeeded (ok or empty): not due.
-        assert!(!run_due(at(10, 0), (9, 0), Some("ok")));
-        assert!(!run_due(at(10, 0), (9, 0), Some("empty")));
+        assert!(!run_due(at(10, 0), (9, 0), Some(DailyStatus::Ok)));
+        assert!(!run_due(at(10, 0), (9, 0), Some(DailyStatus::Empty)));
     }
 
     #[test]

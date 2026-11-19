@@ -1,6 +1,11 @@
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
+use super::MAX_PDF_BYTES;
+use crate::config::ProxyLogin;
+use crate::http::read_body_capped;
+use crate::library::model::ARXIV_PDF_BASE;
+
 /// Downloads PDF bytes. `client` follows redirects (open URLs). `no_redirect`
 /// does NOT auto-follow: the proxied path drives redirects manually so it can
 /// re-attach the `Cookie` header through the EZproxy chain (reqwest strips
@@ -8,8 +13,8 @@ use std::time::Duration;
 pub struct Fetcher {
     client: reqwest::Client,
     no_redirect: reqwest::Client,
-    proxy_login_url: Option<String>,
-    proxy_host: Option<String>,
+    proxy: Option<ProxyLogin>,
+    pub(crate) arxiv_pdf_base: String,
 }
 
 /// Percent-encode a URL for use as the `?url=` value of the EZproxy login.
@@ -27,7 +32,7 @@ fn encode_target(s: &str) -> String {
 }
 
 impl Fetcher {
-    pub fn new(proxy_login_url: Option<String>) -> Result<Self> {
+    pub fn new(proxy: Option<ProxyLogin>) -> Result<Self> {
         let ua = crate::http::user_agent(None);
         let client = reqwest::Client::builder()
             .user_agent(&ua)
@@ -38,28 +43,31 @@ impl Fetcher {
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let proxy_host = proxy_login_url
-            .as_deref()
-            .and_then(|u| reqwest::Url::parse(u).ok())
-            .and_then(|u| u.host_str().map(str::to_string));
         Ok(Self {
             client,
             no_redirect,
-            proxy_login_url,
-            proxy_host,
+            proxy,
+            arxiv_pdf_base: ARXIV_PDF_BASE.to_string(),
         })
     }
 
-    /// Whether `proxy_login_url` is configured (paywalled fetch is possible).
+    /// Serve arXiv PDFs from `base` (a mock server) instead of arxiv.org.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_arxiv_pdf_base(mut self, base: impl Into<String>) -> Self {
+        self.arxiv_pdf_base = base.into();
+        self
+    }
+
+    /// Whether `[proxy]` is configured (paywalled fetch is possible).
     pub(crate) fn proxy_enabled(&self) -> bool {
-        self.proxy_login_url.is_some()
+        self.proxy.is_some()
     }
 
     /// Host of the configured EZproxy (`None` without `[proxy]`). Surfaced by
     /// GET /api/settings so the UI can say which host a cookie is for instead
     /// of hardcoding one deployment's university.
     pub(crate) fn proxy_host(&self) -> Option<&str> {
-        self.proxy_host.as_deref()
+        self.proxy.as_ref().map(ProxyLogin::host)
     }
 
     /// GET `url` following redirects. `Ok(Some(bytes))` if the body is a PDF,
@@ -70,7 +78,7 @@ impl Fetcher {
         if !resp.status().is_success() {
             return Err(anyhow!("HTTP {} fetching {url}", resp.status()));
         }
-        let bytes = read_body_capped(resp).await?;
+        let bytes = read_body_capped(resp, MAX_PDF_BYTES).await?;
         Ok(is_pdf(&bytes).then_some(bytes))
     }
 
@@ -83,11 +91,11 @@ impl Fetcher {
         target_url: &str,
         cookie: &str,
     ) -> Result<Option<Vec<u8>>> {
-        let login = self
-            .proxy_login_url
-            .as_deref()
+        let proxy = self
+            .proxy
+            .as_ref()
             .ok_or_else(|| anyhow!("proxy not configured"))?;
-        let mut url = format!("{login}{}", encode_target(target_url));
+        let mut url = format!("{}{}", proxy.prefix(), encode_target(target_url));
         for _ in 0..10 {
             let resp = self
                 .no_redirect
@@ -114,7 +122,7 @@ impl Fetcher {
             if !status.is_success() {
                 return Err(anyhow!("HTTP {status} via proxy for {target_url}"));
             }
-            let bytes = read_body_capped(resp).await?;
+            let bytes = read_body_capped(resp, MAX_PDF_BYTES).await?;
             return Ok(is_pdf(&bytes).then_some(bytes));
         }
         Err(anyhow!("too many redirects via proxy for {target_url}"))
@@ -123,7 +131,7 @@ impl Fetcher {
     /// A redirect target host is allowed iff it equals the proxy host or is a
     /// subdomain of it (`dl-acm-org.proxy.uchicago.edu` for `proxy.uchicago.edu`).
     fn host_allowed(&self, host: Option<&str>) -> bool {
-        match (host, self.proxy_host.as_deref()) {
+        match (host, self.proxy_host()) {
             (Some(h), Some(p)) => h == p || h.ends_with(&format!(".{p}")),
             _ => false,
         }
@@ -133,38 +141,6 @@ impl Fetcher {
 /// Whether bytes begin with the PDF magic marker.
 fn is_pdf(bytes: &[u8]) -> bool {
     bytes.starts_with(b"%PDF")
-}
-
-/// Ceiling on a fetched document, matching the multipart upload limit
-/// (`DefaultBodyLimit`, web/handlers/import.rs). URL imports otherwise buffer
-/// the whole response with no bound; a hostile or misconfigured server could
-/// stream an arbitrarily large body into memory.
-const MAX_FETCH_BYTES: u64 = 50 * 1024 * 1024;
-
-/// Read a response body into memory, refusing anything over `MAX_FETCH_BYTES`.
-/// Rejects early on an oversized declared `Content-Length`, then enforces the
-/// same ceiling while streaming (the header can lie or be absent).
-async fn read_body_capped(mut resp: reqwest::Response) -> Result<Vec<u8>> {
-    let too_big = || {
-        anyhow!(
-            "document exceeds the {} MB import limit",
-            MAX_FETCH_BYTES / (1024 * 1024)
-        )
-    };
-    if resp
-        .content_length()
-        .is_some_and(|len| len > MAX_FETCH_BYTES)
-    {
-        return Err(too_big());
-    }
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        if buf.len() as u64 + chunk.len() as u64 > MAX_FETCH_BYTES {
-            return Err(too_big());
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
 }
 
 #[cfg(test)]
@@ -217,7 +193,7 @@ mod fetch_tests {
         let server = MockServer::start().await;
         // set_body_bytes sets Content-Length to the true size, so this trips
         // the early declared-length reject before any body is buffered.
-        let big = vec![b'x'; (MAX_FETCH_BYTES + 1) as usize];
+        let big = vec![b'x'; MAX_PDF_BYTES + 1];
         Mock::given(method("GET"))
             .and(path("/big"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(big))
@@ -228,7 +204,7 @@ mod fetch_tests {
             .fetch_plain(&format!("{}/big", server.uri()))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("import limit"), "got: {err}");
+        assert!(err.to_string().contains("MB limit"), "got: {err}");
     }
 
     #[tokio::test]
@@ -247,7 +223,7 @@ mod fetch_tests {
             .await;
 
         let login = format!("{}/login?url=", server.uri());
-        let f = Fetcher::new(Some(login)).unwrap();
+        let f = Fetcher::new(Some(login.parse().unwrap())).unwrap();
 
         let target = "https://dl.acm.org/doi/pdf/10.1145/x";
         assert_eq!(
@@ -283,7 +259,10 @@ mod fetch_tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(PDF))
             .mount(&server)
             .await;
-        let f = Fetcher::new(Some(format!("{}/login?url=", server.uri()))).unwrap();
+        let f = Fetcher::new(Some(
+            format!("{}/login?url=", server.uri()).parse().unwrap(),
+        ))
+        .unwrap();
         assert_eq!(
             f.fetch_proxied("https://dl.acm.org/doi/pdf/10.1145/x", "ezproxy=good")
                 .await

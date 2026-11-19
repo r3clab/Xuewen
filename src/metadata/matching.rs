@@ -8,7 +8,7 @@ use crate::library::naming;
 pub(crate) const MATCH_THRESHOLD: f64 = 0.85;
 
 /// Lowercase, replace every non-alphanumeric char with a space, and collapse whitespace.
-fn normalize_title(s: &str) -> String {
+pub(crate) fn normalize_title(s: &str) -> String {
     let spaced: String = s
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })

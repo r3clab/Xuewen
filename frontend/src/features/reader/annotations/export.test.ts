@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AnnotationBundle } from '@embedpdf/svelte/annotation';
-import { buildAnnotatedPdf, exportDocumentId, exportErrorMessage, type ExportDeps } from './export';
+import { buildAnnotatedPdf, exportDocumentId, type ExportDeps } from './export';
 import { RESTORE_OPTIONS, type RestorePage } from './adapter';
 import { colorHex } from './palette';
 import type { Annotation } from '$shared/api/generated/Annotation';
@@ -151,17 +151,5 @@ describe('buildAnnotatedPdf', () => {
     await buildAnnotatedPdf('p1', [row('a1'), row('bad', { payload: null })], h.deps);
     const [[bundle]] = h.imported;
     expect(bundle.items.map((item) => item.data.nm)).toEqual(['a1']);
-  });
-});
-
-describe('exportErrorMessage', () => {
-  it('reads the reason a plugin error gives', () => {
-    expect(exportErrorMessage(new Error('password required'))).toBe('password required');
-  });
-
-  it('falls back to something a reader can act on', () => {
-    expect(exportErrorMessage(null)).toMatch(/exporting the annotated PDF failed/);
-    expect(exportErrorMessage({ code: 3 })).toMatch(/exporting the annotated PDF failed/);
-    expect(exportErrorMessage(new Error(''))).toMatch(/exporting the annotated PDF failed/);
   });
 });

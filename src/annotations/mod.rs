@@ -1,12 +1,12 @@
 //! Reader annotations: highlights, underlines, strikeouts, squigglies and
 //! sticky notes drawn over a paper's PDF.
 //!
-//! The PDF file itself is never written. `@embedpdf/plugin-annotation` runs
-//! with `autoCommit: false` in the frontend and the marks live here instead,
-//! so `papers.content_hash` keeps matching the stored bytes.
+//! The PDF file itself is never written. The reader's annotation plugin only
+//! edits the document it holds in memory and the marks live here instead, so
+//! `papers.content_hash` keeps matching the stored bytes.
 //!
 //! Each row is a *projection* (`kind`, `color`, `page_index`, `quoted_text`,
-//! `note`) over an opaque `payload` — the plugin's own `AnnotationTransferItem`,
+//! `note`) over an opaque `payload` — `{data: <the plugin's annotation>}`,
 //! stored verbatim. The projection is what SQL, the CLI and the search
 //! indexer read; the payload is what the reader replays to redraw the mark.
 //! Splitting them this way means a field this module has never heard of
@@ -22,9 +22,12 @@ use ts_rs::TS;
 /// The mark types the reader can create. Mirrors the subset of
 /// `PdfAnnotationSubtype` our tools produce — deliberately closed, so an
 /// annotation subtype we don't render can never reach the database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS, clap::ValueEnum,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
 #[ts(export)]
 pub(crate) enum AnnotationKind {
     Highlight,
@@ -39,9 +42,12 @@ pub(crate) enum AnnotationKind {
 /// `dim`/`invert` page filters, so the *semantic* color is what persists and
 /// the frontend resolves it to pixels at draw time. Restyling the palette
 /// later therefore reflows every existing mark with no migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS, clap::ValueEnum,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
 #[ts(export)]
 pub(crate) enum AnnotationColor {
     Amber,
@@ -102,7 +108,7 @@ pub(crate) struct Annotation {
     pub(crate) color: AnnotationColor,
     pub(crate) quoted_text: Option<String>,
     pub(crate) note: Option<String>,
-    /// Verbatim `AnnotationTransferItem`. `null` when the stored JSON failed
+    /// Verbatim `{data: <annotation>}`. `null` when the stored JSON failed
     /// to parse — the row still lists (its projection is intact) but the
     /// reader skips redrawing it rather than crashing the whole document.
     #[ts(type = "unknown")]
@@ -211,7 +217,7 @@ impl AnnotationsService {
         id: &str,
         new: NewAnnotation,
     ) -> Result<Annotation> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::db::now_rfc3339();
         store::upsert(&self.pool, paper_id, id, &new, &now).await
     }
 
@@ -263,9 +269,11 @@ mod tests {
 
     #[test]
     fn names_match_the_wire_spelling() {
-        // `as_str` is hand-written while serde/sqlx derive theirs from
+        use clap::ValueEnum as _;
+
+        // `as_str` is hand-written while serde, sqlx and clap derive theirs from
         // rename_all; this pins them together so a renamed variant can't
-        // print one thing and store another.
+        // print, parse and store three different spellings.
         for k in [
             AnnotationKind::Highlight,
             AnnotationKind::Underline,
@@ -274,6 +282,7 @@ mod tests {
             AnnotationKind::TextComment,
         ] {
             assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{k}\""));
+            assert_eq!(k.to_possible_value().unwrap().get_name(), k.to_string());
         }
         for c in [
             AnnotationColor::Amber,
@@ -283,6 +292,7 @@ mod tests {
             AnnotationColor::Violet,
         ] {
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{c}\""));
+            assert_eq!(c.to_possible_value().unwrap().get_name(), c.to_string());
         }
     }
 

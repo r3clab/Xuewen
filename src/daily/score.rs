@@ -95,14 +95,6 @@ mod tests {
         assert!((dot(&cand, &profile) - explicit).abs() < 1e-5);
     }
 
-    async fn pool() -> sqlx::SqlitePool {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite:{}", dir.path().join("t.db").display());
-        let p = crate::db::connect(&url).await.unwrap();
-        std::mem::forget(dir);
-        p
-    }
-
     fn paper(id: &str, added_at: &str) -> crate::library::model::Paper {
         crate::library::model::Paper {
             id: id.into(),
@@ -129,8 +121,8 @@ mod tests {
         }
     }
 
-    async fn summaries(points: &[(&str, [f32; 4])]) -> VectorStore {
-        let store = crate::testutil::temp_vectors(4).await;
+    async fn summaries(points: &[(&str, [f32; 4])]) -> (tempfile::TempDir, VectorStore) {
+        let (dir, store) = crate::testutil::temp_vectors(4).await;
         store
             .upsert(
                 points
@@ -140,12 +132,12 @@ mod tests {
             )
             .await
             .unwrap();
-        store
+        (dir, store)
     }
 
     #[tokio::test]
     async fn newer_library_paper_dominates_profile() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("new1", "2026-07-09T00:00:00Z"))
             .await
             .unwrap();
@@ -153,7 +145,7 @@ mod tests {
             .await
             .unwrap();
 
-        let vectors = summaries(&[
+        let (_dir, vectors) = summaries(&[
             ("new1", [1.0, 0.0, 0.0, 0.0]),
             ("old1", [0.0, 1.0, 0.0, 0.0]),
         ])
@@ -168,21 +160,21 @@ mod tests {
 
     #[tokio::test]
     async fn empty_library_gives_no_profile() {
-        let pool = pool().await;
-        let vectors = summaries(&[]).await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
+        let (_dir, vectors) = summaries(&[]).await;
         assert!(build_profile(&pool, &vectors).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn trashed_papers_are_excluded_from_profile() {
-        let pool = pool().await;
+        let (_db, pool) = crate::testutil::temp_pool().await;
         crate::library::papers::insert(&pool, &paper("p1", "2026-07-09T00:00:00Z"))
             .await
             .unwrap();
         crate::library::trash::soft_delete(&pool, "p1")
             .await
             .unwrap();
-        let vectors = summaries(&[("p1", [1.0, 0.0, 0.0, 0.0])]).await;
+        let (_dir, vectors) = summaries(&[("p1", [1.0, 0.0, 0.0, 0.0])]).await;
         assert!(build_profile(&pool, &vectors).await.unwrap().is_none());
     }
 }

@@ -33,9 +33,7 @@ const paper: PaperSummary = {
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(library, { papers: [], loading: false, loaded: true, error: null });
-  Object.assign(filters, {
-    q: '', status: 'all', sort: 'year_desc', project: 'all', tag: undefined, starred: undefined,
-  });
+  Object.assign(filters, { q: '', sort: 'year_desc' });
   searchMeta.byId = {};
   projects.items = [];
   tags.items = [];
@@ -63,7 +61,7 @@ describe('LibraryView', () => {
   });
 
   it('keeps the filter strip visible when a filter matches nothing', () => {
-    Object.assign(filters, { q: 'tag:x', tag: 'x' });
+    filters.q = 'tag:x';
     render(LibraryView);
     expect(screen.getByText(/No papers match/)).toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Library filters' })).toBeInTheDocument();

@@ -6,69 +6,75 @@
 }:
 let
   inherit (pkgs) lib;
+  toolchain = (flake.lib.rustToolchain pkgs).override { extensions = [ ]; };
+  rustPlatform = pkgs.makeRustPlatform {
+    cargo = toolchain;
+    rustc = toolchain;
+  };
+  # pdftotext backs text extraction (ingest, chat, citations); git backs the
+  # repo-attach shallow clone.
+  runtimeDeps = [
+    pkgs.poppler-utils
+    pkgs.git
+  ];
 in
-pkgs.rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage {
   pname = "xuewen";
   inherit ((lib.importTOML ../../Cargo.toml).workspace.package) version;
-  # Exclude everything the backend build never reads — the frontend
-  # sources (dist comes from the `frontend` package), agent-runner
-  # (its own package, consumed only at runtime; the agent tests use
-  # tests/fixtures/stub_runner.mjs), Nix and deploy files, and CI —
-  # so editing them never rebuilds the backend. One carve-out:
-  # agent-runner/test/fixtures holds the wire-contract fixture that a
-  # Rust unit test asserts against (via CARGO_MANIFEST_DIR), so that
-  # subtree must stay visible to this build.
-  src = lib.cleanSourceWith {
-    src = flake;
-    filter =
-      path: _type:
-      let
-        rel = lib.removePrefix (toString flake + "/") (toString path);
-        under = dir: rel == dir || lib.hasPrefix (dir + "/") rel;
-        fixturePath =
-          builtins.elem rel [
-            "agent-runner"
-            "agent-runner/test"
-            "agent-runner/test/fixtures"
-          ]
-          || lib.hasPrefix "agent-runner/test/fixtures/" rel;
-      in
-      !(
-        under "frontend"
-        || under "deploy"
-        || under "nix"
-        || (under "agent-runner" && !fixturePath)
-        || under ".github"
-        || builtins.elem rel [
-          "flake.nix"
-          "flake.lock"
-          ".gitignore"
-          ".envrc"
-          "README.md"
-        ]
-      );
+  src = lib.fileset.toSource {
+    root = ../..;
+    fileset = lib.fileset.unions [
+      ../../Cargo.toml
+      ../../Cargo.lock
+      ../../.cargo
+      ../../build.rs
+      ../../src
+      ../../tests
+      ../../migrations
+      # Shared specs Rust unit tests assert against: the agent-runner wire
+      # contract and the frontend search-query cases.
+      ../../agent-runner/test/fixtures
+      ../../frontend/src/features/library/search/query_cases.json
+      # Cargo loads every workspace member's manifest, even unbuilt ones.
+      ../../desktop/Cargo.toml
+    ];
   };
+  # Loading a member also needs a target to exist; a stub keeps the desktop
+  # sources out of this build's inputs.
+  postPatch = ''
+    mkdir -p desktop/src
+    touch desktop/src/main.rs
+  '';
   cargoLock.lockFile = ../../Cargo.lock;
-  # nixpkgs' cargoSetupHook makes zstd-sys and libsqlite3-sys link the
-  # system libraries through pkg-config instead of their vendored copies.
-  nativeBuildInputs = [ pkgs.pkg-config ];
+  # nixpkgs' cargoSetupHook makes aws-lc-sys, zstd-sys and libsqlite3-sys
+  # link the system libraries instead of their vendored copies.
+  nativeBuildInputs = [
+    pkgs.pkg-config
+    pkgs.makeBinaryWrapper
+  ];
   buildInputs = [
+    pkgs.aws-lc
     pkgs.sqlite
     pkgs.zstd
   ];
-  # rust-embed reads frontend/dist at compile time; build.rs would
-  # write a placeholder if this were missing.
+  # rust-embed reads frontend/dist at compile time; without it the binary
+  # serves a placeholder page instead of the UI.
   preBuild = ''
     mkdir -p frontend/dist
     cp -r ${perSystem.self.frontend}/. frontend/dist/
   '';
-  # The full test suite runs in the sandbox: wiremock binds loopback
-  # (available in Nix builds), pdftotext comes from poppler, the
-  # agent::code clone tests shell out to git, and the tests/it/agent.rs
-  # suite runs its stub runner with node.
-  nativeCheckInputs = [
-    pkgs.poppler-utils
-    pkgs.git
+  # reqwest builds its clients against the system CA store, which the sandbox
+  # lacks; the agent tests run their stub runner with node.
+  nativeCheckInputs = runtimeDeps ++ [
+    pkgs.cacert
     pkgs.nodejs
   ];
+  # wiremock and the server tests bind loopback, which the darwin sandbox
+  # denies by default.
+  __darwinAllowLocalNetworking = true;
+  postInstall = ''
+    wrapProgram $out/bin/xuewen --prefix PATH : ${lib.makeBinPath runtimeDeps}
+  '';
+  passthru = { inherit runtimeDeps; };
+  meta.mainProgram = "xuewen";
 }

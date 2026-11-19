@@ -15,7 +15,12 @@ vi.mock(import('$features/library/search/api'), async (importOriginal) => {
           paper: { id: 'p1', title: 'T', authors: [], venue: null, year: null, doi: null,
                    arxiv_id: null, dblp_key: null, cite_key: null, url: null, source: null,
                    status: 'resolved' as const, added_at: '', name: null, starred: false, tags: [], projects: [] },
-          match: { engine: 'keyword' as const, field: 'body', snippet: 'a <mark>hit</mark>', page: 7 },
+          match: {
+            engine: 'keyword' as const,
+            field: 'body' as const,
+            snippet: [{ text: 'a ', marked: false }, { text: 'hit', marked: true }],
+            page: 7,
+          },
         },
       ],
     })),
@@ -26,7 +31,7 @@ import * as api from './api';
 import * as searchApi from '$features/library/search/api';
 import { library } from './state.svelte';
 import { loadPapers, toggleStar } from './actions';
-import { filters, searchMeta, searchOpts } from '$features/library/search/state.svelte';
+import { engines, filters, searchMeta } from '$features/library/search/state.svelte';
 import { toasts } from '$shared/ui/toasts.svelte';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 
@@ -41,7 +46,7 @@ function paper(id: string): PaperSummary {
 beforeEach(() => {
   vi.clearAllMocks();
   library.papers = [paper('p1')];
-  filters.starred = undefined;
+  filters.q = '';
   toasts.items = [];
 });
 
@@ -67,12 +72,8 @@ describe('optimistic star toggle', () => {
 describe('loadPapers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    Object.assign(filters, {
-      q: '', status: 'all', project: 'all', tag: undefined, starred: undefined,
-    });
-    Object.assign(searchOpts, {
-      title: true, authors: true, abstract: true, body: true, keyword: true, semantic: true,
-    });
+    filters.q = '';
+    Object.assign(engines, { keyword: true, semantic: true });
     searchMeta.byId = {};
     searchMeta.semantic = { available: true, reason: null };
     searchMeta.pending = 0;
@@ -83,14 +84,26 @@ describe('loadPapers', () => {
     await loadPapers();
     expect(searchApi.searchPapers).toHaveBeenCalledOnce();
     expect(library.papers.map((p) => p.id)).toEqual(['p1']);
-    expect(searchMeta.byId['p1'].snippet).toContain('<mark>');
+    expect(searchMeta.byId['p1'].snippet).toEqual([
+      { text: 'a ', marked: false },
+      { text: 'hit', marked: true },
+    ]);
   });
 
   it('loadPapers uses listPapers and clears match info when q is empty', async () => {
-    searchMeta.byId = { p1: { engine: 'keyword', field: 'body', snippet: 'x', page: null } };
+    searchMeta.byId = { p1: { engine: 'keyword', field: 'body', snippet: [{ text: 'x', marked: false }], page: null } };
     await loadPapers();
     expect(api.listPapers).toHaveBeenCalledOnce();
     expect(Object.keys(searchMeta.byId)).toHaveLength(0);
+  });
+
+  it('a qualifier-only query lists through /api/papers with the raw query and the sort', async () => {
+    filters.q = 'tag:nlp is:starred';
+    filters.sort = 'title';
+    await loadPapers();
+    expect(searchApi.searchPapers).not.toHaveBeenCalled();
+    expect(api.listPapers).toHaveBeenCalledWith({ q: 'tag:nlp is:starred', sort: 'title' });
+    filters.sort = 'year_desc';
   });
 
   it('loadPapers marks the library loaded once a load settles, even a failed one', async () => {

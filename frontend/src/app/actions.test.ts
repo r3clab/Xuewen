@@ -29,15 +29,6 @@ function paper(id: string, title = 'T'): PaperSummary {
   };
 }
 
-const TABS_KEY = 'xuewen-tabs';
-
-function saved(): {
-  tabs: { id: string; title: string; name: string | null }[];
-  activeId: string | null;
-} {
-  return JSON.parse(localStorage.getItem(TABS_KEY)!);
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   library.papers = [paper('p1')];
@@ -113,7 +104,6 @@ describe('removePaper selection', () => {
 
 describe('setPaperName', () => {
   beforeEach(() => {
-    localStorage.clear();
     viewer.tabs = [];
     viewer.activeId = null;
   });
@@ -122,6 +112,5 @@ describe('setPaperName', () => {
     openTab(paper('a', 'Attention Is All You Need'));
     await setPaperName('a', 'Transformer');
     expect(viewer.tabs[0].name).toBe('Transformer');
-    expect(saved().tabs[0].name).toBe('Transformer'); // and the new label survives a reload
   });
 });

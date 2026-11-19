@@ -6,15 +6,19 @@ mod openreview;
 mod unpaywall;
 
 use crate::http::{HttpClient, RetryPolicy};
-use crate::library::model::Identifier;
+use crate::library::model::{canonical_arxiv, canonical_doi, Identifier};
 use crate::metadata::matching;
 use anyhow::Result;
 use std::time::Duration;
 
-/// Normalized bibliographic metadata produced by a source resolver.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Normalized bibliographic metadata produced by a source resolver. On the
+/// wire it is a manual-identify candidate, which round-trips through
+/// POST /api/papers/{id}/identify unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, rename = "Candidate")]
 pub struct ResolvedMetadata {
     pub title: Option<String>,
+    #[serde(rename = "abstract")]
     pub(crate) abstract_text: Option<String>,
     pub authors: Vec<String>,
     pub venue: Option<String>,
@@ -43,23 +47,43 @@ fn venue_with_issue(venue: Option<String>, issue: Option<&str>) -> Option<String
     Some(format!("{venue} ({issue})"))
 }
 
-/// Fetches authoritative metadata for an identifier. A network or parse failure
-/// degrades to `None` — resolution never aborts ingestion.
+/// Fetches authoritative metadata for an identifier or a title. The
+/// manual-identify entry points (`lookup`, `search_candidates`) report an
+/// upstream failure; the ingest ones (`lookup_or_skip`, `search_title`)
+/// degrade it to `None`, so resolution never aborts ingestion.
 pub struct Resolver {
     http: HttpClient,
-    arxiv_base: String,
-    crossref_base: String,
-    dblp_base: String,
     email: Option<String>,
+    upstreams: Upstreams,
+}
+
+/// Where each metadata source is reached. A source without a base URL (or,
+/// for OpenReview, without hosts) takes no part in resolution.
+struct Upstreams {
+    arxiv: Option<String>,
+    crossref: Option<String>,
+    dblp: Option<String>,
     /// Both OpenReview hosts, searched together. API 2 (`api2.`) holds the
     /// 2023-onwards venues and API 1 everything before, and a title search
     /// cannot know which applies until it has the year.
-    openreview_bases: Vec<String>,
-    unpaywall_base: String,
+    openreview: Vec<String>,
+    unpaywall: Option<String>,
 }
 
-/// The live OpenReview API hosts, in the order their candidates are collected.
-const OPENREVIEW_BASES: [&str; 2] = ["https://api2.openreview.net", "https://api.openreview.net"];
+impl Upstreams {
+    fn live() -> Self {
+        Self {
+            arxiv: Some("https://export.arxiv.org".into()),
+            crossref: Some("https://api.crossref.org".into()),
+            dblp: Some("https://dblp.org".into()),
+            openreview: vec![
+                "https://api2.openreview.net".into(),
+                "https://api.openreview.net".into(),
+            ],
+            unpaywall: Some("https://api.unpaywall.org".into()),
+        }
+    }
+}
 
 /// What a PDF carrying no identifier offers the resolver.
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +95,7 @@ pub struct TitleQuery<'a> {
     pub text: &'a str,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<'a> TitleQuery<'a> {
     /// A title search with no text to corroborate candidates against.
     pub fn new(title: &'a str) -> Self {
@@ -79,49 +104,15 @@ impl<'a> TitleQuery<'a> {
 }
 
 impl Resolver {
-    /// Build a resolver pointing at the real arXiv and Crossref endpoints, with a
-    /// polite retry/back-off policy.
-    pub fn new(contact_email: Option<&str>) -> Result<Self> {
-        Self::new_with_policy(contact_email, RetryPolicy::production())
-    }
-
-    /// Build a resolver for the real endpoints with an explicit retry policy.
-    pub(crate) fn new_with_policy(contact_email: Option<&str>, retry: RetryPolicy) -> Result<Self> {
-        Self::build(
-            contact_email,
-            "https://export.arxiv.org".to_string(),
-            "https://api.crossref.org".to_string(),
-            retry,
-        )
-    }
-
-    /// Build a resolver with explicit base URLs (used by tests to point at a mock
-    /// server). Uses a near-zero back-off so retry paths test fast.
-    ///
-    /// The OpenReview hosts are pointed at a dead port rather than kept at
-    /// their real defaults: a title search consults them on the way to
-    /// Crossref, and a test that has not named them must fail fast to
-    /// `degrade` instead of reaching the live API by omission.
-    pub fn with_bases(
-        contact_email: Option<&str>,
-        arxiv_base: String,
-        crossref_base: String,
-    ) -> Result<Self> {
-        let mut r = Self::build(
-            contact_email,
-            arxiv_base,
-            crossref_base,
-            RetryPolicy::fast_for_tests(),
-        )?;
-        r.openreview_bases = vec!["http://127.0.0.1:1".to_string()];
-        Ok(r)
+    /// A resolver for the live sources, retrying per `retry`.
+    pub(crate) fn new(contact_email: Option<&str>, retry: RetryPolicy) -> Result<Self> {
+        Self::build(contact_email, retry, Upstreams::live())
     }
 
     fn build(
         contact_email: Option<&str>,
-        arxiv_base: String,
-        crossref_base: String,
         retry: RetryPolicy,
+        upstreams: Upstreams,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(crate::http::user_agent(contact_email))
@@ -129,82 +120,61 @@ impl Resolver {
             .build()?;
         Ok(Self {
             http: HttpClient::new(client, retry),
-            arxiv_base,
-            crossref_base,
-            dblp_base: "https://dblp.org".to_string(),
             email: contact_email.map(str::to_string),
-            openreview_bases: OPENREVIEW_BASES.iter().map(|s| s.to_string()).collect(),
-            unpaywall_base: "https://api.unpaywall.org".to_string(),
+            upstreams,
         })
     }
 
-    /// Override the DBLP base URL (used by tests to point at a mock server).
-    pub fn with_dblp_base(mut self, base: String) -> Self {
-        self.dblp_base = base;
-        self
-    }
-
-    /// Override the OpenReview base URLs (used by tests to point at a mock
-    /// server; two distinct paths on one server stand in for the two hosts).
-    pub fn with_openreview_bases(mut self, bases: Vec<String>) -> Self {
-        self.openreview_bases = bases;
-        self
-    }
-
-    /// Override the Unpaywall base URL (used by tests to point at a mock server).
-    #[cfg(test)]
-    pub(crate) fn with_unpaywall_base(mut self, base: String) -> Self {
-        self.unpaywall_base = base;
-        self
-    }
-
-    /// Route an identifier to its source and return the metadata, or `None` when
-    /// nothing resolves confidently. For a PDF with no identifier, `query`
-    /// drives a DBLP/OpenReview/Crossref title search.
-    pub async fn resolve(
-        &self,
-        ident: &Identifier,
-        query: Option<TitleQuery<'_>>,
-    ) -> Option<ResolvedMetadata> {
+    /// The record an identifier names, for a user who asked for it: `None`
+    /// when the source has no such record (or is switched off), `Err` when it
+    /// could not be asked.
+    pub async fn lookup(&self, ident: &Identifier) -> Result<Option<ResolvedMetadata>> {
         match ident {
-            Identifier::Arxiv(id) => self.try_arxiv(id).await,
-            Identifier::Doi(doi) => self.try_crossref(doi).await,
-            Identifier::None => self.try_title_search(query).await,
+            Identifier::Arxiv(id) => self.lookup_arxiv(id).await,
+            Identifier::Doi(doi) => self.lookup_crossref(doi).await,
+            Identifier::None => Ok(None),
         }
     }
 
-    async fn try_arxiv(&self, id: &str) -> Option<ResolvedMetadata> {
-        let mut m = degrade("arxiv resolve", id, self.fetch_parse_arxiv(id).await)??;
-        // Stamp the queried id in canonical (version-stripped) form: the Atom
-        // feed does not echo it and the caller may hold a versioned one.
-        m.arxiv_id = Some(crate::library::model::canonical_arxiv(id));
-        Some(m)
+    /// `lookup` for automatic ingest, which must never abort on an unreachable
+    /// source: the failure is logged and reads as "no record".
+    pub async fn lookup_or_skip(&self, ident: &Identifier) -> Option<ResolvedMetadata> {
+        let key = match ident {
+            Identifier::Arxiv(id) => id.as_str(),
+            Identifier::Doi(doi) => doi.as_str(),
+            Identifier::None => return None,
+        };
+        degrade("identifier lookup", key, self.lookup(ident).await).flatten()
     }
 
-    async fn fetch_parse_arxiv(&self, id: &str) -> Result<Option<ResolvedMetadata>> {
-        let body = arxiv::fetch(&self.http, &self.arxiv_base, id).await?;
-        arxiv::parse(&body)
+    async fn lookup_arxiv(&self, id: &str) -> Result<Option<ResolvedMetadata>> {
+        let Some(base) = self.upstreams.arxiv.as_deref() else {
+            return Ok(None);
+        };
+        Ok(
+            arxiv::parse(&arxiv::fetch(&self.http, base, id).await?)?.map(|mut m| {
+                // The Atom feed does not echo the queried id.
+                m.arxiv_id = Some(canonical_arxiv(id));
+                m
+            }),
+        )
     }
 
-    async fn try_crossref(&self, doi: &str) -> Option<ResolvedMetadata> {
-        let mut m = degrade(
-            "crossref resolve",
-            doi,
-            self.fetch_parse_crossref(doi).await,
-        )??;
-        if m.doi.is_none() {
-            m.doi = Some(crate::library::model::canonical_doi(doi));
-        }
-        Some(m)
+    async fn lookup_crossref(&self, doi: &str) -> Result<Option<ResolvedMetadata>> {
+        let Some(base) = self.upstreams.crossref.as_deref() else {
+            return Ok(None);
+        };
+        let Some(body) = crossref::fetch(&self.http, base, doi).await? else {
+            return Ok(None);
+        };
+        Ok(crossref::parse(&body)?.map(|mut m| {
+            m.doi.get_or_insert_with(|| canonical_doi(doi));
+            m
+        }))
     }
 
-    async fn fetch_parse_crossref(&self, doi: &str) -> Result<Option<ResolvedMetadata>> {
-        let body = crossref::fetch(&self.http, &self.crossref_base, doi).await?;
-        crossref::parse(&body)
-    }
-
-    /// DBLP, then OpenReview, then Crossref bibliographic search; each filtered
-    /// by the gate.
+    /// The record a title search confidently matches: DBLP, then OpenReview,
+    /// then Crossref bibliographic search, each filtered by the gate.
     ///
     /// OpenReview sits between the two because it is the only source holding
     /// the current year's ICLR/ICML proceedings: DBLP builds a conference
@@ -217,8 +187,8 @@ impl Resolver {
     /// proceedings volume, so the camera-ready of an ICLR 2026 paper matches
     /// "CoRR 2025" and would be filed as a preprint while OpenReview knows it
     /// as ICLR 2026.
-    async fn try_title_search(&self, query: Option<TitleQuery<'_>>) -> Option<ResolvedMetadata> {
-        let TitleQuery { title, text } = query?;
+    pub async fn search_title(&self, query: TitleQuery<'_>) -> Option<ResolvedMetadata> {
+        let TitleQuery { title, text } = query;
         if title.trim().is_empty() {
             return None;
         }
@@ -243,16 +213,21 @@ impl Resolver {
     /// that fails degrades to no candidates from that host alone.
     async fn openreview_candidates(&self, title: &str) -> Vec<ResolvedMetadata> {
         let key = format!("{title:?}");
-        let searches = self
-            .openreview_bases
-            .iter()
-            .map(|base| self.fetch_parse_openreview(base, title));
-        futures_util::future::join_all(searches)
+        self.openreview_searches(title)
             .await
             .into_iter()
             .filter_map(|r| degrade("openreview search", &key, r))
             .flatten()
             .collect()
+    }
+
+    async fn openreview_searches(&self, title: &str) -> Vec<Result<Vec<ResolvedMetadata>>> {
+        let searches = self
+            .upstreams
+            .openreview
+            .iter()
+            .map(|base| self.fetch_parse_openreview(base, title));
+        futures_util::future::join_all(searches).await
     }
 
     async fn fetch_parse_openreview(
@@ -274,8 +249,10 @@ impl Resolver {
     }
 
     async fn fetch_parse_dblp(&self, title: &str) -> Result<Vec<ResolvedMetadata>> {
-        let body = dblp::fetch(&self.http, &self.dblp_base, title).await?;
-        dblp::parse(&body)
+        let Some(base) = self.upstreams.dblp.as_deref() else {
+            return Ok(Vec::new());
+        };
+        dblp::parse(&dblp::fetch(&self.http, base, title).await?)
     }
 
     async fn try_crossref_search(
@@ -292,20 +269,80 @@ impl Resolver {
     }
 
     async fn fetch_parse_crossref_search(&self, title: &str) -> Result<Vec<ResolvedMetadata>> {
-        let body = crossref::search(&self.http, &self.crossref_base, title).await?;
-        crossref::parse_search(&body)
+        let Some(base) = self.upstreams.crossref.as_deref() else {
+            return Ok(Vec::new());
+        };
+        crossref::parse_search(&crossref::search(&self.http, base, title).await?)
     }
 
     /// The best open-access PDF URL for a DOI via Unpaywall, or `None` when
     /// there is no OA copy, no configured contact email, or the lookup fails.
     pub(crate) async fn oa_pdf_url(&self, doi: &str) -> Option<String> {
         let email = self.email.as_deref()?;
+        let base = self.upstreams.unpaywall.as_deref()?;
         degrade(
             "unpaywall lookup",
             doi,
-            unpaywall::fetch(&self.http, &self.unpaywall_base, doi, email).await,
+            unpaywall::fetch(&self.http, base, doi, email).await,
         )
         .flatten()
+    }
+}
+
+/// Construction for tests: start from a resolver that reaches nothing and
+/// point the sources a test exercises at its mock server.
+#[cfg(any(test, feature = "test-support"))]
+impl Resolver {
+    /// Every source switched off: lookups and searches resolve to `None`
+    /// without sending a request.
+    pub fn offline() -> Self {
+        Self::build(None, RetryPolicy::fast_for_tests(), Upstreams::none())
+            .expect("build the HTTP client")
+    }
+
+    /// Identify as `email` (user-agent `mailto`), which also enables Unpaywall.
+    pub fn with_contact_email(self, email: &str) -> Self {
+        Self::build(Some(email), RetryPolicy::fast_for_tests(), self.upstreams)
+            .expect("build the HTTP client")
+    }
+
+    pub fn with_arxiv_base(mut self, base: impl Into<String>) -> Self {
+        self.upstreams.arxiv = Some(base.into());
+        self
+    }
+
+    pub fn with_crossref_base(mut self, base: impl Into<String>) -> Self {
+        self.upstreams.crossref = Some(base.into());
+        self
+    }
+
+    pub fn with_dblp_base(mut self, base: impl Into<String>) -> Self {
+        self.upstreams.dblp = Some(base.into());
+        self
+    }
+
+    /// Two distinct paths on one mock server stand in for the two hosts.
+    pub fn with_openreview_bases(mut self, bases: Vec<String>) -> Self {
+        self.upstreams.openreview = bases;
+        self
+    }
+
+    pub fn with_unpaywall_base(mut self, base: impl Into<String>) -> Self {
+        self.upstreams.unpaywall = Some(base.into());
+        self
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Upstreams {
+    fn none() -> Self {
+        Self {
+            arxiv: None,
+            crossref: None,
+            dblp: None,
+            openreview: Vec::new(),
+            unpaywall: None,
+        }
     }
 }
 
@@ -367,30 +404,41 @@ impl Resolver {
     /// concurrently, WITHOUT the confidence gate: the caller (a human picking
     /// a match) is the gate.
     /// Deduped, ranked by similarity to `query`, capped at `MAX_CANDIDATES`.
-    /// Source failures degrade to fewer (possibly zero) candidates.
-    pub async fn search_candidates(&self, query: &str) -> Vec<ResolvedMetadata> {
+    /// A failing source only drops its own candidates; `Err` means every
+    /// source failed, so an empty list is never an outage in disguise.
+    pub async fn search_candidates(&self, query: &str) -> Result<Vec<ResolvedMetadata>> {
         if query.trim().is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut cands = Vec::new();
         let (dblp, crossref, openreview) = tokio::join!(
             self.fetch_parse_dblp(query),
             self.fetch_parse_crossref_search(query),
-            self.openreview_candidates(query)
+            self.openreview_searches(query)
         );
-        let key = format!("{query:?}");
-        if let Some(c) = degrade("dblp candidate search", &key, dblp) {
-            cands.extend(c);
+        let searches = [("dblp", dblp), ("crossref", crossref)]
+            .into_iter()
+            .chain(openreview.into_iter().map(|r| ("openreview", r)));
+        let (mut cands, mut answered, mut last_err) = (Vec::new(), false, None);
+        for (source, result) in searches {
+            match result {
+                Ok(c) => {
+                    answered = true;
+                    cands.extend(c);
+                }
+                Err(e) => {
+                    tracing::warn!("{source} candidate search failed for {query:?}: {e}");
+                    last_err = Some(e.context(format!("{source} search")));
+                }
+            }
         }
-        if let Some(c) = degrade("crossref candidate search", &key, crossref) {
-            cands.extend(c);
+        match last_err {
+            Some(e) if !answered => Err(e),
+            _ => Ok(rank_candidates(query, cands)),
         }
-        cands.extend(openreview);
-        rank_candidates(query, cands)
     }
 }
 
-/// Dedup (by lowercased DOI, else DBLP key; first occurrence wins), rank by
+/// Dedup (by canonical DOI, else DBLP key; first occurrence wins), rank by
 /// title similarity to `query` (untitled candidates sink), cap the list.
 fn rank_candidates(query: &str, cands: Vec<ResolvedMetadata>) -> Vec<ResolvedMetadata> {
     let mut seen = std::collections::HashSet::new();
@@ -399,7 +447,7 @@ fn rank_candidates(query: &str, cands: Vec<ResolvedMetadata>) -> Vec<ResolvedMet
         let key = c
             .doi
             .as_deref()
-            .map(|d| format!("doi:{}", d.to_lowercase()))
+            .map(|d| format!("doi:{}", canonical_doi(d)))
             .or_else(|| c.dblp_key.as_deref().map(|k| format!("dblp:{k}")));
         if let Some(key) = key {
             if !seen.insert(key) {
@@ -592,17 +640,33 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;
-        let r = Resolver::with_bases(Some("me@uchicago.edu"), server.uri(), server.uri())
-            .unwrap()
+        let r = Resolver::offline()
+            .with_contact_email("me@uchicago.edu")
             .with_unpaywall_base(server.uri());
         assert_eq!(
             r.oa_pdf_url("10.1145/3292500.3330701").await.as_deref(),
             Some("https://example.org/paper.pdf")
         );
         // No email configured → skipped entirely.
-        let r2 = Resolver::with_bases(None, server.uri(), server.uri())
-            .unwrap()
-            .with_unpaywall_base(server.uri());
+        let r2 = Resolver::offline().with_unpaywall_base(server.uri());
         assert_eq!(r2.oa_pdf_url("10.1145/3292500.3330701").await, None);
+    }
+
+    #[tokio::test]
+    async fn an_offline_resolver_resolves_nothing() {
+        let r = Resolver::offline().with_contact_email("me@uchicago.edu");
+        assert_eq!(
+            r.lookup(&Identifier::Doi("10.1/x".into())).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            r.lookup(&Identifier::Arxiv("1706.03762".into()))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(r.search_title(TitleQuery::new("Attention")).await, None);
+        assert!(r.search_candidates("Attention").await.unwrap().is_empty());
+        assert_eq!(r.oa_pdf_url("10.1/x").await, None);
     }
 }

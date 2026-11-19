@@ -1,5 +1,7 @@
 import { request, requestVoid } from '$shared/api/http';
 import type { ImportResult } from '$shared/api/generated/ImportResult';
+import type { ImportUrlBody } from '$shared/api/generated/ImportUrlBody';
+import type { ProxyCookieBody } from '$shared/api/generated/ProxyCookieBody';
 
 export async function importPaper(file: File): Promise<ImportResult> {
   const body = new FormData();
@@ -8,13 +10,16 @@ export async function importPaper(file: File): Promise<ImportResult> {
 }
 
 export async function importUrl(input: string): Promise<ImportResult> {
-  return request('/api/import', 'import failed', { method: 'POST', json: { input } });
+  return request('/api/import', 'import failed', {
+    method: 'POST',
+    json: { input } satisfies ImportUrlBody,
+  });
 }
 
 export async function setProxyCookie(cookie: string): Promise<void> {
   return requestVoid('/api/settings/proxy-cookie', 'save cookie failed', {
     method: 'PUT',
-    json: { cookie },
+    json: { cookie } satisfies ProxyCookieBody,
   });
 }
 

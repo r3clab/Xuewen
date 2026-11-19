@@ -1,7 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ColumnHeaderMenu from './ColumnHeaderMenu.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
+
+beforeEach(() => {
+  window.addEventListener('keydown', dismissTopLayer);
+  return () => window.removeEventListener('keydown', dismissTopLayer);
+});
 
 function renderMenu() {
   const onAutoFitAll = vi.fn();

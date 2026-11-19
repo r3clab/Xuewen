@@ -34,8 +34,9 @@ pub(crate) async fn read(cache_dir: &Path, content_hash: &str, page: u32) -> Opt
 }
 
 /// Publish a rendered page. Written to a sibling temp file and renamed, so a
-/// concurrent reader never sees a half-written PNG and two renders of the
-/// same page can't interleave into one corrupt file.
+/// concurrent reader never sees a half-written PNG. Callers in one process
+/// must not write one page concurrently — `PreviewService` single-flights
+/// renders per page — since the staging name is only unique per process.
 pub(crate) async fn write(
     cache_dir: &Path,
     content_hash: &str,

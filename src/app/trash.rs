@@ -7,7 +7,7 @@ impl App {
     pub(crate) async fn trash_paper(&self, id: &str) -> Result<(), Error> {
         self.paper(id, Trash::Allow).await?;
         trash::soft_delete(self.pool(), id).await?;
-        self.wake_search();
+        self.library_changed();
         Ok(())
     }
 
@@ -16,7 +16,7 @@ impl App {
         if !trash::restore(self.pool(), id).await? {
             return Err(Error::not_found());
         }
-        self.wake_search();
+        self.library_changed();
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use tempfile::TempDir;
 use xuewen::search::fts::{FtsIndex, PaperDoc};
 use xuewen::search::vector::{OpenMode, VectorStore};
 
@@ -7,13 +8,13 @@ use super::{library_with, ok, stderr, xuewen};
 use crate::support;
 
 /// One paper `p1` whose PDF says "zyzzyva", nothing indexed yet.
-async fn unindexed_library(extra: &str) -> (sqlx::SqlitePool, PathBuf) {
-    let (pool, config) = library_with(extra).await;
+async fn unindexed_library(extra: &str) -> (sqlx::SqlitePool, PathBuf, TempDir) {
+    let (pool, config, dir) = library_with(extra).await;
     support::write_test_pdf(
-        &dir(&config).join("library/missing.pdf"),
+        &dir.path().join("library/missing.pdf"),
         &["zyzzyva marks the spot"],
     );
-    (pool, config)
+    (pool, config, dir)
 }
 
 fn dir(config: &Path) -> &Path {
@@ -30,7 +31,7 @@ async fn index_rows(pool: &sqlx::SqlitePool) -> Vec<(String, Option<String>, Opt
 }
 
 fn hold_fts_writer(config: &Path) -> FtsIndex {
-    let (idx, _) = FtsIndex::open(&dir(config).join("idx")).unwrap();
+    let (idx, _) = FtsIndex::open(&dir(config).join("search-index")).unwrap();
     idx.upsert(&PaperDoc {
         id: "holder".into(),
         ..Default::default()
@@ -41,14 +42,14 @@ fn hold_fts_writer(config: &Path) -> FtsIndex {
 
 #[tokio::test]
 async fn search_catches_up_a_never_indexed_library() {
-    let (_pool, config) = unindexed_library("").await;
+    let (_pool, config, _dir) = unindexed_library("").await;
     let found = ok(&config, &["search", "--keyword-only", "zyzzyva"]);
     assert!(found.contains("Paper p1"), "got: {found}");
 }
 
 #[tokio::test]
 async fn trash_and_restore_update_the_index_before_the_command_returns() {
-    let (pool, config) = unindexed_library("").await;
+    let (pool, config, _dir) = unindexed_library("").await;
     ok(&config, &["search", "--keyword-only", "zyzzyva"]);
     assert_eq!(index_rows(&pool).await.len(), 1);
 
@@ -65,7 +66,7 @@ async fn trash_and_restore_update_the_index_before_the_command_returns() {
 
 #[tokio::test]
 async fn an_added_note_is_searchable_and_only_the_fts_tier_runs() {
-    let (pool, config) = unindexed_library("").await;
+    let (pool, config, _dir) = unindexed_library("").await;
     ok(
         &config,
         &["annotation", "add", "p1", "--page", "1", "quokka insight"],
@@ -79,7 +80,7 @@ async fn an_added_note_is_searchable_and_only_the_fts_tier_runs() {
 
 #[tokio::test]
 async fn a_held_index_writer_is_skipped_without_recording_failures() {
-    let (pool, config) = unindexed_library("").await;
+    let (pool, config, _dir) = unindexed_library("").await;
     let _holder = hold_fts_writer(&config);
 
     let out = xuewen(
@@ -96,13 +97,17 @@ async fn a_held_index_writer_is_skipped_without_recording_failures() {
 
 #[tokio::test]
 async fn a_held_vector_store_is_skipped() {
-    let (pool, config) = unindexed_library(
+    let (pool, config, _dir) = unindexed_library(
         "[ai]\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key = \"k\"\n\n[ai.embedding]\nmodel = \"m1\"\ndims = 4\n",
     )
     .await;
-    let _holder = VectorStore::open(&dir(&config).join("vectors"), 4, OpenMode::LoadOrCreate)
-        .await
-        .unwrap();
+    let _holder = VectorStore::open(
+        &dir(&config).join("search-vectors"),
+        4,
+        OpenMode::LoadOrCreate,
+    )
+    .await
+    .unwrap();
 
     let out = xuewen(&config, &["delete", "p1", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -116,7 +121,7 @@ async fn a_held_vector_store_is_skipped() {
 
 #[tokio::test]
 async fn read_only_commands_never_touch_the_index() {
-    let (_pool, config) = unindexed_library("").await;
+    let (_pool, config, _dir) = unindexed_library("").await;
     let _holder = hold_fts_writer(&config);
 
     for args in [

@@ -1,6 +1,6 @@
 //! Crate-wide HTTP transport: the retrying client shared by the resolvers,
 //! the LLM chat/embeddings clients, and the daily feed, plus the outbound
-//! user-agent and URL-encoding helpers those callers share.
+//! user-agent, URL-encoding and bounded-download helpers those callers share.
 
 use anyhow::{anyhow, Result};
 use std::time::Duration;
@@ -34,6 +34,31 @@ pub(crate) fn encode_doi_path(doi: &str) -> String {
         .add(b'`')
         .add(b'%');
     utf8_percent_encode(doi, DOI_PATH).to_string()
+}
+
+/// Read a response body into memory, refusing anything over `limit` bytes:
+/// a hostile or misconfigured server could otherwise stream an unbounded body
+/// into memory. Rejects early on an oversized declared `Content-Length`, then
+/// enforces the same ceiling while streaming (the header can lie or be
+/// absent).
+pub(crate) async fn read_body_capped(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    let too_big = || {
+        anyhow!(
+            "response body exceeds the {} MB limit",
+            limit / (1024 * 1024)
+        )
+    };
+    if resp.content_length().is_some_and(|len| len > limit as u64) {
+        return Err(too_big());
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > limit {
+            return Err(too_big());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 /// How `HttpClient` retries transient HTTP failures.
@@ -72,6 +97,7 @@ impl RetryPolicy {
     }
 
     /// Near-zero delays so tests exercise the retry paths without real sleeps.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn fast_for_tests() -> Self {
         Self {
             max_attempts: 4,
@@ -127,6 +153,25 @@ impl HttpClient {
     /// Send `req` with retries, returning the body text. `req` must be cloneable
     /// (true for the query-only GETs used here).
     pub(crate) async fn send_text(&self, req: reqwest::RequestBuilder) -> Result<String> {
+        Ok(self.send(req).await??)
+    }
+
+    /// `send_text` for a lookup by key, where a 404 is the answer "no such
+    /// record" rather than a failure.
+    pub(crate) async fn find_text(&self, req: reqwest::RequestBuilder) -> Result<Option<String>> {
+        match self.send(req).await? {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.status == reqwest::StatusCode::NOT_FOUND => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The retry loop. The outer error is a transport failure or an
+    /// unretryable request; the inner one the status the server settled on.
+    async fn send(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<std::result::Result<String, StatusError>> {
         let mut attempt: u32 = 0;
         loop {
             let last = attempt + 1 >= self.retry.max_attempts;
@@ -137,7 +182,7 @@ impl HttpClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return Ok(resp.text().await?);
+                        return Ok(Ok(resp.text().await?));
                     }
                     if last || !is_retryable_status(status.as_u16()) {
                         // Include a body snippet: API error payloads (e.g. an
@@ -149,11 +194,7 @@ impl HttpClient {
                             .chars()
                             .take(200)
                             .collect();
-                        return Err(if snippet.trim().is_empty() {
-                            anyhow!("HTTP {status}")
-                        } else {
-                            anyhow!("HTTP {status}: {snippet}")
-                        });
+                        return Ok(Err(StatusError { status, snippet }));
                     }
                     let delay = self.delay_for(attempt, retry_after(&resp));
                     tokio::time::sleep(delay).await;
@@ -185,6 +226,24 @@ impl HttpClient {
         }
     }
 }
+
+/// The non-success status a request ended on, with the start of its body.
+#[derive(Debug)]
+struct StatusError {
+    status: reqwest::StatusCode,
+    snippet: String,
+}
+
+impl std::fmt::Display for StatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.snippet.trim() {
+            "" => write!(f, "HTTP {}", self.status),
+            _ => write!(f, "HTTP {}: {}", self.status, self.snippet),
+        }
+    }
+}
+
+impl std::error::Error for StatusError {}
 
 /// Transient statuses worth retrying (rate limit + transient server errors).
 fn is_retryable_status(code: u16) -> bool {
@@ -240,6 +299,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_body_capped_refuses_bodies_over_the_limit() {
+        let server = MockServer::start().await;
+        let body = vec![b'x'; 2 * 1024 * 1024 + 1];
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        let get = || reqwest::get(format!("{}/big", server.uri()));
+        let err = read_body_capped(get().await.unwrap(), 2 * 1024 * 1024)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("2 MB limit"), "got: {err}");
+        assert_eq!(
+            read_body_capped(get().await.unwrap(), body.len())
+                .await
+                .unwrap(),
+            body
+        );
+    }
+
+    #[tokio::test]
     async fn retries_429_then_succeeds() {
         let server = MockServer::start().await;
         // First hit → 429 (stops matching after 1), later hits → 200.
@@ -291,6 +372,25 @@ mod tests {
             .get_text(&format!("{}/x", server.uri()))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn find_text_answers_a_404_as_no_record_and_fails_on_the_rest() {
+        let server = MockServer::start().await;
+        for (route, status) in [("/found", 200), ("/missing", 404), ("/broken", 400)] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(status).set_body_string("body"))
+                .mount(&server)
+                .await;
+        }
+        let http = client();
+        let find = |route: &str| http.find_text(http.get(&format!("{}{route}", server.uri())));
+
+        assert_eq!(find("/found").await.unwrap().as_deref(), Some("body"));
+        assert_eq!(find("/missing").await.unwrap(), None);
+        let err = find("/broken").await.unwrap_err();
+        assert_eq!(err.to_string(), "HTTP 400 Bad Request: body");
     }
 
     #[tokio::test]

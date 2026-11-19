@@ -1,23 +1,28 @@
 <script lang="ts">
   import { ChevronDown, Download } from '@lucide/svelte';
-  import { exportUrl } from '$features/library/api';
-  import { bibFormat } from '$features/library/state.svelte';
-  import { filters, relevanceSearchActive } from './state.svelte';
+  import { exportShownPapers } from '$features/library/actions';
+  import { filters } from './state.svelte';
   import { setStatusFilter } from './actions';
-  import type { StatusFilter } from './types';
   import FilterPills, { type Zone } from './FilterPills.svelte';
+  import type { PaperStatus } from '$shared/api/generated/PaperStatus';
 
   // One zone at a time, folded by default: the pill rows can grow long, and a
   // count badge on the folded toggle keeps an active filter from hiding.
   let zone = $state<Zone | null>(null);
-  const projectCount = $derived(filters.project !== 'all' ? 1 : 0);
-  const tagCount = $derived((filters.starred === true ? 1 : 0) + (filters.tag ? 1 : 0));
+  const projectCount = $derived(filters.parsed.project !== null ? 1 : 0);
+  const tagCount = $derived((filters.starred ? 1 : 0) + (filters.tag ? 1 : 0));
+
+  const STATUS_OPTIONS: { value: PaperStatus | null; label: string }[] = [
+    { value: null, label: 'All status' },
+    { value: 'resolved', label: 'Resolved' },
+    { value: 'needs_review', label: 'Needs review' },
+  ];
 
   function toggle(z: Zone) {
     zone = zone === z ? null : z;
   }
-  function onStatus(e: Event) {
-    void setStatusFilter((e.currentTarget as HTMLSelectElement).value as StatusFilter);
+  function onStatus(e: Event & { currentTarget: HTMLSelectElement }) {
+    void setStatusFilter(STATUS_OPTIONS[e.currentTarget.selectedIndex].value);
   }
 
   const control =
@@ -49,38 +54,24 @@
 >
   <div class="flex flex-wrap items-center gap-x-2 gap-y-1.5">
     <select
-      value={filters.status}
       aria-label="Filter by status"
       onchange={onStatus}
       class="rounded-lg border border-stone-200 bg-paper px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-800"
     >
-      <option value="all">All status</option>
-      <option value="resolved">Resolved</option>
-      <option value="needs_review">Needs review</option>
+      {#each STATUS_OPTIONS as option (option.label)}
+        <option selected={filters.status === option.value}>{option.label}</option>
+      {/each}
     </select>
     {@render zoneToggle('projects', 'Projects', projectCount, 'bg-indigo-600/15 text-indigo-700 dark:text-indigo-300')}
     {@render zoneToggle('tags', 'Star & tags', tagCount, 'bg-amber-700/15 text-amber-800 dark:text-amber-400')}
-    {#if relevanceSearchActive()}
-      <!-- Batch export filters by the legacy title/author match, not hybrid
-           search results — disabled while text/author search terms are active
-           to avoid exporting a different set than the table shows. Qualifier-
-           only views (tag/project/star/status pills) export the visible set
-           exactly, since exportUrl strips q and sends the parsed filters. -->
-      <span
-        title="Clear the search to export"
-        class={`${control} ml-auto cursor-not-allowed text-stone-400 dark:text-stone-600`}
-      >
-        <Download size={14} /> Export .bib
-      </span>
-    {:else}
-      <a
-        href={exportUrl(filters, bibFormat.value)}
-        download="xuewen.bib"
-        class={`${control} ml-auto text-stone-600 hover:bg-parchment dark:text-stone-300 dark:hover:bg-stone-800`}
-      >
-        <Download size={14} /> Export .bib
-      </a>
-    {/if}
+    <button
+      type="button"
+      title="Export the papers shown as one .bib file"
+      onclick={() => void exportShownPapers()}
+      class={`${control} ml-auto text-stone-600 hover:bg-parchment dark:text-stone-300 dark:hover:bg-stone-800`}
+    >
+      <Download size={14} /> Export .bib
+    </button>
   </div>
   {#if zone}
     <div class="mt-2"><FilterPills {zone} /></div>

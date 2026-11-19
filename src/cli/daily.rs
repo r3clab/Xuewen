@@ -5,7 +5,7 @@ use clap::Subcommand;
 
 use super::remote::{self, DailyStart};
 use super::{freshness, Ctx};
-use crate::daily::store::{self, DailyRun};
+use crate::daily::store::{self, DailyRun, DailyStatus};
 use crate::daily::{scheduler, DailyService, Disabled};
 use crate::search::indexer::{self, Scope};
 use crate::search::{SearchService, Semantic};
@@ -51,7 +51,7 @@ async fn show(ctx: &Ctx) -> Result<()> {
             "{:2}. {}  {}  ({:.3})",
             p.rank, p.arxiv_id, p.title, p.score
         );
-        if let Some(tldr) = &p.tldr {
+        if let Some(tldr) = p.tldr() {
             println!("      {tldr}");
         }
     }
@@ -63,7 +63,7 @@ async fn run(ctx: &Ctx, force: bool) -> Result<()> {
     if !force {
         let done = store::get_run(&ctx.pool, &today)
             .await?
-            .filter(|r| scheduler::settled(Some(&r.status)));
+            .filter(|r| r.status.settled());
         if let Some(run) = done {
             println!("{}", run_line(&run));
             println!("today's run already finished — pass --force to run it again");
@@ -111,7 +111,7 @@ async fn run_here(ctx: &Ctx, semantic: Semantic, today: &str) -> Result<()> {
     .await;
     search.close_vectors().await;
     let run = run?;
-    if run.status == "failed" {
+    if run.status == DailyStatus::Failed {
         bail!(
             "daily run {today} failed: {}",
             run.error.as_deref().unwrap_or("no detail recorded")

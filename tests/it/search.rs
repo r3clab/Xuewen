@@ -1,11 +1,10 @@
 //! End-to-end: import a PDF -> background sweep -> find it by a body phrase.
 
-use crate::support;
-
 use printpdf::*;
 use std::path::Path;
 
 use xuewen::ingest::pipeline::{IngestCtx, Libraries};
+use xuewen::metadata::resolve::Resolver;
 use xuewen::search::{fts, indexer, SearchRequest, SearchService};
 
 /// Two text lines: a title-looking first line, then the body phrase. If the
@@ -58,8 +57,8 @@ async fn imported_pdf_becomes_keyword_searchable_by_body_text() {
     let ctx = IngestCtx::new(
         pool.clone(),
         Libraries::under(&inbox, &library_root),
-        // Upstreams refuse instantly -> the paper lands as needs_review, offline.
-        support::offline_resolver(),
+        // Every lookup misses -> the paper lands as needs_review, offline.
+        Resolver::offline(),
         None,
     );
     ctx.ingest_file(&pdf).await.unwrap();
@@ -89,14 +88,18 @@ async fn imported_pdf_becomes_keyword_searchable_by_body_text() {
         .unwrap();
     assert!(!out.semantic.available, "no embedder configured");
     assert_eq!(out.results.len(), 1);
-    let (paper, m) = &out.results[0];
-    assert!(paper.rel_path.ends_with(".pdf"));
+    let hit = &out.results[0];
+    assert!(hit.paper.rel_path.ends_with(".pdf"));
+    let m = &hit.matched;
     assert_eq!(m.field, fts::FieldName::Body);
-    assert!(
-        m.snippet.contains("<mark>zanzibar</mark>"),
-        "got: {}",
-        m.snippet
-    );
+    let marked: Vec<&str> = m
+        .snippet
+        .0
+        .iter()
+        .filter(|p| p.marked)
+        .map(|p| p.text.as_str())
+        .collect();
+    assert_eq!(marked, ["zanzibar"], "got: {:?}", m.snippet);
 
     // 4. Status agrees everything is indexed.
     let st = svc.status().await.unwrap();

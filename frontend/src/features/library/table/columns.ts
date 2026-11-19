@@ -79,16 +79,13 @@ export function tableMinWidth(widths: Record<PinnedColumnKey, number>): number {
 
 /// Ceiling for dragging/auto-fitting ONE column: it may grow while every
 /// other pinned column keeps its width and Tags keeps its reserve — what
-/// keeps the table filling the pane with no horizontal scroll. Falls back
-/// to the static maxWidth cap when layout isn't available (paneWidth <= 0,
-/// e.g. jsdom).
+/// keeps the table filling the pane with no horizontal scroll.
 export function dragCeiling(
   key: PinnedColumnKey,
   widths: Record<PinnedColumnKey, number>,
   paneWidth: number,
 ): number {
   const stat = PINNED_COLUMNS[key].maxWidth;
-  if (paneWidth <= 0) return stat;
   const others = PINNED_KEYS.reduce((s, k) => (k === key ? s : s + widths[k]), 0);
   return Math.max(
     PINNED_COLUMNS[key].minWidth,

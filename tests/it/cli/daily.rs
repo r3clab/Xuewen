@@ -27,17 +27,22 @@ fn daily_paper(date: &str, rank: i64, id: &str, tldr: Option<&str>) -> DailyPape
         abstract_text: "An abstract.".into(),
         categories: vec!["cs.AI".into()],
         score: 0.9,
-        tldr: tldr.map(String::from),
         abs_url: format!("https://arxiv.org/abs/{id}"),
         pdf_url: format!("https://arxiv.org/pdf/{id}"),
-        summary: None,
+        summary: tldr.map(|tldr| xuewen::summary::Summary {
+            tldr: tldr.into(),
+            problem: "P.".into(),
+            approach: "A.".into(),
+            results: "R.".into(),
+            limitations: "L.".into(),
+        }),
         code_url: None,
     }
 }
 
 #[tokio::test]
 async fn show_with_no_runs_says_how_to_start_one() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     assert_eq!(
         ok(&config, &["daily", "show"]),
         "no daily runs yet — run: xuewen daily run\n"
@@ -46,7 +51,7 @@ async fn show_with_no_runs_says_how_to_start_one() {
 
 #[tokio::test]
 async fn show_prints_the_latest_run_then_the_latest_papers() {
-    let (pool, config) = library().await;
+    let (pool, config, _dir) = library().await;
     store::replace_batch(
         &pool,
         "2026-07-09",
@@ -70,7 +75,7 @@ async fn show_prints_the_latest_run_then_the_latest_papers() {
 
 #[tokio::test]
 async fn run_without_daily_config_says_why() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     let err = fails(&config, &["daily", "run"]);
     assert!(
         err.contains("daily papers are off: [daily] is not configured"),
@@ -80,7 +85,7 @@ async fn run_without_daily_config_says_why() {
 
 #[tokio::test]
 async fn run_leaves_a_finished_day_alone_unless_forced() {
-    let (pool, config) = library().await;
+    let (pool, config, _dir) = library().await;
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     record_run(&pool, &today, "ok").await;
 
@@ -99,8 +104,8 @@ async fn run_leaves_a_finished_day_alone_unless_forced() {
 
 #[tokio::test]
 async fn run_beside_a_process_holding_the_vector_store_names_it() {
-    let (_pool, config) = library_with(CONFIGURED).await;
-    let vectors = config.parent().unwrap().join("vectors");
+    let (_pool, config, _dir) = library_with(CONFIGURED).await;
+    let vectors = config.parent().unwrap().join("search-vectors");
     let _holder = VectorStore::open(&vectors, 4, OpenMode::LoadOrCreate)
         .await
         .unwrap();

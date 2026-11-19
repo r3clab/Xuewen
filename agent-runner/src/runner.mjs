@@ -12,9 +12,11 @@ import { emit } from './protocol.mjs';
 // broken binary still surfaces per-turn, not here. Exits 0/1 with stderr.
 if (process.argv[2] === '--preflight') {
   const problems = [];
+  const { engines } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const minimum = Number(engines.node.match(/^>=(\d+)$/)[1]);
   const major = Number(process.versions.node.split('.')[0]);
-  if (!(major >= 20)) {
-    problems.push(`Node ${process.versions.node} is too old — the agent needs Node >= 20`);
+  if (!(major >= minimum)) {
+    problems.push(`Node ${process.versions.node} is too old — the agent needs Node ${engines.node}`);
   }
   for (const backend of process.argv.slice(3)) {
     try {

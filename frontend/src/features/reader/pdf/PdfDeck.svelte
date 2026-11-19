@@ -3,22 +3,15 @@
   import { useDocuments, useDocumentsState, useKernel } from '@embedpdf/svelte/runtime';
   import { AnnotationToken } from '@embedpdf/svelte/annotation';
   import { HistoryToken } from '@embedpdf/svelte/history';
+  import { StageToken } from '@embedpdf/svelte/stage';
   import { copyText } from '$shared/browser/clipboard';
   import { viewer } from '$features/reader/tabs/state.svelte';
   import { pdfUrl } from './api';
-  import {
-    createAnnotationCommands,
-    registerAnnotationCommands,
-    unregisterAnnotationCommands,
-  } from '$features/reader/annotations/commands';
+  import { createAnnotationCommands, registerAnnotationCommands } from '$features/reader/annotations/commands';
   import { planOpens, reconcileDocuments } from './deck';
-  import {
-    createPdfCopy,
-    forgetPdfSelection,
-    registerPdfCopy,
-    unregisterPdfCopy,
-  } from '$features/reader/pdfCopy';
+  import { createPdfCopy, forgetPdfSelection, registerPdfCopy } from '$features/reader/pdfCopy';
   import { runWhenIdle } from './idle';
+  import { registerReaderStage } from '$features/reader/scroll';
   import { toast } from '$shared/ui/toasts.svelte';
   import PdfTab from './PdfTab.svelte';
   import CitationPopover from '$features/reader/citations/CitationPopover.svelte';
@@ -37,7 +30,7 @@
     clearNativeSelection: () => document.getSelection()?.removeAllRanges(),
     onError: (message) => toast('error', message),
   });
-  registerPdfCopy(copier);
+  const unregisterCopier = registerPdfCopy(copier);
 
   // Delete / undo / redo for the global keymap and the page's selection menu
   // (see annotations/commands.ts). `activeDocumentId` is read at call time,
@@ -47,7 +40,12 @@
     history: (id) => kernel.tryCapability(HistoryToken, id),
     activeDocumentId: () => viewer.activeId,
   });
-  registerAnnotationCommands(commands);
+  const unregisterCommands = registerAnnotationCommands(commands);
+
+  // The keymap's scroll keys drive the active tab's main Stage.
+  const unregisterStage = registerReaderStage(() =>
+    viewer.activeId === null ? null : kernel.tryCapability(StageToken, viewer.activeId),
+  );
 
   // Documents we've asked the kernel to open. Plain (non-reactive) set used to
   // diff against `viewer.tabs` so we open/close each document exactly once.
@@ -147,8 +145,9 @@
     destroyed = true;
     cancelIdle?.();
     cancelIdle = null;
-    unregisterAnnotationCommands(commands);
-    unregisterPdfCopy(copier);
+    unregisterCommands();
+    unregisterStage();
+    unregisterCopier();
     copier.destroy();
   });
 </script>

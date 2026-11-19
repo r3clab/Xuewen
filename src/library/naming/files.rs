@@ -45,19 +45,23 @@ fn move_to(src: &Path, dir: &Path) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
-    if std::fs::rename(src, &dest).is_err() {
-        if let Err(e) = std::fs::copy(src, &dest) {
-            // The reservation is ours alone, and empty: left behind it would
-            // wear the PDF's name in the archive (the watcher's quarantine
-            // signal is bare existence) and push later same-named archives to
-            // suffixes. A successful copy whose trailing source removal fails
-            // is different — dest then holds the full bytes and stays.
-            let _ = std::fs::remove_file(&dest);
-            return Err(e.into());
+    // The reservation is ours alone, and empty: left behind on failure it
+    // would wear the PDF's name in the archive (the watcher's quarantine
+    // signal is bare existence) and push later same-named archives to
+    // suffixes. A successful copy whose trailing source removal fails is
+    // different — dest then holds the full bytes and stays.
+    let release = |e: std::io::Error| {
+        let _ = std::fs::remove_file(&dest);
+        anyhow::Error::from(e)
+    };
+    match std::fs::rename(src, &dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            std::fs::copy(src, &dest).map_err(release)?;
+            Ok(std::fs::remove_file(src)?)
         }
-        std::fs::remove_file(src)?;
+        Err(e) => Err(release(e)),
     }
-    Ok(())
 }
 
 /// Whether two paths name the same file, by (dev, ino) — path spellings
@@ -229,6 +233,31 @@ mod tests {
             std::fs::read(archive.join("bad.pdf")).unwrap(),
             b"real bytes"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_surfaces_a_failed_rename_instead_of_copying() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let src = locked.join("paper.pdf");
+        std::fs::write(&src, b"bytes").unwrap();
+        // The source's directory is read-only: the rename (EACCES) must fail
+        // the move. A copy fallback would succeed at copying, then strand the
+        // source next to its archived duplicate.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let enforced = std::fs::write(locked.join("probe"), b"").is_err();
+        let archive = dir.path().join("_processed");
+        let result = move_to(&src, &archive);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !enforced {
+            return; // running privileged: nothing makes the rename fail
+        }
+        assert!(result.is_err());
+        assert!(src.exists());
+        assert!(!archive.join("paper.pdf").exists(), "reservation released");
     }
 
     #[test]

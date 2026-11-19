@@ -125,6 +125,15 @@ async fn started_app_shares_one_vector_store_and_releases_it_on_shutdown() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = support::test_cfg_with(tmp.path(), SEMANTIC_AND_DAILY);
     let pool = xuewen::db::connect(&cfg.database_url).await.unwrap();
+    // With today's run on record the scheduler's boot catch-up stays idle
+    // instead of fetching the live arXiv feed.
+    sqlx::query(
+        "INSERT INTO daily_runs (batch_date, status, papers_found, ran_at)
+         VALUES (date('now'), 'empty', 0, datetime('now'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = App::start(&cfg, pool).await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -4,10 +4,10 @@ use axum::http::StatusCode;
 use axum_test::TestServer;
 
 /// Seed a paper whose `rel_path` points at real bytes under the library root.
-async fn server_with_pdf(bytes: &[u8]) -> TestServer {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+async fn server_with_pdf(bytes: &[u8]) -> (TestServer, tempfile::TempDir) {
+    let (pool, root, dir) = support::pool_and_root_with_paper("p1").await;
     std::fs::write(root.join("missing.pdf"), bytes).unwrap();
-    TestServer::new(support::router(pool, root))
+    (TestServer::new(support::router(pool, root)), dir)
 }
 
 fn real_pdf() -> Vec<u8> {
@@ -19,7 +19,7 @@ fn real_pdf() -> Vec<u8> {
 
 #[tokio::test]
 async fn reports_page_count_and_geometry() {
-    let server = server_with_pdf(&real_pdf()).await;
+    let (server, _dir) = server_with_pdf(&real_pdf()).await;
     let v: serde_json::Value = server.get("/api/papers/p1/preview").await.json();
     assert_eq!(v["pages"], 1);
     // A4 portrait: taller than it is wide, in PDF points.
@@ -29,7 +29,7 @@ async fn reports_page_count_and_geometry() {
 
 #[tokio::test]
 async fn serves_a_page_as_png() {
-    let server = server_with_pdf(&real_pdf()).await;
+    let (server, _dir) = server_with_pdf(&real_pdf()).await;
     let resp = server.get("/papers/p1/preview/0").await;
     resp.assert_status_ok();
     assert_eq!(resp.header("content-type"), "image/png");
@@ -41,7 +41,7 @@ async fn serves_a_page_as_png() {
 /// seeding helper sets to the id.
 #[tokio::test]
 async fn a_rendered_page_is_cached_on_disk() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     std::fs::write(root.join("missing.pdf"), real_pdf()).unwrap();
     let cached = root.join("preview-cache").join("p1").join("0.png");
     let server = TestServer::new(support::router(pool, root));
@@ -60,7 +60,7 @@ async fn a_rendered_page_is_cached_on_disk() {
 
 #[tokio::test]
 async fn a_page_past_the_end_is_not_found() {
-    let server = server_with_pdf(&real_pdf()).await;
+    let (server, _dir) = server_with_pdf(&real_pdf()).await;
     server
         .get("/papers/p1/preview/7")
         .await
@@ -69,7 +69,7 @@ async fn a_page_past_the_end_is_not_found() {
 
 #[tokio::test]
 async fn a_non_numeric_page_is_a_bad_request_in_the_usual_shape() {
-    let server = server_with_pdf(&real_pdf()).await;
+    let (server, _dir) = server_with_pdf(&real_pdf()).await;
     let resp = server.get("/papers/p1/preview/first").await;
     resp.assert_status(StatusCode::BAD_REQUEST);
     // Every error this API returns is `{"error": "..."}`, including this one
@@ -83,7 +83,7 @@ async fn a_non_numeric_page_is_a_bad_request_in_the_usual_shape() {
 /// card instead.
 #[tokio::test]
 async fn an_unrenderable_pdf_is_unprocessable() {
-    let server = server_with_pdf(b"this is not a PDF").await;
+    let (server, _dir) = server_with_pdf(b"this is not a PDF").await;
     server
         .get("/api/papers/p1/preview")
         .await
@@ -99,9 +99,9 @@ async fn an_unrenderable_pdf_is_unprocessable() {
 /// let one server's real A4 answer stand in for another server's garbage.
 #[tokio::test]
 async fn page_meta_is_not_shared_across_services() {
-    let real = server_with_pdf(&real_pdf()).await;
+    let (real, _real_dir) = server_with_pdf(&real_pdf()).await;
     real.get("/api/papers/p1/preview").await.assert_status_ok();
-    let garbage = server_with_pdf(b"this is not a PDF").await;
+    let (garbage, _garbage_dir) = server_with_pdf(b"this is not a PDF").await;
     garbage
         .get("/api/papers/p1/preview")
         .await
@@ -110,7 +110,7 @@ async fn page_meta_is_not_shared_across_services() {
 
 #[tokio::test]
 async fn an_unknown_paper_is_not_found() {
-    let server = server_with_pdf(&real_pdf()).await;
+    let (server, _dir) = server_with_pdf(&real_pdf()).await;
     server
         .get("/api/papers/nope/preview")
         .await
@@ -124,7 +124,7 @@ async fn an_unknown_paper_is_not_found() {
 /// The stock seeded paper points at a file that was never written.
 #[tokio::test]
 async fn a_missing_library_file_is_not_found() {
-    let (pool, root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, root, _dir) = support::pool_and_root_with_paper("p1").await;
     let server = TestServer::new(support::router(pool, root));
     server
         .get("/api/papers/p1/preview")

@@ -61,7 +61,12 @@
       onpointerenter={(e) => enter(e, m.refIndex)}
       onpointerleave={hideCitationSoon}
       onclick={() => jump(m.refIndex)}
-      onkeydown={(e) => e.key === 'Enter' && jump(m.refIndex)}
+      onkeydown={(e) => {
+        if (e.key !== 'Enter') return;
+        // Taken here, so the keymap's Enter (open the selected paper) stays out.
+        e.preventDefault();
+        jump(m.refIndex);
+      }}
       style:left="{(m.x / pageWidthPt) * 100}%"
       style:top="{(m.y / pageHeightPt) * 100}%"
       style:width="{(m.width / pageWidthPt) * 100}%"

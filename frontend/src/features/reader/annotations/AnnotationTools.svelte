@@ -16,13 +16,11 @@
   import type { AnnotationColor } from '$shared/api/generated/AnnotationColor';
   import type { AnnotationKind } from '$shared/api/generated/AnnotationKind';
 
-  let { onHoldChange }: { onHoldChange: (held: boolean) => void } = $props();
+  /// Bound by the toolbar: an open menu holds the pill visible.
+  let { menuOpen = $bindable(false) }: { menuOpen?: boolean } = $props();
 
   const annotation = useOptionalCapability(AnnotationToken);
   const interaction = useOptionalCapability(InteractionToken);
-
-  let menuOpen = $state(false);
-  $effect(() => onHoldChange(menuOpen));
 
   // Only the icon is toolbar-specific; the names come from the adapter, which
   // the sidebar list reads too.

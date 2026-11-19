@@ -1,17 +1,18 @@
 # Shared core of the NixOS and Home Manager modules (nixos/xuewen.nix and
-# home/xuewen.nix): the option set both declare verbatim, and everything
-# derived from a module's `cfg`, live here once so the two cannot drift.
-# Platform-only options (dataDir, user/group, openFirewall) and the systemd
-# wiring stay in the modules.
+# home/xuewen.nix): the option set both declare, and everything derived from a
+# module's `cfg`, live here once so the two cannot drift. Platform-only options
+# (user/group, openFirewall) and the systemd wiring stay in the modules.
 #
 # `modules` names the flake attribute whose `default` wrapper fills in the
 # package options ("nixosModules" or "homeModules"); it appears in doc
-# strings and the package assertion.
+# strings and the package assertion. `dataDirDefault` holds the platform's
+# `default` (and `defaultText`) for `dataDir`.
 {
   lib,
   pkgs,
   modules,
   environmentFileExample,
+  dataDirDefault,
 }:
 rec {
   tomlFormat = pkgs.formats.toml { };
@@ -73,6 +74,17 @@ rec {
       '';
     };
 
+    dataDir = lib.mkOption (
+      {
+        type = lib.types.path;
+        description = ''
+          State directory holding the inbox, library, SQLite database, search
+          index, vector store and preview cache. Created automatically.
+        '';
+      }
+      // dataDirDefault
+    );
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -99,9 +111,10 @@ rec {
         }
       '';
       description = ''
-        `xuewen.toml` as a Nix attrset. `inbox_dir`, `library_root`,
-        `database_url`, `search.index_dir` and `search.vector_dir` default
-        under {option}`services.xuewen.dataDir`; set them here to override.
+        `xuewen.toml` as a Nix attrset. `data_dir` is
+        {option}`services.xuewen.dataDir`, and every path the backend keeps
+        (inbox, library, database, indexes, preview cache) defaults under it;
+        set the individual keys here to override.
 
         Do NOT put API keys here — the generated file lands in the
         world-readable Nix store. Use `api_key_env` together with
@@ -116,21 +129,12 @@ rec {
     # module's MemoryDenyWriteExecute hardening.
     agentConfigured = lib.hasAttrByPath [ "ai" "agent" ] cfg.settings;
 
-    # Paths the backend requires. They default under `dataDir`; anything the
-    # user puts in `settings` wins (recursiveUpdate is deep, so setting
-    # `settings.search.index_dir` keeps the `vector_dir` default below).
     derivedSettings = {
-      inbox_dir = "${cfg.dataDir}/inbox";
-      library_root = "${cfg.dataDir}/library";
-      database_url = "sqlite:${cfg.dataDir}/library.db";
-      search.index_dir = "${cfg.dataDir}/search-index";
-      search.vector_dir = "${cfg.dataDir}/search-vectors";
-      preview.cache_dir = "${cfg.dataDir}/preview-cache";
+      data_dir = toString cfg.dataDir;
     }
-    # The backend resolves `[ai.agent].runner` against its working directory,
-    # whose default (`agent-runner/src/runner.mjs`) only exists in a dev
-    # checkout. Point it at the store copy so Agent Ask needs no unpackaged
-    # files under dataDir.
+    # The default `[ai.agent].runner` (`agent-runner/src/runner.mjs`) only
+    # exists in a dev checkout. Point it at the store copy so Agent Ask needs
+    # no unpackaged files under dataDir.
     // lib.optionalAttrs (agentConfigured && cfg.agentRunnerPackage != null) {
       ai.agent.runner = "${cfg.agentRunnerPackage}/lib/xuewen/agent-runner/src/runner.mjs";
     };
@@ -156,27 +160,14 @@ rec {
       ++ lib.optional cfg.allowRemote "--allow-remote"
     );
 
-    # pdftotext (poppler-utils) is required for PDF text extraction, which the
-    # ingest pipeline and paper chat both depend on. git backs the repo-attach
-    # endpoint (PUT /api/papers/{id}/code shallow-clones into the agent
-    # workspace). node and ripgrep are only needed when [ai.agent.*] is
-    # configured.
-    runtimePackages = [
-      pkgs.poppler-utils
-      pkgs.git
-    ]
-    ++ lib.optionals agentConfigured [
+    # The package itself brings pdftotext and git; Agent Ask's runner needs
+    # node, and Claude Code's Grep tool ripgrep.
+    runtimePackages = lib.optionals agentConfigured [
       pkgs.nodejs
       pkgs.ripgrep
     ];
 
-    environment = {
-      # reqwest talks HTTPS to arXiv/Crossref/OpenAI; give it a CA bundle
-      # explicitly (the hardened NixOS unit's ProtectSystem=strict sandbox
-      # exposes none).
-      SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-    }
-    // lib.optionalAttrs agentConfigured {
+    environment = lib.optionalAttrs agentConfigured {
       # Claude Code's CLI otherwise extracts its own ripgrep out of the Bun
       # binary into a temp dir and execs it — unpatched, so it finds no ELF
       # interpreter on a NixOS host and the Grep tool dies. Same fix nixpkgs'

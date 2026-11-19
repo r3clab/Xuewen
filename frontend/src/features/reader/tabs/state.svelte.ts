@@ -37,7 +37,6 @@ export function selectPaper(id: string | null): void {
 export function goHome(): void {
   viewer.activeId = null;
   viewer.zen = false;
-  saveTabs();
 }
 
 /// The header's search box and review count work over a PDF, but what they
@@ -57,7 +56,6 @@ export function openTab(p: PaperSummary): void {
   }
   viewer.activeId = p.id;
   selection.id = p.id;
-  saveTabs();
 }
 
 export function closeTab(id: string): void {
@@ -77,13 +75,11 @@ export function closeTab(id: string): void {
     // would silently inherit a highlighter with no visible cause.
     disarmTools();
   }
-  saveTabs();
 }
 
 /// Switch the reader to an already-open tab (the tab strip's click target).
 export function activateTab(id: string | null): void {
   viewer.activeId = id;
-  saveTabs();
 }
 
 export function retitleTab(id: string, title: string | null): void {
@@ -93,22 +89,26 @@ export function retitleTab(id: string, title: string | null): void {
 
 export function renameTab(id: string, name: string | null): void {
   const tab = viewer.tabs.find((t) => t.id === id);
-  if (tab) {
-    tab.name = name;
-    saveTabs();
-  }
+  if (tab) tab.name = name;
 }
 
 const TABS_KEY = 'xuewen-tabs';
 
-function saveTabs(): void {
-  writeLocal(
-    TABS_KEY,
-    JSON.stringify({
-      tabs: viewer.tabs.map((t) => ({ id: t.id, title: t.title, name: t.name })),
-      activeId: viewer.activeId,
-    }),
-  );
+/// Keep storage in step with the tab set and active tab, whichever mutator
+/// changed them. Call once at startup, after initTabs restored the remembered
+/// set, so the first write is the restored state rather than the empty one.
+export function persistTabs(): () => void {
+  return $effect.root(() => {
+    $effect(() => {
+      writeLocal(
+        TABS_KEY,
+        JSON.stringify({
+          tabs: viewer.tabs.map((t) => ({ id: t.id, title: t.title, name: t.name })),
+          activeId: viewer.activeId,
+        }),
+      );
+    });
+  });
 }
 
 /// Restore the remembered tab set (and active tab) at startup, then prune
@@ -153,6 +153,5 @@ export async function initTabs(): Promise<void> {
   if (alive.size !== tabs.length) {
     viewer.tabs = viewer.tabs.filter((t) => alive.has(t.id));
     if (viewer.activeId !== null && !alive.has(viewer.activeId)) viewer.activeId = null;
-    saveTabs();
   }
 }

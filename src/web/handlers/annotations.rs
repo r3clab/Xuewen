@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -9,6 +9,7 @@ use super::fetch_paper;
 use crate::annotations::NewAnnotation;
 use crate::app::{App, Trash};
 use crate::web::error::ApiError;
+use crate::web::extract::{ApiJson, ApiPath};
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
@@ -30,7 +31,7 @@ pub(super) fn routes() -> Router<App> {
 /// The reader replays these into the annotation plugin on open.
 async fn list_annotations(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     fetch_paper(&app, &id, Trash::Allow, "list_annotations").await?;
     let items = app
@@ -46,8 +47,8 @@ async fn list_annotations(
 /// so a retried save re-sends the same address instead of duplicating a mark.
 async fn put_annotation(
     State(app): State<App>,
-    Path((paper_id, annotation_id)): Path<(String, String)>,
-    Json(body): Json<NewAnnotation>,
+    ApiPath((paper_id, annotation_id)): ApiPath<(String, String)>,
+    ApiJson(body): ApiJson<NewAnnotation>,
 ) -> Result<Response, ApiError> {
     let a = app
         .put_annotation(&paper_id, &annotation_id, body)
@@ -61,7 +62,7 @@ async fn put_annotation(
 /// DELETE /api/papers/{paper_id}/annotations/{annotation_id}
 async fn delete_annotation(
     State(app): State<App>,
-    Path((paper_id, annotation_id)): Path<(String, String)>,
+    ApiPath((paper_id, annotation_id)): ApiPath<(String, String)>,
 ) -> Result<Response, ApiError> {
     app.delete_annotation(&paper_id, &annotation_id)
         .await
@@ -75,7 +76,7 @@ async fn delete_annotation(
 /// with the count rather than 204: "cleared 12 highlights" is worth surfacing.
 async fn clear_annotations(
     State(app): State<App>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Response, ApiError> {
     let n = app
         .clear_annotations(&id)

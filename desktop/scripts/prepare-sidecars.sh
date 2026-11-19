@@ -1,59 +1,62 @@
 #!/usr/bin/env bash
-# Prepare the sidecar binaries Tauri bundles into the .app:
-#   binaries/node-<triple>       official Node.js (Agent Ask runner)
-#   binaries/pdftotext-<triple>  Homebrew poppler; dylibs relocated into
-#                                binaries/libs/ with install names pointing at
-#                                @executable_path/../Resources/libs/
+# Stage everything tauri.conf.json bundles into the .app, built from this
+# flake's pinned inputs:
+#   binaries/<name>-<triple>  each `externalBin` sidecar (pdftotext, node) from
+#                             nixpkgs, its dylibs relocated into binaries/libs/
+#                             with install names pointing at
+#                             @executable_path/../Resources/libs/
+#   binaries/agent-runner/    the Agent Ask runner (.#agent-runner)
+#   ../frontend/dist/         the UI rust-embed compiles in (.#frontend)
 # install_name_tool invalidates code signatures and unsigned arm64 binaries
 # are killed on launch, so everything touched is re-signed ad-hoc.
+#
+# `--stub` writes empty stand-ins instead, for builds that never run them:
+# tauri-build only checks that the sidecars and resources exist.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
-NODE_VERSION="${NODE_VERSION:-24.18.0}"
-# The download must match the triple the outputs are named after: a wrong-arch
-# node still passes tauri-build's existence check and only fails inside the
-# shipped .app, at runtime, with "Bad CPU type in executable".
-case "$TRIPLE" in
-  aarch64-apple-darwin) NODE_ARCH=darwin-arm64 ;;
-  x86_64-apple-darwin) NODE_ARCH=darwin-x64 ;;
-  *)
-    echo "unsupported host: $TRIPLE" >&2
-    exit 1
-    ;;
-esac
-mkdir -p binaries/libs
+SIDECARS=$(jq -r '.bundle.externalBin[]' tauri.conf.json)
+rm -rf binaries
+mkdir -p binaries/libs binaries/agent-runner
 
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+if [ "${1:-}" = --stub ]; then
+  for sidecar in $SIDECARS; do
+    touch "${sidecar}-${TRIPLE}"
+  done
+  exit 0
+fi
 
-NODE_DIST="node-v${NODE_VERSION}-${NODE_ARCH}"
-echo "==> ${NODE_DIST} (${TRIPLE})"
-curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.gz" \
-  -o "${WORK}/${NODE_DIST}.tar.gz"
-curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
-  -o "${WORK}/SHASUMS256.txt"
-(cd "$WORK" && grep " ${NODE_DIST}.tar.gz\$" SHASUMS256.txt | shasum -a 256 -c -)
-tar -xzf "${WORK}/${NODE_DIST}.tar.gz" -C "$WORK"
-cp "${WORK}/${NODE_DIST}/bin/node" "binaries/node-${TRIPLE}"
+ROOT=$(cd .. && pwd)
+build() {
+  nix build --no-link --print-out-paths --inputs-from "$ROOT" "$@"
+}
 
-echo "==> pdftotext from $(brew --prefix poppler)"
-cp "$(brew --prefix poppler)/bin/pdftotext" "binaries/pdftotext-${TRIPLE}"
-chmod u+w "binaries/pdftotext-${TRIPLE}"
-# -s gives dylibbundler the keg-only lib dirs to resolve deps like
-# libpoppler.NNN.dylib; without them it prompts interactively ("does not
-# exist. Try again") and, with no stdin on CI, loops forever. </dev/null makes
-# any remaining prompt hit EOF and fail fast instead of hanging.
-dylibbundler -of -b \
-  -x "binaries/pdftotext-${TRIPLE}" \
-  -d binaries/libs \
-  -p '@executable_path/../Resources/libs/' \
-  -s "$(brew --prefix poppler)/lib" \
-  -s "$(brew --prefix)/lib" \
-  </dev/null
+echo "==> frontend and agent runner"
+rm -rf "$ROOT/frontend/dist"
+cp -RL "$(build "$ROOT#frontend")" "$ROOT/frontend/dist"
+cp -RL "$(build "$ROOT#agent-runner")/lib/xuewen/agent-runner/." binaries/agent-runner/
+chmod -R u+w "$ROOT/frontend/dist" binaries/agent-runner
+
+echo "==> sidecars (${TRIPLE})"
+cp "$(build 'nixpkgs#poppler-utils^out')/bin/pdftotext" "binaries/pdftotext-${TRIPLE}"
+cp "$(build 'nixpkgs#nodejs')/bin/node" "binaries/node-${TRIPLE}"
+DYLIBBUNDLER="$(build 'nixpkgs#macdylibbundler')/bin/dylibbundler"
+for sidecar in $SIDECARS; do
+  chmod u+w "${sidecar}-${TRIPLE}"
+  # </dev/null turns any interactive "library not found" prompt into a
+  # failure instead of a hang on CI.
+  "$DYLIBBUNDLER" -of -b \
+    -x "${sidecar}-${TRIPLE}" \
+    -d binaries/libs \
+    -p '@executable_path/../Resources/libs/' \
+    </dev/null
+done
 
 echo "==> ad-hoc re-sign"
-codesign --force -s - "binaries/node-${TRIPLE}" "binaries/pdftotext-${TRIPLE}"
+for sidecar in $SIDECARS; do
+  codesign --force -s - "${sidecar}-${TRIPLE}"
+done
 for f in binaries/libs/*.dylib; do
   codesign --force -s - "$f"
 done

@@ -5,7 +5,7 @@ use xuewen::library::{papers, trash};
 
 #[tokio::test]
 async fn deleting_a_paper_cascades_chat_messages() {
-    let (pool, _root) = support::pool_and_root_with_paper("p1").await;
+    let (pool, _root, _dir) = support::pool_and_root_with_paper("p1").await;
     xuewen::agent::history::insert_exchange(&pool, "p1", "q", "a", "M", None)
         .await
         .unwrap();
@@ -79,7 +79,7 @@ async fn membership_add_remove_and_filter_and_cascade() {
         project: Some(proj.id.clone()),
         ..Default::default()
     };
-    let filtered = papers::list(&pool, None, None, &member_filter)
+    let filtered = papers::list(&pool, None, papers::Sort::default(), &member_filter)
         .await
         .unwrap();
     assert_eq!(filtered.len(), 1);

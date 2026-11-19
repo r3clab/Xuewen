@@ -15,17 +15,18 @@ vi.mock(import('./api'), async (importOriginal) => {
 });
 
 import SearchBox from './SearchBox.svelte';
-import { filters, searchMeta, searchOpts } from './state.svelte';
+import { engines, filters, searchMeta } from './state.svelte';
 import { viewer } from '$features/reader/tabs/state.svelte';
+import { dismissTopLayer } from '$shared/ui/escape';
+
+beforeEach(() => {
+  window.addEventListener('keydown', dismissTopLayer);
+  return () => window.removeEventListener('keydown', dismissTopLayer);
+});
 
 beforeEach(() => {
   filters.q = '';
-  searchOpts.title = true;
-  searchOpts.authors = true;
-  searchOpts.abstract = true;
-  searchOpts.body = true;
-  searchOpts.keyword = true;
-  searchOpts.semantic = true;
+  Object.assign(engines, { keyword: true, semantic: true });
   searchMeta.semantic = { available: true, reason: null };
   searchMeta.pending = 0;
   viewer.tabs = [];

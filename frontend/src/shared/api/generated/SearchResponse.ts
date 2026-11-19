@@ -2,4 +2,7 @@
 import type { SearchResultItem } from "./SearchResultItem";
 import type { SemanticAvailability } from "./SemanticAvailability";
 
-export type SearchResponse = { semantic: SemanticAvailability, results: Array<SearchResultItem>, };
+/**
+ * The body of `GET /api/search`.
+ */
+export type SearchResponse<P> = { semantic: SemanticAvailability, results: Array<SearchResultItem<P>>, };

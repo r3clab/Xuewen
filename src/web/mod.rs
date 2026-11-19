@@ -1,5 +1,6 @@
 mod assets;
 mod error;
+mod extract;
 mod handlers;
 
 use std::future::Future;

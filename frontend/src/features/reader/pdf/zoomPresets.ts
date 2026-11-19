@@ -1,8 +1,8 @@
 import { ZoomMode, type ZoomModeValue } from '@embedpdf/svelte/stage';
 
-/// One entry of the toolbar's zoom menu. Numeric levels are zoom factors
-/// (1 = 100%, the page at its printed size); fit modes delegate the math to
-/// the stage.
+/// One entry of the toolbar's zoom menu. Numeric levels are the stage's own
+/// zoom factors (1 = 100%, the page at its printed size), each a stop on the
+/// ladder zoomIn/zoomOut walk; fit modes delegate the math to the stage.
 export interface ZoomPreset {
   label: string;
   level: ZoomModeValue | number;
@@ -24,12 +24,17 @@ export function formatScale(currentZoomLevel: number): string {
   return `${Math.round(currentZoomLevel * 100)}%`;
 }
 
-/// A numeric preset is active when it matches the live zoom at the same
-/// whole-percent granularity the UI displays. Fit modes are never marked —
-/// the live value is numeric even when a fit mode produced it.
-export function isActivePreset(preset: ZoomPreset, currentZoomLevel: number): boolean {
-  return (
-    typeof preset.level === 'number' &&
-    Math.round(preset.level * 100) === Math.round(currentZoomLevel * 100)
-  );
+/// The live zoom as the stage reports it: the factor, and the intent behind it.
+export interface LiveZoom {
+  readonly zoomLevel: number;
+  readonly zoomMode: ZoomModeValue | 'custom';
+}
+
+/// Which preset the menu checks. A fit mode is checked while it is the
+/// intent (it keeps applying as the window resizes), and then no level is,
+/// even one the fit happens to land on; a level is checked when a fixed zoom
+/// matches it at the whole-percent granularity the UI displays.
+export function isActivePreset(preset: ZoomPreset, live: LiveZoom): boolean {
+  if (typeof preset.level !== 'number') return live.zoomMode === preset.level;
+  return live.zoomMode === 'custom' && Math.round(preset.level * 100) === Math.round(live.zoomLevel * 100);
 }

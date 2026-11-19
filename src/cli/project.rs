@@ -41,15 +41,14 @@ pub(super) async fn project(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
         }
         ProjectCmd::New { name } => {
             let name = project_name(&name)?;
-            let p = projects::create(pool, &name).await.map_err(name_taken)?;
+            let p = projects::create(pool, &name).await?;
             println!("created project {} ({})", p.name, p.id);
         }
         ProjectCmd::Rename { project, name } => {
             let p = projects::find_one(pool, &project).await?;
             let name = project_name(&name)?;
             let renamed = projects::update(pool, &p.id, Some(&name))
-                .await
-                .map_err(name_taken)?
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("project {} was deleted meanwhile", p.name))?;
             println!("renamed project {} to {}", p.name, renamed.name);
         }
@@ -83,7 +82,7 @@ pub(super) async fn project(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
                 project: Some(proj.id.clone()),
                 ..Default::default()
             };
-            let papers = papers::list(pool, None, None, &filter).await?;
+            let papers = papers::list(pool, None, papers::Sort::default(), &filter).await?;
             println!("{} — {} paper(s)", proj.name, papers.len());
             for p in papers {
                 println!("  {}  {}", p.id, output::title(p.meta.title.as_deref()));
@@ -95,12 +94,4 @@ pub(super) async fn project(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
 
 fn project_name(raw: &str) -> Result<ProjectName> {
     ProjectName::parse(raw).map_err(|_| anyhow::anyhow!("project name cannot be empty"))
-}
-
-fn name_taken(e: anyhow::Error) -> anyhow::Error {
-    if crate::db::is_unique_violation(&e) {
-        anyhow::anyhow!(projects::NAME_TAKEN)
-    } else {
-        e
-    }
 }

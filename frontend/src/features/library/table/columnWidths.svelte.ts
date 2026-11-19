@@ -1,4 +1,5 @@
 import { PINNED_COLUMNS, PINNED_KEYS, type PinnedColumnKey } from './columns';
+import { readLocalJson, writeLocal } from '$shared/browser/persist';
 
 /// Persisted library-table column widths (px). Same localStorage shape as
 /// `dock` (reader/dock/state.svelte.ts) / `pdfAppearance` (theme.svelte.ts),
@@ -26,32 +27,21 @@ export const columnWidths = $state<Record<PinnedColumnKey, number>>(defaults());
 /// that key's default — a blob stored by an older column set degrades
 /// gracefully instead of needing a migration.
 export function initColumnWidths(): void {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const v = JSON.parse(raw) as Record<string, unknown>;
-    if (v.v !== SCHEMA_VERSION) return;
-    for (const key of PINNED_KEYS) {
-      const px = v[key];
-      const { minWidth, maxWidth } = PINNED_COLUMNS[key];
-      if (typeof px === 'number' && Number.isFinite(px) && px >= minWidth && px <= maxWidth) {
-        columnWidths[key] = Math.round(px);
-      }
+  const v = readLocalJson(STORAGE_KEY);
+  if (!v || typeof v !== 'object') return;
+  const stored = v as Record<string, unknown>;
+  if (stored.v !== SCHEMA_VERSION) return;
+  for (const key of PINNED_KEYS) {
+    const px = stored[key];
+    const { minWidth, maxWidth } = PINNED_COLUMNS[key];
+    if (typeof px === 'number' && Number.isFinite(px) && px >= minWidth && px <= maxWidth) {
+      columnWidths[key] = Math.round(px);
     }
-  } catch {
-    /* corrupted value — keep defaults */
   }
 }
 
 function persistColumnWidths(): void {
-  try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ v: SCHEMA_VERSION, ...$state.snapshot(columnWidths) }),
-    );
-  } catch {
-    /* no localStorage — widths still apply, only persistence is lost */
-  }
+  writeLocal(STORAGE_KEY, JSON.stringify({ v: SCHEMA_VERSION, ...$state.snapshot(columnWidths) }));
 }
 
 function clampTo(key: PinnedColumnKey, px: number): number {

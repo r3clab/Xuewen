@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const LAYERS: &[&[&str]] = &[
-    &["text", "hash", "http", "pdf", "tasks", "config"],
+    &["text", "hash", "http", "locks", "pdf", "tasks", "config"],
     &["db"],
     &["library"],
     &[

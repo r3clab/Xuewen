@@ -1,4 +1,4 @@
-//! Background generation of per-paper summaries. A periodic sweep fills the
+//! Background generation of per-paper summaries. A sweep fills the
 //! `paper_summaries` table for library papers that lack one, when `[ai.summary]`
 //! is configured. Sibling to the search indexer's sweep loop.
 
@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::db::ChangeWatch;
 use crate::llm::LlmClient;
 use crate::summary::{generate_summary, store};
 
@@ -20,11 +22,15 @@ const BATCH: i64 = 8;
 const MAX_ATTEMPTS: i64 = 5;
 /// Wait this long before retrying a failed paper.
 const RETRY_BACKOFF_MINS: i64 = 30;
+/// The loop sweeps on every library change and retry deadline; this only
+/// bounds how long a missed signal could go unnoticed.
+const IDLE_SWEEP: Duration = Duration::from_secs(600);
 
 pub(crate) struct SummaryService {
     pool: SqlitePool,
     client: LlmClient,
     library_root: PathBuf,
+    notify: Notify,
 }
 
 impl SummaryService {
@@ -44,6 +50,7 @@ impl SummaryService {
             pool,
             client,
             library_root: cfg.library_root.clone(),
+            notify: Notify::new(),
         }))
     }
 
@@ -54,7 +61,13 @@ impl SummaryService {
             pool,
             client,
             library_root,
+            notify: Notify::new(),
         })
+    }
+
+    /// Nudge the worker to sweep now (harmless if nothing is due).
+    pub(crate) fn wake(&self) {
+        self.notify.notify_one();
     }
 
     /// One pass: summarize up to `BATCH` papers that lack a summary. Best-effort
@@ -102,14 +115,7 @@ impl SummaryService {
         let pdf_path = self.library_root.join(&paper.rel_path);
         let full_text = match tokio::task::spawn_blocking({
             let title = title.clone();
-            // Small-caps splits of the paper's own name would otherwise leak
-            // into the generated summary ("RTC ON" for "RTCON"); repaired
-            // inside the closure so the regex passes over the full document
-            // stay off the async worker thread, with the extraction.
-            move || {
-                crate::pdf::extract_text_all(&pdf_path)
-                    .map(|t| crate::pdf::repair_smallcaps(&t, &title))
-            }
+            move || super::source_text(&pdf_path, &title)
         })
         .await
         {
@@ -144,21 +150,68 @@ impl SummaryService {
     fn model(&self) -> &str {
         self.client.model()
     }
+
+    async fn until_retry(&self) -> Result<Option<Duration>> {
+        let Some(last) = store::earliest_retryable_failure(&self.pool, MAX_ATTEMPTS).await? else {
+            return Ok(None);
+        };
+        let due = chrono::DateTime::parse_from_rfc3339(&last)?
+            + chrono::Duration::minutes(RETRY_BACKOFF_MINS);
+        Ok(Some(
+            (due.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO),
+        ))
+    }
 }
 
-/// Summary loop: sweep a batch, then sleep for `tick`. New papers are picked up
-/// on the next tick (no wake channel — the delay is bounded and cheap).
-pub(crate) async fn run(svc: Arc<SummaryService>, tick: Duration, cancel: CancellationToken) {
+/// Summary loop: sweep batch after batch while they produce summaries, then
+/// sleep until a wake, a commit from anywhere (another process included), or
+/// the next failed paper's retry.
+pub(crate) async fn run(svc: Arc<SummaryService>, cancel: CancellationToken) {
+    let mut watch = match ChangeWatch::open(&svc.pool).await {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!("summaries: not watching for other processes' changes: {e:#}");
+            None
+        }
+    };
     loop {
+        if let Some(w) = &mut watch {
+            if let Err(e) = w.mark_seen().await {
+                tracing::warn!("summaries: reading the database version: {e:#}");
+            }
+        }
         match svc.sweep().await {
-            Ok(n) if n > 0 => tracing::info!("summary sweep: {n} generated"),
+            Ok(n) if n > 0 => {
+                tracing::info!("summary sweep: {n} generated");
+                if cancel.is_cancelled() {
+                    return;
+                }
+                continue;
+            }
             Ok(_) => {}
             Err(e) => tracing::warn!("summary sweep failed: {e}"),
         }
+        let idle = match svc.until_retry().await {
+            Ok(retry) => retry.map_or(IDLE_SWEEP, |d| d.min(IDLE_SWEEP)),
+            Err(e) => {
+                tracing::warn!("summaries: reading the retry schedule: {e:#}");
+                IDLE_SWEEP
+            }
+        };
+        let changed = async {
+            match &mut watch {
+                Some(w) => w.changed().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             () = cancel.cancelled() => return,
-            () = tokio::time::sleep(tick) => {}
+            () = svc.notify.notified() => {}
+            () = changed => {}
+            () = tokio::time::sleep(idle) => {}
         }
     }
 }
@@ -167,33 +220,10 @@ pub(crate) async fn run(svc: Arc<SummaryService>, tick: Duration, cancel: Cancel
 mod tests {
     use super::*;
     use crate::library::model::{Authors, Paper, PaperMeta, PaperStatus};
-    use printpdf::*;
+    use crate::testutil::write_pdf;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn write_pdf(path: &std::path::Path, line: &str) {
-        let mut doc = PdfDocument::new("t");
-        let ops = vec![
-            Op::StartTextSection,
-            Op::SetFont {
-                font: PdfFontHandle::Builtin(BuiltinFont::Helvetica),
-                size: Pt(12.0),
-            },
-            Op::SetTextCursor {
-                pos: Point::new(Mm(15.0), Mm(280.0)),
-            },
-            Op::ShowText {
-                items: vec![TextItem::Text(line.to_string())],
-            },
-            Op::EndTextSection,
-        ];
-        let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
-        let bytes = doc
-            .with_pages(vec![page])
-            .save(&PdfSaveOptions::default(), &mut Vec::new());
-        std::fs::write(path, bytes).unwrap();
-    }
 
     fn chat_reply(text: &str) -> serde_json::Value {
         json!({"choices": [{"message": {"role": "assistant", "content": text}}]})
@@ -242,7 +272,7 @@ mod tests {
                 status: PaperStatus::Resolved,
             },
         };
-        write_pdf(&lib.path().join("p1.pdf"), "the body");
+        write_pdf(&lib.path().join("p1.pdf"), &["the body"]);
         crate::library::papers::insert(&pool, &paper).await.unwrap();
 
         let svc = SummaryService::for_tests(
@@ -363,7 +393,7 @@ mod tests {
                 status: PaperStatus::Resolved,
             },
         };
-        write_pdf(&lib.path().join("p1.pdf"), "the body");
+        write_pdf(&lib.path().join("p1.pdf"), &["the body"]);
         crate::library::papers::insert(&pool, &paper).await.unwrap();
 
         let svc = SummaryService::for_tests(
@@ -418,7 +448,7 @@ mod tests {
                 status: PaperStatus::Resolved,
             },
         };
-        write_pdf(&lib.path().join("p1.pdf"), "the body");
+        write_pdf(&lib.path().join("p1.pdf"), &["the body"]);
         crate::library::papers::insert(&pool, &paper).await.unwrap();
 
         // Simulate a prior failed attempt, without calling the model.
@@ -465,5 +495,51 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn the_loop_summarizes_a_paper_added_while_it_sleeps() {
+        let server = MockServer::start().await;
+        let summary_json = json!({
+            "tldr": "TL;DR.", "problem": "P.", "approach": "A.",
+            "results": "R.", "limitations": "L."
+        })
+        .to_string();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_reply(&summary_json)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db_dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}", db_dir.path().join("t.db").display());
+        let pool = crate::db::connect(&url).await.unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let svc = SummaryService::for_tests(
+            pool.clone(),
+            LlmClient::new(&format!("{}/v1", server.uri()), "m", None),
+            lib.path().to_path_buf(),
+        );
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(run(svc.clone(), cancel.clone()));
+
+        let paper = crate::testutil::paper("p1", "Title", PaperStatus::Resolved);
+        crate::library::papers::insert(&pool, &paper).await.unwrap();
+        svc.wake();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while crate::summary::store::get(&pool, "p1")
+            .await
+            .unwrap()
+            .is_none()
+        {
+            assert!(tokio::time::Instant::now() < deadline, "never summarized");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("the loop stops on cancel")
+            .unwrap();
     }
 }

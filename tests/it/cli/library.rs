@@ -1,8 +1,13 @@
-use super::{fails, library, ok};
+use serde_json::json;
+use sqlx::SqlitePool;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use super::{fails, library, library_with, ok};
 
 #[tokio::test]
 async fn list_show_and_stats_read_the_library() {
-    let (pool, config) = library().await;
+    let (pool, config, _dir) = library().await;
     let mut p2 = xuewen::testutil::paper(
         "p2",
         "Second Paper",
@@ -39,12 +44,12 @@ async fn list_show_and_stats_read_the_library() {
 
 #[tokio::test]
 async fn citations_print_the_cached_parse() {
-    let (pool, config) = library().await;
+    let (pool, config, _dir) = library().await;
     assert!(ok(&config, &["citations", "p1"]).starts_with("no parsed references yet"));
 
     sqlx::query("INSERT INTO citation_parses (paper_id, refs, parsed, model, created_at) VALUES ('p1', ?, ?, 'heuristic-v1', '2026-07-08T00:00:00Z')")
         .bind(r#"["[1] A. Smith and B. Jones. Deep Things. NeurIPS, 2020.", "[2] garbled"]"#)
-        .bind(r#"[{"src":"h1","authors":["A. Smith","B. Jones"],"title":"Deep Things","venue":"NeurIPS","year":2020,"doi":"10.1/x"}, null]"#)
+        .bind(r#"[{"src":{"heuristic":1},"authors":["A. Smith","B. Jones"],"title":"Deep Things","venue":"NeurIPS","year":2020,"doi":"10.1/x"}, null]"#)
         .execute(&pool)
         .await
         .unwrap();
@@ -58,7 +63,7 @@ async fn citations_print_the_cached_parse() {
 
 #[tokio::test]
 async fn name_prints_sets_and_clears() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     assert_eq!(ok(&config, &["name", "p1"]), "p1 has no name\n");
     assert_eq!(ok(&config, &["name", "p1", "  AFL  "]), "named p1 AFL\n");
     assert_eq!(ok(&config, &["name", "p1"]), "AFL\n");
@@ -73,7 +78,7 @@ async fn name_prints_sets_and_clears() {
 
 #[tokio::test]
 async fn project_rename_keeps_names_unique() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     ok(&config, &["project", "new", "fuzzing"]);
     ok(&config, &["project", "new", "kernels"]);
     assert_eq!(
@@ -91,8 +96,33 @@ async fn project_rename_keeps_names_unique() {
 }
 
 #[tokio::test]
+async fn tag_rename_reports_a_taken_name() {
+    let (_pool, config, _dir) = library().await;
+    ok(&config, &["tag", "add", "p1", "ml"]);
+    ok(&config, &["tag", "add", "p1", "nlp"]);
+    assert_eq!(
+        fails(&config, &["tag", "rename", "nlp", "ML"]),
+        "Error: a tag with that name already exists\n"
+    );
+}
+
+#[tokio::test]
+async fn export_takes_any_filter_as_its_selector() {
+    let (_pool, config, _dir) = library().await;
+    for [flag, value] in [["--status", "resolved"], ["--query", "Paper"]] {
+        let out = ok(&config, &["export", flag, value]);
+        assert!(out.starts_with('@'), "{flag}: {out}");
+    }
+    assert!(fails(&config, &["export"]).contains("specify a paper id, --all, or a filter"));
+    assert!(
+        fails(&config, &["export", "p1", "--status", "resolved"]).contains("cannot be used with")
+    );
+    assert!(fails(&config, &["export", "--all", "--format", "ris"]).contains("possible values"));
+}
+
+#[tokio::test]
 async fn annotation_add_validates_and_lists_the_note() {
-    let (_pool, config) = library().await;
+    let (_pool, config, _dir) = library().await;
     let added = ok(
         &config,
         &[
@@ -146,4 +176,62 @@ async fn annotation_add_validates_and_lists_the_note() {
         ]
     )
     .contains("note must be at most 10000 characters"));
+}
+
+async fn summary_model(pool: &SqlitePool) -> String {
+    sqlx::query_scalar("SELECT model FROM paper_summaries WHERE paper_id = 'p1'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn summarize_replaces_a_summary_only_with_a_new_one() {
+    let upstream = MockServer::start().await;
+    let (pool, config, _dir) = library_with(&format!(
+        "[ai]\nbase_url = {:?}\napi_key = \"k\"\n\n[ai.summary]\nmodel = \"mock-1\"\n",
+        upstream.uri()
+    ))
+    .await;
+    let summary = json!({
+        "tldr": "One line.",
+        "problem": "Gap.",
+        "approach": "Idea.",
+        "results": "Better.",
+        "limitations": "Small."
+    });
+    sqlx::query("INSERT INTO paper_summaries (paper_id, summary, model, generated_at) VALUES ('p1', ?, 'old-1', '2026-07-08T00:00:00Z')")
+        .bind(summary.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let outage = Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount_as_scoped(&upstream)
+        .await;
+    assert_eq!(
+        ok(&config, &["summarize", "p1"]),
+        "no summary generated (see logs)\n"
+    );
+    assert_eq!(
+        ok(&config, &["summarize", "--all"]),
+        "generated 0 summaries\n"
+    );
+    assert_eq!(summary_model(&pool).await, "old-1");
+    drop(outage);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": summary.to_string()}}]
+        })))
+        .mount(&upstream)
+        .await;
+    assert_eq!(
+        ok(&config, &["summarize", "--all"]),
+        "generated 1 summaries\n"
+    );
+    assert_eq!(summary_model(&pool).await, "mock-1");
 }

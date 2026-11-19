@@ -8,7 +8,7 @@ pub(super) struct SummarizeArgs {
     /// Paper id (exact) to (re)summarize. Omit to fill gaps for the whole library.
     #[arg(conflicts_with = "all")]
     id: Option<String>,
-    /// Clear and regenerate every paper's summary.
+    /// Regenerate every paper's summary; one that fails keeps its old summary.
     #[arg(long)]
     all: bool,
 }
