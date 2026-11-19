@@ -1,10 +1,11 @@
-import { ZoomMode } from '@embedpdf/plugin-zoom';
+import { ZoomMode, type ZoomModeValue } from '@embedpdf/svelte/stage';
 
-/// One entry of the toolbar's zoom menu. Numeric levels are engine scale
-/// factors (1 = 100%); fit modes delegate the math to the zoom plugin.
+/// One entry of the toolbar's zoom menu. Numeric levels are zoom factors
+/// (1 = 100%, the page at its printed size); fit modes delegate the math to
+/// the stage.
 export interface ZoomPreset {
   label: string;
-  level: ZoomMode | number;
+  level: ZoomModeValue | number;
 }
 
 export const ZOOM_PRESETS: ZoomPreset[] = [

@@ -1,34 +1,22 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { ThumbImg, ThumbnailsPane, useThumbnailPlugin } from '@embedpdf/plugin-thumbnail/svelte';
-  import type { ThumbnailDocumentState } from '@embedpdf/plugin-thumbnail';
-  import { useScroll } from '@embedpdf/plugin-scroll/svelte';
-  import { Highlighter, LayoutGrid, List } from 'lucide-svelte';
+  import { RenderLayer } from '@embedpdf/svelte/render';
+  import { Scrollbar, Stage, useStage, useStageState } from '@embedpdf/svelte/stage';
+  import { Highlighter, LayoutGrid, List } from '@lucide/svelte';
   import { panelWidth, reader, setPanelView } from '$features/reader/state.svelte';
+  import { ThumbsToken } from './engine';
   import PdfOutline from './PdfOutline.svelte';
   import PdfAnnotations from '$features/reader/annotations/PdfAnnotations.svelte';
 
   let { documentId }: { documentId: string } = $props();
-  const scroll = useScroll(() => documentId);
-  const thumbs = useThumbnailPlugin();
-  let thumbsWrap = $state<HTMLDivElement>();
+  const main = useStage();
+  const view = useStageState();
+  const strip = useStage(ThumbsToken);
 
-  // getDocumentState is declared `private` in the plugin's .d.ts, but it is
-  // a public runtime method verified against @embedpdf/plugin-thumbnail
-  // 2.14.4 dist (`getDocumentState(documentId) { return
-  // this.state.documents[id] ?? null; }`). Minimal type-only accommodation
-  // to call it; no behavior change.
-  type ThumbnailPluginState = {
-    getDocumentState(id: string): ThumbnailDocumentState | null;
-  };
   // While the close animation runs, reader.panel is already null but the
   // panel is still visible — keep showing the last-used view as it slides
   // away instead of blanking.
   const tab = $derived(reader.panel ?? reader.lastPanel);
-
-  function jump(pageIndex: number): void {
-    scroll.provides?.scrollToPage({ pageNumber: pageIndex + 1 });
-  }
 
   const seg = (active: boolean) =>
     `flex flex-1 items-center justify-center rounded-md px-2 py-1 ${
@@ -37,41 +25,13 @@
         : 'text-stone-500 hover:text-ink dark:text-stone-400 dark:hover:text-stone-100'
     }`;
 
+  // The strip starts at the current page ONCE per thumbs-view activation
+  // (the strip is {#if}-gated, so this component's mount or a switch to the
+  // view), and never follows the reader afterwards: that would fight the user
+  // browsing the strip.
   $effect(() => {
     if (tab !== 'thumbs') return;
-    // Position the pane at the current page ONCE per thumbs-view activation
-    // by setting scrollTop directly. Do NOT use scrollToThumb: the plugin's
-    // scrollTo$ emitter caches its last emission (cache defaults to true in
-    // @embedpdf 2.14.4) and ThumbnailsPane re-subscribes onScrollTo whenever
-    // its window changes — i.e. on every manual pane scroll — replaying the
-    // cached position and yanking the pane back. Direct scrollTop keeps that
-    // cache empty forever. untrack: nothing below may register effect deps
-    // (tracked dep = `tab` alone); plugin state and currentPage are read
-    // inside rAF callbacks only.
-    return untrack(() => {
-      let tries = 0;
-      let raf = requestAnimationFrame(function attempt() {
-        const pane = thumbsWrap?.firstElementChild;
-        // typeof-guarded: getDocumentState is a private-in-.d.ts runtime
-        // method (see ThumbnailPluginState above). If a future plugin
-        // version renames/removes it, this degrades into the retry/give-up
-        // path below instead of throwing.
-        const plugin = thumbs.plugin as ThumbnailPluginState | null;
-        const item =
-          typeof plugin?.getDocumentState === 'function'
-            ? plugin.getDocumentState(documentId)?.thumbs[scroll.state.currentPage - 1]
-            : undefined;
-        if (pane instanceof HTMLElement && item) {
-          // 8 = upstream scrollToThumb's own `margin` constant
-          // (@embedpdf/plugin-thumbnail 2.14.4 dist/index.js:352),
-          // replicated so direct positioning matches the plugin's semantics.
-          pane.scrollTop = Math.max(0, item.top - 8);
-          return; // positioned — stop retrying
-        }
-        if (++tries < 30) raf = requestAnimationFrame(attempt);
-      });
-      return () => cancelAnimationFrame(raf);
-    });
+    untrack(() => strip.goToPage(view.currentPageIndex, { behavior: 'instant' }));
   });
 </script>
 
@@ -111,44 +71,35 @@
     </div>
   </div>
   {#if tab === 'thumbs'}
-    <!-- Bound wrapper: the positioning effect sets the pane's scrollTop via
-         thumbsWrap.firstElementChild (ThumbnailsPane's root scroll container,
-         whose inline height:100% resolves against this wrapper). -->
-    <div bind:this={thumbsWrap} class="min-h-0 flex-1">
-      <ThumbnailsPane {documentId}>
-        {#snippet children(m)}
-          <button
-            type="button"
-            aria-label={`Page ${m.pageIndex + 1}`}
-            onclick={() => jump(m.pageIndex)}
-            style:position="absolute"
-            style:top="{m.top}px"
-            style:left="50%"
-            style:transform="translateX(-50%)"
-            style:width="{m.width}px"
-            style:height="{m.wrapperHeight}px"
-          >
-            <ThumbImg
-              {documentId}
-              meta={m}
-              class={`rounded border ${
-                scroll.state.currentPage === m.pageIndex + 1
-                  ? 'border-amber-700 ring-2 ring-amber-700/40 dark:border-amber-500 dark:ring-amber-500/40'
-                  : 'border-stone-200 dark:border-stone-700'
-              }`}
-            />
-            <span
-              class="block pt-0.5 text-center text-[10px] text-stone-500 dark:text-stone-400"
-              style:height="{m.labelHeight}px"
-            >
-              {m.pageIndex + 1}
-            </span>
-          </button>
-        {/snippet}
-      </ThumbnailsPane>
-    </div>
+    <!-- A second view of the document with its own camera, so browsing the
+         strip never moves the page being read. -->
+    <Stage token={ThumbsToken} class="min-h-0 flex-1">
+      <RenderLayer thumbnail />
+      {#snippet pageChrome(page)}
+        <button
+          type="button"
+          aria-label={`Page ${page.pageIndex + 1}`}
+          onclick={() => main.goToPage(page.pageIndex)}
+          class={`absolute inset-x-0 top-0 rounded border ${
+            view.currentPageIndex === page.pageIndex
+              ? 'border-amber-700 ring-2 ring-amber-700/40 dark:border-amber-500 dark:ring-amber-500/40'
+              : 'border-stone-200 dark:border-stone-700'
+          }`}
+          style:bottom="{page.frame.bottom}px"
+        ></button>
+        <span
+          class="pointer-events-none absolute inset-x-0 bottom-0 pt-0.5 text-center text-[10px] text-stone-500 dark:text-stone-400"
+          style:height="{page.frame.bottom}px"
+        >
+          {page.pageIndex + 1}
+        </span>
+      {/snippet}
+      {#snippet overlay()}
+        <Scrollbar axis="y" />
+      {/snippet}
+    </Stage>
   {:else if tab === 'outline'}
-    <PdfOutline {documentId} />
+    <PdfOutline />
   {:else if tab === 'annotations'}
     <PdfAnnotations {documentId} />
   {/if}

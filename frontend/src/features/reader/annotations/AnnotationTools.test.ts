@@ -1,30 +1,38 @@
 import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PdfAnnotationSubtype } from '@embedpdf/models';
 
-const scope = {
-  setActiveTool: vi.fn(),
-  getSelectedAnnotations: vi.fn(() => [] as unknown[]),
-  updateAnnotation: vi.fn(),
-};
+type Patcher = (selected: { subtype: string }) => object;
 
-vi.mock('@embedpdf/plugin-annotation/svelte', () => ({
-  useAnnotation: () => ({ provides: scope, state: {} }),
+const { marks, hub } = vi.hoisted(() => ({
+  marks: {
+    tools: { updateDefaults: vi.fn() },
+    selection: {
+      getSelected: vi.fn((): readonly unknown[] => []),
+      update: vi.fn(async (_patch: Patcher) => ({})),
+    },
+  },
+  hub: { activateTool: vi.fn(), activateDefaultTool: vi.fn() },
+}));
+
+vi.mock('@embedpdf/svelte/annotation', () => ({ AnnotationToken: 'annotation' }));
+vi.mock('@embedpdf/svelte/interaction', () => ({ InteractionToken: 'interaction' }));
+vi.mock('@embedpdf/svelte/runtime', () => ({
+  useOptionalCapability: (token: string) => ({ current: token === 'annotation' ? marks : hub }),
 }));
 
 import AnnotationTools from './AnnotationTools.svelte';
 import { annotationTools } from './state.svelte';
 import { colorHex } from './palette';
 
-const props = { documentId: 'd1', onHoldChange: () => {} };
+const props = { onHoldChange: () => {} };
 
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   annotationTools.active = null;
   annotationTools.color = 'amber';
-  scope.getSelectedAnnotations.mockReturnValue([]);
+  marks.selection.getSelected.mockReturnValue([]);
 });
 
 async function openMenu(): Promise<void> {
@@ -47,14 +55,12 @@ describe('the tool menu', () => {
       expect(screen.getByRole('menuitemradio', { name })).toBeInTheDocument();
     }
     // No ink, shapes, or free text in v1.
-    expect(
-      screen.queryByRole('menuitemradio', { name: /ink|square|circle|free text/i }),
-    ).toBeNull();
+    expect(screen.queryByRole('menuitemradio', { name: /ink|square|circle|free text/i })).toBeNull();
   });
 
   it('holds the auto-hiding pill open while the menu is up', async () => {
     const onHoldChange = vi.fn();
-    render(AnnotationTools, { props: { ...props, onHoldChange } });
+    render(AnnotationTools, { props: { onHoldChange } });
     expect(onHoldChange).toHaveBeenLastCalledWith(false);
     await openMenu();
     expect(onHoldChange).toHaveBeenLastCalledWith(true);
@@ -79,15 +85,15 @@ describe('arming a tool', () => {
     await openMenu();
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Highlight' }));
     expect(annotationTools.active).toBe('highlight');
-    expect(scope.setActiveTool).toHaveBeenCalledWith('highlight');
+    expect(hub.activateTool).toHaveBeenLastCalledWith('highlight');
   });
 
   it('uses the plugin tool id, not the wire kind, for a sticky note', async () => {
     render(AnnotationTools, { props });
     await openMenu();
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Note' }));
-    // The wire spelling is `text_comment`; the plugin's tool is `textComment`.
-    expect(scope.setActiveTool).toHaveBeenCalledWith('textComment');
+    // The wire spelling is `text_comment`; the plugin's tool is `note`.
+    expect(hub.activateTool).toHaveBeenLastCalledWith('note');
   });
 
   it('disarms when the armed tool is clicked again', async () => {
@@ -95,24 +101,22 @@ describe('arming a tool', () => {
     await openMenu();
     const highlight = screen.getByRole('menuitemradio', { name: 'Highlight' });
     await userEvent.click(highlight);
+    hub.activateDefaultTool.mockClear();
     await userEvent.click(highlight);
     expect(annotationTools.active).toBeNull();
-    expect(scope.setActiveTool).toHaveBeenLastCalledWith(null);
+    expect(hub.activateDefaultTool).toHaveBeenCalledOnce();
   });
 
-  it('inherits the armed tool when a second document mounts', async () => {
+  it('inherits the armed tool when a second document mounts', () => {
     annotationTools.active = 'squiggly';
-    render(AnnotationTools, { props: { ...props, documentId: 'd2' } });
+    render(AnnotationTools, { props });
     // Driven by an effect, not a click: a newly opened tab must not look
     // disarmed while app state says otherwise.
-    expect(scope.setActiveTool).toHaveBeenCalledWith('squiggly');
+    expect(hub.activateTool).toHaveBeenCalledWith('squiggly');
   });
 });
 
 describe('picking a color', () => {
-  // The push into the plugin's global tool defaults happens in PdfDeck (the
-  // defaults are registry-wide, this component is per-tab) — see
-  // applyToolDefaults in annotations/adapter.test.ts.
   it('remembers the color across a reload', async () => {
     render(AnnotationTools, { props });
     await openMenu();
@@ -120,26 +124,33 @@ describe('picking a color', () => {
     expect(localStorage.getItem('xuewen-annotation-color')).toBe('blue');
   });
 
+  it('arms every tool of the document with the palette color', async () => {
+    render(AnnotationTools, { props });
+    expect(marks.tools.updateDefaults).toHaveBeenCalledWith('highlight', { color: colorHex('amber') });
+    await openMenu();
+    await userEvent.click(screen.getByRole('menuitemradio', { name: 'Violet' }));
+    for (const tool of ['highlight', 'underline', 'strikeout', 'squiggly', 'note']) {
+      expect(marks.tools.updateDefaults).toHaveBeenCalledWith(tool, { color: colorHex('violet') });
+    }
+  });
+
   it('recolors what is selected, so a just-drawn mark can be corrected', async () => {
-    scope.getSelectedAnnotations.mockReturnValue([
-      { object: { id: 'a1', pageIndex: 2, type: PdfAnnotationSubtype.HIGHLIGHT } },
-      { object: { id: 'a2', pageIndex: 5, type: PdfAnnotationSubtype.TEXT } },
-    ]);
+    marks.selection.getSelected.mockReturnValue([{}]);
     render(AnnotationTools, { props });
     await openMenu();
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Green' }));
-    const hex = colorHex('green');
-    expect(scope.updateAnnotation).toHaveBeenCalledWith(2, 'a1', {
-      color: hex,
-      strokeColor: hex,
-    });
-    expect(scope.updateAnnotation).toHaveBeenCalledWith(5, 'a2', { strokeColor: hex });
+    expect(marks.selection.update).toHaveBeenCalledOnce();
+    const patch = marks.selection.update.mock.calls[0][0];
+    expect(patch({ subtype: 'highlight' })).toEqual({ color: colorHex('green') });
+    expect(patch({ subtype: 'text' })).toEqual({ color: colorHex('green') });
+    // A foreign mark the reader happens to have selected is left alone.
+    expect(patch({ subtype: 'ink' })).toEqual({});
   });
 
   it('leaves marks alone when nothing is selected', async () => {
     render(AnnotationTools, { props });
     await openMenu();
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Rose' }));
-    expect(scope.updateAnnotation).not.toHaveBeenCalled();
+    expect(marks.selection.update).not.toHaveBeenCalled();
   });
 });

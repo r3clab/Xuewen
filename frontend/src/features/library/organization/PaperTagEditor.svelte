@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X } from 'lucide-svelte';
+  import { X } from '@lucide/svelte';
   import { addTagToPaper, removeTagFromPaper } from './actions';
   import { tags } from './state.svelte';
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';

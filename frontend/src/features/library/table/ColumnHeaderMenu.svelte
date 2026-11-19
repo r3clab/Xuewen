@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { MoveHorizontal, RotateCcw } from 'lucide-svelte';
+  import { MoveHorizontal, RotateCcw } from '@lucide/svelte';
   import ContextMenuShell from '$shared/ui/ContextMenuShell.svelte';
 
   let {

@@ -79,7 +79,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Authors {
 impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Authors {
     fn encode_by_ref(
         &self,
-        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         if self.0.is_empty() {
             return Ok(sqlx::encode::IsNull::Yes);

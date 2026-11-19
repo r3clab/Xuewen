@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronDown, Download } from 'lucide-svelte';
+  import { ChevronDown, Download } from '@lucide/svelte';
   import { exportUrl } from '$features/library/api';
   import { bibFormat } from '$features/library/state.svelte';
   import { filters, relevanceSearchActive } from './state.svelte';

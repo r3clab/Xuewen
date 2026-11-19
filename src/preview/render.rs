@@ -7,7 +7,7 @@
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{render, RenderCache, RenderSettings};
+use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 
 /// Raster width cap. The picker shows pages at ~250 CSS px, so this covers a
 /// 2× display with headroom and keeps a cached page well under 100 KB. Pages
@@ -74,17 +74,17 @@ pub(crate) fn page_png(bytes: Vec<u8>, page: u32) -> Result<Vec<u8>, RenderError
     };
     // hayro's own default is a transparent ground, which would let the
     // reader's dark theme show through the paper.
-    let settings = RenderSettings {
+    let pixmap_settings = PixmapSettings {
         x_scale: scale,
         y_scale: scale,
         bg_color: WHITE,
-        ..Default::default()
     };
     let pixmap = render(
         page,
         &RenderCache::new(),
         &InterpreterSettings::default(),
-        &settings,
+        &RenderSettings::default(),
+        &pixmap_settings,
     );
     pixmap.into_png().map_err(|_| RenderError::Unrenderable)
 }

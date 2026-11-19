@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Download, ExternalLink, BookOpen } from 'lucide-svelte';
+  import { Download, ExternalLink, BookOpen } from '@lucide/svelte';
   import {
     citationHover,
     cancelHideCitation,

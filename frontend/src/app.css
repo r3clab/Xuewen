@@ -63,8 +63,8 @@ body {
    glare of the white page; invert flips it dark (0.93 keeps blacks as dark
    gray, and hue-rotate restores color hues). Scoped to .dark so the
    preference is inert in light mode, and applied only to the raster
-   render/tiling layers so selection, search, and citation overlays keep
-   their colors and positioning. */
+   render layer (tiles included) so selection, search, and citation
+   overlays keep their colors and positioning. */
 .dark [data-pdf-appearance='dim'] {
   filter: brightness(0.85);
 }

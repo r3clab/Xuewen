@@ -18,7 +18,7 @@
         // probe error (server restarting, transient offline) says nothing
         // about the PDF, and latching `failed` on it would permanently
         // replace a working viewer with the fallback; the real open surfaces
-        // genuine failures via doc.isError.
+        // genuine failures through the document gate (PdfPages).
       });
     return () => controller.abort();
   });
@@ -27,7 +27,7 @@
 <!-- Hide inactive tabs with visibility (not display:none): display:none
      collapses the tab to 0×0, which resets EmbedPDF's virtualized layout to the
      top and makes it re-scroll on every switch. `invisible` keeps the layout, so
-     each tab's Viewport (and its per-document scroll/zoom) is fully preserved. -->
+     each tab's Stage (and its per-document scroll/zoom) is fully preserved. -->
 <div class={`absolute inset-0 ${active ? 'z-10' : 'invisible'}`}>
   {#if failed}
     <PdfFallback {id} />

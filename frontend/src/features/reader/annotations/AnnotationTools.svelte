@@ -1,14 +1,11 @@
 <script lang="ts">
-  import { ChevronDown, Highlighter, MessageSquare, Strikethrough, Underline, Waves } from 'lucide-svelte';
-  import { useAnnotation } from '@embedpdf/plugin-annotation/svelte';
-  import { PdfAnnotationSubtype } from '@embedpdf/models';
+  import { untrack } from 'svelte';
+  import { ChevronDown, Highlighter, MessageSquare, Strikethrough, Underline, WavesHorizontal } from '@lucide/svelte';
+  import { useOptionalCapability } from '@embedpdf/svelte/runtime';
+  import { AnnotationToken } from '@embedpdf/svelte/annotation';
+  import { InteractionToken } from '@embedpdf/svelte/interaction';
   import ToolbarMenu from '$features/reader/pdf/ToolbarMenu.svelte';
-  import {
-    colorPatch,
-    KIND_LABELS,
-    kindOf,
-    TOOL_BY_KIND,
-  } from './adapter';
+  import { KIND_LABELS, kindOf, TOOL_BY_KIND } from './adapter';
   import { annotationTools, setToolColor, toggleTool } from './state.svelte';
   import {
     ANNOTATION_COLORS,
@@ -19,10 +16,10 @@
   import type { AnnotationColor } from '$shared/api/generated/AnnotationColor';
   import type { AnnotationKind } from '$shared/api/generated/AnnotationKind';
 
-  let { documentId, onHoldChange }: { documentId: string; onHoldChange: (held: boolean) => void } =
-    $props();
+  let { onHoldChange }: { onHoldChange: (held: boolean) => void } = $props();
 
-  const annotation = useAnnotation(() => documentId);
+  const annotation = useOptionalCapability(AnnotationToken);
+  const interaction = useOptionalCapability(InteractionToken);
 
   let menuOpen = $state(false);
   $effect(() => onHoldChange(menuOpen));
@@ -33,7 +30,7 @@
     highlight: Highlighter,
     underline: Underline,
     strikeout: Strikethrough,
-    squiggly: Waves,
+    squiggly: WavesHorizontal,
     text_comment: MessageSquare,
   };
   const TOOLS = (Object.keys(ICONS) as AnnotationKind[]).map((kind) => ({
@@ -47,33 +44,38 @@
   const TriggerIcon = $derived(activeTool?.icon ?? Highlighter);
 
   // The armed tool lives in app state (global, so it survives a tab switch);
-  // the plugin needs telling per document. Driving it from an effect rather
+  // the plugins need telling per document. Driving it from an effect rather
   // than from the click handler means a newly opened tab inherits whatever is
   // armed, instead of looking disarmed until the next click.
   $effect(() => {
-    const scope = annotation.provides;
-    if (!scope) return;
-    scope.setActiveTool(active === null ? null : TOOL_BY_KIND[active]);
+    const hub = interaction.current;
+    const tool = active === null ? null : TOOL_BY_KIND[active];
+    if (!hub) return;
+    untrack(() => (tool === null ? hub.activateDefaultTool() : hub.activateTool(tool)));
   });
 
-  // The color → tool-defaults push is NOT here: tool defaults are global in
-  // the plugin (registry-wide, not per-document), and this component mounts
-  // once per open tab — PdfDeck, of which there is one live instance, owns it.
+  // Tool defaults are kept per document, so each tab pushes the palette color
+  // into its own.
+  $effect(() => {
+    const marks = annotation.current;
+    const hex = colorHex(annotationTools.color);
+    if (!marks) return;
+    untrack(() => {
+      for (const tool of Object.values(TOOL_BY_KIND)) marks.tools.updateDefaults(tool, { color: hex });
+    });
+  });
 
   /// Picking a color both arms the next mark and recolors whatever is selected
   /// — the selected-mark case is what a reader expects after drawing one and
   /// deciding it should have been a different color.
   function pickColor(c: AnnotationColor): void {
     setToolColor(c);
-    const scope = annotation.provides;
-    if (!scope) return;
+    const marks = annotation.current;
+    if (!marks || marks.selection.getSelected().length === 0) return;
     const hex = colorHex(c);
-    for (const sel of scope.getSelectedAnnotations()) {
-      // A mark whose subtype isn't one of ours (a foreign one the reader
-      // happens to have selected) is left alone rather than guessed at.
-      const kind = kindOf(sel.object);
-      if (kind) scope.updateAnnotation(sel.object.pageIndex, sel.object.id, colorPatch(kind, hex));
-    }
+    // A mark whose subtype isn't one of ours (a foreign one the reader happens
+    // to have selected) is left alone rather than guessed at.
+    void marks.selection.update((selected) => (kindOf(selected) ? { color: hex } : {})).catch(() => {});
   }
 </script>
 

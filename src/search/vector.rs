@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use qdrant_edge::{
     Condition, CreateIndex, Distance, EdgeConfig, EdgeShard, EdgeVectorParams, FieldCondition,
-    FieldIndexOperations, Filter, JsonPath, Match, NamedQuery, OperationError, Payload,
+    FieldIndexOperations, Filter, JsonPath, Match, Memory, NamedQuery, OperationError, Payload,
     PayloadFieldSchema, PayloadSchemaType, PointId, PointInsertOperations, PointOperations,
     PointStruct, QueryEnum, Range, ScrollRequestBuilder, SearchRequestBuilder, UpdateOperation,
     VectorStructInternal, WithPayloadInterface, WithVector, DEFAULT_VECTOR_NAME,
@@ -473,7 +473,7 @@ fn edge_config(dims: usize) -> EdgeConfig {
         .vector(
             DEFAULT_VECTOR_NAME,
             EdgeVectorParams::builder(dims, Distance::Cosine)
-                .on_disk(true)
+                .memory(Memory::Cold)
                 .build(),
         )
         .build()

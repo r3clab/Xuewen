@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PdfDocumentObject } from '@embedpdf/models';
 import type { Marker, Reference } from './references';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
 import type { StructuredReference } from '$shared/api/generated/StructuredReference';
@@ -18,11 +17,15 @@ import * as api from './api';
 import * as libraryApi from '$features/library/api';
 import { markLibraryChanged } from '$features/library/state.svelte';
 import { runCitationPipeline, type CitationPipelineUpdate } from './pipeline';
-import { loadCitations, type EngineLike } from './load';
+import { loadCitations, type CitationSource } from './load';
 
-// loadCitations is mocked, so the engine and document are never touched.
-const engine = {} as EngineLike;
-const doc = {} as PdfDocumentObject;
+// loadCitations is mocked, so the source is never read.
+const source: CitationSource = {
+  pages: [],
+  links: () => [],
+  readRuns: async () => [],
+  pageIndexOf: () => -1,
+};
 
 const ADAM = 'Adam: A Method for Stochastic Optimization';
 
@@ -49,9 +52,9 @@ function structured(over: Partial<StructuredReference> = {}): StructuredReferenc
   };
 }
 
-function run(hooks: Partial<Parameters<typeof runCitationPipeline>[3]> = {}) {
+function run(hooks: Partial<Parameters<typeof runCitationPipeline>[2]> = {}) {
   const updates: CitationPipelineUpdate[] = [];
-  const done = runCitationPipeline(engine, doc, 'd1', {
+  const done = runCitationPipeline(source, 'd1', {
     isCancelled: () => false,
     onUpdate: (u) => updates.push(u),
     ...hooks,
@@ -124,7 +127,7 @@ describe('runCitationPipeline', () => {
     vi.mocked(loadCitations).mockResolvedValue({ references: [raw], markers: [] });
     let cancelled = false;
     const updates: CitationPipelineUpdate[] = [];
-    await runCitationPipeline(engine, doc, 'd1', {
+    await runCitationPipeline(source, 'd1', {
       isCancelled: () => cancelled,
       onUpdate: (u) => {
         updates.push(u);

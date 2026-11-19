@@ -83,8 +83,7 @@ async fn get_daily_returns_latest_batch() {
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
             .build(),
-    ))
-    .unwrap();
+    ));
 
     let resp = server.get("/api/daily").await;
     assert_eq!(resp.status_code(), 200);
@@ -111,8 +110,7 @@ async fn get_daily_empty_state_is_200_with_null_date() {
         App::builder(pool, dir.path().to_path_buf())
             .daily(daily)
             .build(),
-    ))
-    .unwrap();
+    ));
     let resp = server.get("/api/daily").await;
     assert_eq!(resp.status_code(), 200);
     let v: Value = resp.json();
@@ -123,7 +121,7 @@ async fn get_daily_empty_state_is_200_with_null_date() {
 #[tokio::test]
 async fn daily_routes_503_when_unconfigured() {
     let (dir, pool) = support::temp_pool().await;
-    let server = TestServer::new(support::router(pool, dir.path().to_path_buf())).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().to_path_buf()));
     assert_eq!(server.get("/api/daily").await.status_code(), 503);
     assert_eq!(server.post("/api/daily/run").await.status_code(), 503);
 }
@@ -157,7 +155,7 @@ async fn post_run_starts_then_conflicts_while_running() {
         .daily(daily)
         .build();
     let tasks = app.tasks().clone();
-    let server = TestServer::new(xuewen::web::router(app)).unwrap();
+    let server = TestServer::new(xuewen::web::router(app));
 
     assert_eq!(server.post("/api/daily/run").await.status_code(), 202);
     assert_eq!(server.post("/api/daily/run").await.status_code(), 409);

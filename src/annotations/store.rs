@@ -7,11 +7,18 @@ use sqlx::SqlitePool;
 
 use super::{Annotation, NewAnnotation};
 
-const COLUMNS: &str = "paper_id, id, page_index, kind, color, quoted_text, note, payload, \
-                       created_at, updated_at";
+macro_rules! columns {
+    () => {
+        "paper_id, id, page_index, kind, color, quoted_text, note, payload, created_at, updated_at"
+    };
+}
 /// Reading order: down the document, then oldest-first within a page. `id`
 /// only breaks ties so the order is total and stable across queries.
-const ORDER: &str = "ORDER BY page_index, created_at, id";
+macro_rules! order {
+    () => {
+        "ORDER BY page_index, created_at, id"
+    };
+}
 
 /// The row as stored. `payload` is TEXT here and decoded in `into_domain` —
 /// the same shape as `citation_parses.parsed` and `paper_summaries.summary`,
@@ -62,8 +69,11 @@ impl AnnotationRow {
 
 /// A paper's annotations in reading order.
 pub(crate) async fn list_for_paper(pool: &SqlitePool, paper_id: &str) -> Result<Vec<Annotation>> {
-    let rows = sqlx::query_as::<_, AnnotationRow>(&format!(
-        "SELECT {COLUMNS} FROM annotations WHERE paper_id = ? {ORDER}"
+    let rows = sqlx::query_as::<_, AnnotationRow>(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM annotations WHERE paper_id = ? ",
+        order!()
     ))
     .bind(paper_id)
     .fetch_all(pool)
@@ -83,7 +93,7 @@ pub(crate) async fn upsert(
     new: &NewAnnotation,
     now: &str,
 ) -> Result<Annotation> {
-    let row = sqlx::query_as::<_, AnnotationRow>(&format!(
+    let row = sqlx::query_as::<_, AnnotationRow>(concat!(
         "INSERT INTO annotations \
          (paper_id, id, page_index, kind, color, quoted_text, note, payload, created_at, updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -91,7 +101,8 @@ pub(crate) async fn upsert(
              page_index = excluded.page_index, kind = excluded.kind, color = excluded.color, \
              quoted_text = excluded.quoted_text, note = excluded.note, \
              payload = excluded.payload, updated_at = excluded.updated_at \
-         RETURNING {COLUMNS}"
+         RETURNING ",
+        columns!()
     ))
     .bind(paper_id)
     .bind(id)
@@ -146,8 +157,9 @@ pub(crate) async fn delete_all_for_paper(pool: &SqlitePool, paper_id: &str) -> R
 /// The text the `notes` search field indexes for one paper: every non-empty
 /// note, in reading order, newline-joined. Empty when the paper has none.
 pub(crate) async fn notes_blob(pool: &SqlitePool, paper_id: &str) -> Result<String> {
-    let notes: Vec<String> = sqlx::query_scalar(&format!(
-        "SELECT note FROM annotations WHERE paper_id = ? AND note IS NOT NULL AND note <> '' {ORDER}"
+    let notes: Vec<String> = sqlx::query_scalar(concat!(
+        "SELECT note FROM annotations WHERE paper_id = ? AND note IS NOT NULL AND note <> '' ",
+        order!()
     ))
     .bind(paper_id)
     .fetch_all(pool)
@@ -160,7 +172,7 @@ pub(crate) async fn notes_blob(pool: &SqlitePool, paper_id: &str) -> Result<Stri
 /// are absent from the map (the caller treats a miss as the empty blob).
 pub(crate) async fn notes_by_paper(pool: &SqlitePool) -> Result<HashMap<String, String>> {
     // Ordered by paper first so each group arrives contiguously, then by the
-    // same reading order `ORDER` spells out for the single-paper query.
+    // same reading order `order!` spells out for the single-paper query.
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT paper_id, note FROM annotations \
          WHERE note IS NOT NULL AND note <> '' ORDER BY paper_id, page_index, created_at, id",

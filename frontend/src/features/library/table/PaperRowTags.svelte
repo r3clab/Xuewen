@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Bookmark } from 'lucide-svelte';
+  import { Bookmark } from '@lucide/svelte';
   import { filters } from '$features/library/search/state.svelte';
   import { isPrefixMatch } from '$features/library/organization/tagTree';
   import type { PaperSummary } from '$shared/api/generated/PaperSummary';

@@ -1,7 +1,7 @@
 <script lang="ts">
   // The one loading indicator: icon + label, announced as a status region.
   // Callers own the surrounding layout (padding, centering).
-  import { Loader } from 'lucide-svelte';
+  import { Loader } from '@lucide/svelte';
 
   let { label = 'Loading…', class: cls = '' }: { label?: string; class?: string } = $props();
 </script>

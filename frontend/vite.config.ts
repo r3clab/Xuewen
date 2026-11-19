@@ -11,12 +11,14 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    // The only chunk over the default 500 kB is @embedpdf's PDFium worker
-    // engine (~690 kB), which runs off the main thread and loads lazily with
-    // the reader — not on the initial library view. Raise the limit so that
-    // inherent-and-deferred chunk stops tripping the warning, while still
-    // catching a genuine regression above 700 kB.
-    chunkSizeWarningLimit: 700,
+    // The chunks over the default 500 kB are all @embedpdf's, none on the
+    // initial library view: the viewer (~815 kB), which loads lazily with the
+    // reader, and two engine fallbacks of ~1.65 MB each that this app never
+    // fetches — PDFium in the main thread, for a page with no Worker, and the
+    // worker's source, for a worker that has to start from a blob: URL. The
+    // engine imports both dynamically, so the bundler emits them regardless.
+    // The limit sits just above them, still catching a genuine regression.
+    chunkSizeWarningLimit: 1700,
   },
   server: {
     proxy: {

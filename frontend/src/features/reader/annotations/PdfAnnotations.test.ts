@@ -1,58 +1,32 @@
 import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PdfAnnotationSubtype } from '@embedpdf/models';
 
-const scroll = { scrollToPage: vi.fn() };
-const annotation = {
-  selectAnnotation: vi.fn(),
-  deleteAnnotation: vi.fn(),
-  getAnnotationById: vi.fn(() => undefined as unknown),
-};
+const PAGE = { index: 0, ref: { kind: 'objectNumber', objectNumber: 3 }, size: { width: 612, height: 792 } } as const;
 
-/// Enough of the export plumbing for the button to run end to end: a throwaway
-/// document that opens, reports its own marks loaded, and saves four bytes.
-const exportScope = {
-  importAnnotations: vi.fn(),
-  commit: vi.fn(() => ({ toPromise: async () => true })),
-  onAnnotationEvent: vi.fn((h: (e: { type: string }) => void) => {
-    loadedHandler = h;
-    return () => {};
-  }),
-};
-let loadedHandler: ((e: { type: string }) => void) | null = null;
-const openTask = {
-  toPromise: async () => ({
-    documentId: 'export:p1',
-    task: {
-      toPromise: async () => {
-        loadedHandler?.({ type: 'loaded' });
-        return { id: 'export:p1' };
-      },
-    },
-  }),
-};
-const documents = {
-  openDocumentUrl: vi.fn(() => openTask),
-  closeDocument: vi.fn(),
-};
-const saveAsCopy = vi.fn(() => ({ toPromise: async () => new Uint8Array([1, 2, 3, 4]).buffer }));
+const { stage, annotation, documents, exportScope } = vi.hoisted(() => ({
+  stage: { goToPage: vi.fn() },
+  annotation: {
+    list: vi.fn((): readonly { nm: string; ref: object }[] => []),
+    delete: vi.fn(async (_ref: object) => {}),
+    selection: { select: vi.fn() },
+  },
+  /// Enough of the export plumbing for the button to run end to end: a
+  /// throwaway document that opens, takes the marks, and downloads four bytes.
+  documents: {
+    open: vi.fn(async (_input: object, _options: object) => ({})),
+    close: vi.fn(async (_id: string) => {}),
+    listPages: vi.fn((_id: string) => [] as readonly object[]),
+    download: vi.fn(async (_id: string) => new Uint8Array([1, 2, 3, 4])),
+  },
+  exportScope: { import: vi.fn(async () => ({})), create: vi.fn(async () => ({})) },
+}));
 
-vi.mock('@embedpdf/plugin-scroll/svelte', () => ({
-  useScroll: () => ({ state: { currentPage: 1, totalPages: 9 }, provides: scroll }),
-}));
-vi.mock('@embedpdf/plugin-annotation/svelte', () => ({
-  useAnnotation: () => ({ provides: annotation, state: {} }),
-  useAnnotationCapability: () => ({
-    provides: { forDocument: () => exportScope },
-    isLoading: false,
-  }),
-}));
-vi.mock('@embedpdf/plugin-document-manager/svelte', () => ({
-  useDocumentManagerCapability: () => ({ provides: documents, isLoading: false }),
-}));
-vi.mock('@embedpdf/core/svelte', () => ({
-  useRegistry: () => ({ registry: { getEngine: () => ({ saveAsCopy }) } }),
+vi.mock('@embedpdf/svelte/stage', () => ({ useStage: () => stage }));
+vi.mock('@embedpdf/svelte/annotation', () => ({ AnnotationToken: 'annotation', useAnnotation: () => annotation }));
+vi.mock('@embedpdf/svelte/runtime', () => ({
+  useDocuments: () => documents,
+  useKernel: () => ({ tryCapability: (_token: string, _id: string) => exportScope }),
 }));
 
 const deleteAnnotation = vi.fn(async (_paperId: string, _id: string) => {});
@@ -77,7 +51,10 @@ import { viewer } from '$features/reader/tabs/state.svelte';
 import { toasts } from '$shared/ui/toasts.svelte';
 import type { Annotation } from '$shared/api/generated/Annotation';
 
+/// A row as the 2.x reader saved it, which is the shape that needs no engine
+/// read to build: the export redraws it with a create.
 function row(over: Partial<Annotation> & { id: string }): Annotation {
+  const rect = { origin: { x: 0, y: 0 }, size: { width: 10, height: 10 } };
   return {
     paper_id: 'p1',
     kind: 'highlight',
@@ -85,14 +62,7 @@ function row(over: Partial<Annotation> & { id: string }): Annotation {
     color: 'amber',
     quoted_text: null,
     note: null,
-    payload: {
-      annotation: {
-        id: over.id,
-        type: PdfAnnotationSubtype.HIGHLIGHT,
-        pageIndex: over.page_index ?? 0,
-        rect: { origin: { x: 0, y: 0 }, size: { width: 10, height: 10 } },
-      },
-    },
+    payload: { annotation: { id: over.id, type: 9, pageIndex: over.page_index ?? 0, rect, segmentRects: [rect] } },
     created_at: '2026-08-14T00:00:00Z',
     updated_at: '2026-08-14T00:00:00Z',
     ...over,
@@ -109,8 +79,8 @@ beforeEach(() => {
   annotations.byPaper = {};
   annotations.loaded = {};
   annotations.error = {};
-  annotation.getAnnotationById.mockReturnValue(undefined);
-  loadedHandler = null;
+  annotation.list.mockReturnValue([]);
+  documents.listPages.mockReturnValue([PAGE]);
   viewer.tabs = [{ id: 'p1', title: 'Attention Is All You Need', name: null }];
   toasts.items = [];
 });
@@ -161,19 +131,30 @@ describe('the annotations panel', () => {
   });
 
   it('jumps to the page and selects the mark when a row is clicked', async () => {
+    const ref = { kind: 'objectNumber', objectNumber: 41 };
+    annotation.list.mockReturnValue([{ nm: 'other', ref: {} }, { nm: 'a', ref }]);
     seed(row({ id: 'a', page_index: 6, quoted_text: 'there' }));
     render(PdfAnnotations, { props });
     await userEvent.click(screen.getByText('there'));
-    expect(scroll.scrollToPage).toHaveBeenCalledWith({ pageNumber: 7 });
-    expect(annotation.selectAnnotation).toHaveBeenCalledWith(6, 'a');
+    expect(stage.goToPage).toHaveBeenCalledWith(6);
+    expect(annotation.selection.select).toHaveBeenCalledWith([ref]);
+  });
+
+  it('still jumps when the mark never reached the document', async () => {
+    seed(row({ id: 'a', page_index: 2, quoted_text: 'orphan' }));
+    render(PdfAnnotations, { props });
+    await userEvent.click(screen.getByText('orphan'));
+    expect(stage.goToPage).toHaveBeenCalledWith(2);
+    expect(annotation.selection.select).not.toHaveBeenCalled();
   });
 
   it('deletes through the plugin when the mark is drawn, letting sync remove the row', async () => {
+    const ref = { kind: 'objectNumber', objectNumber: 41 };
+    annotation.list.mockReturnValue([{ nm: 'a', ref }]);
     seed(row({ id: 'a', page_index: 2, quoted_text: 'drawn' }));
-    annotation.getAnnotationById.mockReturnValue({ id: 'a' });
     render(PdfAnnotations, { props });
     await userEvent.click(screen.getByRole('button', { name: /^delete highlight/i }));
-    expect(annotation.deleteAnnotation).toHaveBeenCalledWith(2, 'a');
+    expect(annotation.delete).toHaveBeenCalledWith(ref);
     // Deleting twice — once here and once again through the store — would
     // 404 the second call and log an error the reader can do nothing about.
     expect(deleteAnnotation).not.toHaveBeenCalled();
@@ -183,7 +164,7 @@ describe('the annotations panel', () => {
     seed(row({ id: 'a', quoted_text: 'orphan' }));
     render(PdfAnnotations, { props });
     await userEvent.click(screen.getByRole('button', { name: /^delete highlight/i }));
-    expect(annotation.deleteAnnotation).not.toHaveBeenCalled();
+    expect(annotation.delete).not.toHaveBeenCalled();
     expect(deleteAnnotation).toHaveBeenCalledWith('p1', 'a');
     expect(screen.queryByText('orphan')).toBeNull();
   });
@@ -204,27 +185,25 @@ describe('exporting an annotated copy', () => {
     expect(downloadBlob.mock.calls[0][1]).toBe('Attention Is All You Need (annotated).pdf');
     // A throwaway document, never the tab's own: the library file has to stay
     // byte-identical, so the marks are written into a second copy.
-    expect(documents.openDocumentUrl).toHaveBeenCalledWith(
-      expect.objectContaining({ documentId: 'export:p1', autoActivate: false }),
+    expect(documents.open).toHaveBeenCalledWith(
+      { kind: 'url', url: '/papers/p1.pdf', id: 'export:p1' },
+      { activate: false },
     );
-    expect(exportScope.importAnnotations).toHaveBeenCalledWith([
-      expect.objectContaining({ annotation: expect.objectContaining({ id: 'a' }) }),
-    ]);
-    expect(documents.closeDocument).toHaveBeenCalledWith('export:p1');
+    expect(documents.listPages).toHaveBeenCalledWith('export:p1');
+    expect(exportScope.create).toHaveBeenCalledWith(PAGE.ref, expect.objectContaining({ subtype: 'highlight', nm: 'a' }));
+    expect(documents.download).toHaveBeenCalledWith('export:p1');
+    expect(documents.close).toHaveBeenCalledWith('export:p1');
   });
 
   it('says so and recovers when the engine cannot save', async () => {
-    saveAsCopy.mockReturnValueOnce({
-      toPromise: async () => {
-        throw { code: 3, message: 'saving failed' };
-      },
-    });
+    documents.download.mockRejectedValueOnce(new Error('saving failed'));
     seed(row({ id: 'a', quoted_text: 'q' }));
     render(PdfAnnotations, { props });
     const button = screen.getByRole('button', { name: /export annotated pdf/i });
     await userEvent.click(button);
     await waitFor(() => expect(toasts.items.map((t) => t.message)).toContain('saving failed'));
     expect(downloadBlob).not.toHaveBeenCalled();
+    expect(documents.close).toHaveBeenCalledWith('export:p1');
     // Back to a button the reader can press again, not stuck on "Exporting…".
     await waitFor(() => expect(button).toBeEnabled());
   });

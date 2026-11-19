@@ -11,7 +11,7 @@ import {
 } from './zenToolbar';
 
 /// Shared zen auto-hide for the reader's floating pills (center toolbar +
-/// top-right quick actions). One instance per PdfPages tab: it owns the DOM
+/// top-right quick actions). One instance per PdfDocument tab: it owns the DOM
 /// signals and the hide timer; the visibility decision stays in the pure
 /// pdf/zenToolbar.ts. Both pills bind the same handlers, so hovering or
 /// focusing either one holds both visible and they fade together.

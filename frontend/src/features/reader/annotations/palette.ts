@@ -13,7 +13,7 @@ import type { AnnotationColor } from '$shared/api/generated/AnnotationColor';
 
 interface Swatch {
   label: string;
-  /// The hex handed to the annotation's `color`/`strokeColor`.
+  /// The hex handed to the annotation's `color`.
   hex: string;
 }
 

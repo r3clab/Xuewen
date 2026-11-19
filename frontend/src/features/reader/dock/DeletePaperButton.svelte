@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Trash2 } from 'lucide-svelte';
+  import { Trash } from '@lucide/svelte';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
   import { removePaper } from '$app/actions';
 
@@ -37,6 +37,6 @@
     onclick={() => (confirming = true)}
     class="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-600/10 dark:border-stone-700 dark:text-red-400"
   >
-    <Trash2 size={13} /> Delete paper
+    <Trash size={13} /> Delete paper
   </button>
 {/if}

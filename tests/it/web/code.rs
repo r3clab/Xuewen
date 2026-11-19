@@ -19,7 +19,7 @@ async fn code_endpoints_gate_validate_and_report() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
 
     // 503 without the agent service.
-    let plain = TestServer::new(support::router(pool.clone(), root.clone())).unwrap();
+    let plain = TestServer::new(support::router(pool.clone(), root.clone()));
     plain
         .put("/api/papers/p1/code")
         .json(&json!({"repo_url": "https://github.com/x/y"}))
@@ -33,7 +33,7 @@ async fn code_endpoints_gate_validate_and_report() {
         .clone_allowed_hosts(vec!["invalid.example".to_string()])
         .build();
     let tasks = app.tasks().clone();
-    let server = TestServer::new(xuewen::web::router(app)).unwrap();
+    let server = TestServer::new(xuewen::web::router(app));
 
     // Nothing attached yet.
     let v: serde_json::Value = server.get("/api/papers/p1/code").await.json();

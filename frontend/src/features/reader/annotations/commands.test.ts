@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ANNOTATION_HISTORY_TOPIC,
   annotationSelectionActive,
   clearAnnotationSelection,
   createAnnotationCommands,
@@ -14,42 +13,46 @@ import {
   type MarkScope,
 } from './commands';
 
-function mark(id: string, pageIndex = 0): { object: { id: string; pageIndex: number } } {
-  return { object: { id, pageIndex } };
-}
-
-/// The two plugin scopes, faked. `throws` reproduces what both plugins really
-/// do when asked about a document they have not seen yet — the case the
-/// commands have to survive rather than propagate.
+/// The two capabilities, faked. `notReady` makes them null, as the kernel
+/// answers for a document still opening; `refuses` makes every call throw, as
+/// a capability does once its document has closed under it.
 function harness() {
-  let selection: ReturnType<typeof mark>[] = [];
-  let topics: Record<string, { canUndo: boolean; canRedo: boolean } | undefined> = {};
-  let throws = false;
+  let selected: string[] = [];
+  let canUndo = false;
+  let canRedo = false;
+  let notReady = false;
+  let refuses = false;
   let activeId: string | null = 'p1';
 
   function guard(): void {
-    if (throws) throw new Error('Annotation state not found for document: p1');
+    if (refuses) throw new Error('not-ready');
   }
 
   const marks: MarkScope = {
-    getSelectedAnnotations: vi.fn(() => {
-      guard();
-      return selection;
-    }),
-    deleteAnnotations: vi.fn(() => guard()),
-    deselectAnnotation: vi.fn(() => guard()),
+    selection: {
+      getSelected: vi.fn(() => {
+        guard();
+        return selected;
+      }),
+      clear: vi.fn(() => guard()),
+      delete: vi.fn(async () => guard()),
+    },
   };
   const history: HistoryScopeLike = {
     undo: vi.fn(() => guard()),
     redo: vi.fn(() => guard()),
-    getHistoryState: vi.fn(() => {
+    canUndo: vi.fn(() => {
       guard();
-      return { topics };
+      return canUndo;
+    }),
+    canRedo: vi.fn(() => {
+      guard();
+      return canRedo;
     }),
   };
 
-  const forMarks = vi.fn(() => marks);
-  const forHistory = vi.fn(() => history);
+  const forMarks = vi.fn(() => (notReady ? null : marks));
+  const forHistory = vi.fn(() => (notReady ? null : history));
   const commands = createAnnotationCommands({
     marks: forMarks,
     history: forHistory,
@@ -61,39 +64,30 @@ function harness() {
     marks,
     history,
     forMarks,
-    forHistory,
-    select: (...ids: string[]) => (selection = ids.map((id) => mark(id))),
-    stack: (flags: { canUndo?: boolean; canRedo?: boolean }) =>
-      (topics = {
-        [ANNOTATION_HISTORY_TOPIC]: {
-          canUndo: false,
-          canRedo: false,
-          ...flags,
-        },
-      }),
-    otherTopicStack: () => (topics = { redaction: { canUndo: true, canRedo: true } }),
-    unknownDocument: () => (throws = true),
+    select: (...ids: string[]) => (selected = ids),
+    stack: (flags: { canUndo?: boolean; canRedo?: boolean }) => {
+      canUndo = flags.canUndo ?? false;
+      canRedo = flags.canRedo ?? false;
+    },
+    notReady: () => (notReady = true),
+    refuses: () => (refuses = true),
     activeTab: (id: string | null) => (activeId = id),
   };
 }
 
 describe('deleting the selected mark', () => {
-  it('deletes every selected mark in one call, and says it acted', () => {
+  it('deletes the whole selection in one call, and says it acted', () => {
     const h = harness();
     h.select('a1', 'a2');
     expect(h.commands.deleteSelection()).toBe(true);
-    // One batched call, not one per mark: a multi-selection is deleted whole.
-    expect(h.marks.deleteAnnotations).toHaveBeenCalledWith([
-      { pageIndex: 0, id: 'a1' },
-      { pageIndex: 0, id: 'a2' },
-    ]);
+    expect(h.marks.selection.delete).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing with no mark selected', () => {
     const h = harness();
     expect(h.commands.hasSelection()).toBe(false);
     expect(h.commands.deleteSelection()).toBe(false);
-    expect(h.marks.deleteAnnotations).not.toHaveBeenCalled();
+    expect(h.marks.selection.delete).not.toHaveBeenCalled();
   });
 
   it('does nothing on the library view, where there is no document at all', () => {
@@ -102,7 +96,7 @@ describe('deleting the selected mark', () => {
     h.activeTab(null);
     expect(h.commands.hasSelection()).toBe(false);
     expect(h.commands.deleteSelection()).toBe(false);
-    expect(h.marks.deleteAnnotations).not.toHaveBeenCalled();
+    expect(h.marks.selection.delete).not.toHaveBeenCalled();
   });
 
   it('acts on the tab the keystroke belongs to, read at call time', () => {
@@ -117,6 +111,14 @@ describe('deleting the selected mark', () => {
     expect(h.forMarks).toHaveBeenNthCalledWith(1, 'p1');
     expect(h.forMarks).toHaveBeenNthCalledWith(2, 'p2');
   });
+
+  it('swallows a refused delete', async () => {
+    const h = harness();
+    h.select('a1');
+    vi.mocked(h.marks.selection.delete).mockRejectedValueOnce(new Error('permission-denied'));
+    expect(h.commands.deleteSelection()).toBe(true);
+    await Promise.resolve();
+  });
 });
 
 describe('clearing the selection', () => {
@@ -124,25 +126,24 @@ describe('clearing the selection', () => {
     const h = harness();
     h.select('a1');
     expect(h.commands.clearSelection()).toBe(true);
-    expect(h.marks.deselectAnnotation).toHaveBeenCalled();
+    expect(h.marks.selection.clear).toHaveBeenCalled();
   });
 
   it('reports it did nothing when nothing is selected, so Esc falls through', () => {
     const h = harness();
     expect(h.commands.clearSelection()).toBe(false);
-    expect(h.marks.deselectAnnotation).not.toHaveBeenCalled();
+    expect(h.marks.selection.clear).not.toHaveBeenCalled();
   });
 });
 
 describe('undo and redo', () => {
-  it('drives the annotations topic only, never the global timeline', () => {
+  it('drives the document history', () => {
     const h = harness();
     h.stack({ canUndo: true, canRedo: true });
     expect(h.commands.undo()).toBe(true);
     expect(h.commands.redo()).toBe(true);
-    // An argument-less undo would take back the last action of any kind.
-    expect(h.history.undo).toHaveBeenCalledWith(ANNOTATION_HISTORY_TOPIC);
-    expect(h.history.redo).toHaveBeenCalledWith(ANNOTATION_HISTORY_TOPIC);
+    expect(h.history.undo).toHaveBeenCalledTimes(1);
+    expect(h.history.redo).toHaveBeenCalledTimes(1);
   });
 
   it('stands aside on an empty stack', () => {
@@ -154,13 +155,6 @@ describe('undo and redo', () => {
     expect(h.history.redo).not.toHaveBeenCalled();
   });
 
-  it('ignores a stack belonging to some other topic', () => {
-    const h = harness();
-    h.otherTopicStack();
-    expect(h.commands.undo()).toBe(false);
-    expect(h.history.undo).not.toHaveBeenCalled();
-  });
-
   it('does nothing on the library view', () => {
     const h = harness();
     h.stack({ canUndo: true });
@@ -169,15 +163,25 @@ describe('undo and redo', () => {
   });
 });
 
-describe('a tab whose document the plugins have not seen yet', () => {
-  // Both plugins throw for an unknown document id, and the active tab is in
-  // that state between opening and loading. The keystroke must be a no-op —
-  // an exception here would abort the rest of handleKeydown.
-  it('answers false everywhere instead of throwing', () => {
+describe('a tab whose document is not ready', () => {
+  it('answers false everywhere while the capabilities are not there yet', () => {
     const h = harness();
     h.select('a1');
     h.stack({ canUndo: true, canRedo: true });
-    h.unknownDocument();
+    h.notReady();
+    expect(h.commands.hasSelection()).toBe(false);
+    expect(h.commands.deleteSelection()).toBe(false);
+    expect(h.commands.clearSelection()).toBe(false);
+    expect(h.commands.undo()).toBe(false);
+    expect(h.commands.redo()).toBe(false);
+  });
+
+  // An exception here would abort the rest of handleKeydown.
+  it('answers false everywhere instead of throwing once they refuse', () => {
+    const h = harness();
+    h.select('a1');
+    h.stack({ canUndo: true, canRedo: true });
+    h.refuses();
     expect(() => h.commands.hasSelection()).not.toThrow();
     expect(h.commands.hasSelection()).toBe(false);
     expect(h.commands.deleteSelection()).toBe(false);
@@ -223,8 +227,7 @@ describe('the module-level registration', () => {
     expect(calls).toHaveLength(4);
   });
 
-  // PdfDeck is remounted during startup (see documentsToAdopt in pdf/deck.ts).
-  // If the replacement ever registers before the old instance tears down, the
+  // If a replacement ever registers before the old instance tears down, the
   // old one's cleanup must not take the live commands with it.
   it('unregisters by identity, so a replacement survives the old teardown', () => {
     const replacement: AnnotationCommands = {

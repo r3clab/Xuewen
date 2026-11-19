@@ -1,12 +1,21 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::Path;
 
 /// SHA-256 of a file's bytes (streamed), lowercase hex.
 pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 

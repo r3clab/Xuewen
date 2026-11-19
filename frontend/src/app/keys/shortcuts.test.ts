@@ -336,6 +336,7 @@ describe('cmd+c in the reader', () => {
     copied = 0;
     hasSel = true;
     registerPdfCopy({
+      attach: () => () => {},
       hasSelection: () => hasSel,
       fetchPending: () => false,
       copySelection: async () => {

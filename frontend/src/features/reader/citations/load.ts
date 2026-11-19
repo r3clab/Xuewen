@@ -1,4 +1,5 @@
-import { PdfActionType, PdfZoomMode, type PdfDocumentObject, type PdfLinkTarget, type PdfPageObject } from '@embedpdf/models';
+import type { PdfLinkTarget } from '@embedpdf/svelte/link';
+import type { PageRef } from '@embedpdf/svelte/runtime';
 import {
   buildCitationData, columnOfX, findReferencesStart,
   type CitationData, type GotoLink, type PageText, type RefAnchor, type TextRun, type UrlLink,
@@ -8,80 +9,52 @@ import {
   type AyCandidate, type CmLine,
 } from './text';
 
-// A structural subset of @embedpdf/models' PdfAnnotationObject: just the
-// fields this module reads off a link annotation. The real PdfAnnotationObject
-// is a union (link/text/popup/stamp/...) whose PdfAnnotationObjectBase
-// requires bookkeeping fields (`id`, etc.) this module never touches, so
-// using it verbatim as EngineLike's return type made the fake test engine
-// (which supplies only type/rect/target) fail `npm run check` with
-// "Property 'id' is missing". `target`'s shape, however, is the real
-// PdfLinkTarget union (destination vs. action), so destOf/uriOf below are
-// checked by the compiler against the real discriminated union.
-export interface EngineAnnotation {
-  type: number;
-  rect: { origin: { x: number; y: number }; size: { width: number; height: number } };
-  target?: PdfLinkTarget;
+/// One link annotation, where it is on its page. Every position here — the
+/// rect, a destination's coordinates, the text runs — is in page space,
+/// points from the page's top-left with y going down, so they line up with
+/// one another and with the overlay as they are.
+export interface CitationLink {
+  pageIndex: number;
+  rect: { x: number; y: number; width: number; height: number };
+  target: PdfLinkTarget | null;
 }
 
-export interface EngineLike {
-  getPageAnnotations(doc: PdfDocumentObject, page: PdfPageObject): { toPromise(): Promise<EngineAnnotation[]> };
-  getPageTextRuns(
-    doc: PdfDocumentObject,
-    page: PdfPageObject,
-  ): { toPromise(): Promise<{ runs: { text: string; rect: { origin: { x: number; y: number }; size: { width: number; height: number } } }[] }> };
+/// What the pipeline reads from an open document, narrowed so it can be fed
+/// without a PDF engine.
+export interface CitationSource {
+  /// Every page's size, in order.
+  pages: readonly { width: number; height: number }[];
+  links(): readonly CitationLink[];
+  readRuns(pageIndex: number): Promise<TextRun[]>;
+  /// -1 for a page the document doesn't have.
+  pageIndexOf(page: PageRef): number;
 }
-
-const LINK = 2; // PdfAnnotationSubtype.LINK
-
-// Coordinate spaces (verified live against real PDFs):
-//  - Annotation rects and text-run rects come back in TOP-LEFT device space
-//    (y grows downward) — the same space the rendered page + CSS overlay use —
-//    so they pass through unchanged (a flip mirrored the hover boxes vertically).
-//  - GoTo destination `y`, however, is left in PDF USER space (BOTTOM-LEFT origin,
-//    y grows upward), so it must be flipped to top-left before it can be lined up
-//    with the reference text runs — otherwise a marker maps to the mirror-image
-//    reference (e.g. the popover showed the wrong entry).
 
 function destOf(
-  target: PdfLinkTarget | undefined,
+  target: PdfLinkTarget | null,
+  pageIndexOf: (page: PageRef) => number,
 ): { pageIndex: number; x: number | null; y: number | null } | null {
-  if (!target) return null;
-  const dest =
-    target.type === 'destination'
-      ? target.destination
-      : target.action.type === PdfActionType.Goto || target.action.type === PdfActionType.RemoteGoto
-        ? target.action.destination
-        : null;
-  if (!dest) return null;
-  const zoom = dest.zoom;
-  if (zoom?.mode === PdfZoomMode.XYZ) {
-    return { pageIndex: dest.pageIndex, x: zoom.params.x, y: zoom.params.y };
-  }
-  // /FitH-family carries its `top` only in the raw view array.
-  if (
-    (zoom?.mode === PdfZoomMode.FitHorizontal || zoom?.mode === PdfZoomMode.FitBoundingBoxHorizontal) &&
-    typeof dest.view?.[0] === 'number'
-  ) {
-    return { pageIndex: dest.pageIndex, x: null, y: dest.view[0] };
-  }
-  // All other / unhandled zoom modes: no usable vertical position here —
-  // anchor the page TOP. (y:null must never go through the bottom-left→
-  // top-left flip, which would turn "unknown" into "page bottom" and
-  // mis-map every marker on that page.)
-  return { pageIndex: dest.pageIndex, x: null, y: null };
+  if (target?.kind !== 'goto') return null;
+  const dest = target.destination;
+  const pageIndex = pageIndexOf(dest.page);
+  if (pageIndex < 0) return null;
+  if (dest.kind === 'xyz') return { pageIndex, x: dest.x, y: dest.y };
+  if (dest.kind === 'fitH' || dest.kind === 'fitBH') return { pageIndex, x: null, y: dest.y };
+  // All other kinds: no usable vertical position here — anchor the page top.
+  return { pageIndex, x: null, y: null };
 }
 
-function uriOf(target: PdfLinkTarget | undefined): string | undefined {
-  return target?.type === 'action' && target.action.type === PdfActionType.URI ? target.action.uri : undefined;
+function uriOf(target: PdfLinkTarget | null): string | undefined {
+  return target?.kind === 'uri' ? target.uri : undefined;
 }
 
 export interface CitationLoad extends CitationData {
   /** Author-year marker candidates awaiting entry resolution (fallback mode;
-   *  PdfPages resolves them once the structured parse arrives). */
+   *  the pipeline resolves them once the structured parse arrives). */
   pendingAuthorYear?: AyCandidate[];
 }
 
-export async function loadCitations(engine: EngineLike, doc: PdfDocumentObject): Promise<CitationLoad> {
+export async function loadCitations(source: CitationSource): Promise<CitationLoad> {
   // Pass 1 — link annotations from every page (cheap). These give the citation
   // markers + their destinations, plus any URL links (kept per page so a
   // reference's DOI/URL can be attached below).
@@ -98,53 +71,29 @@ export async function loadCitations(engine: EngineLike, doc: PdfDocumentObject):
   const readPage = (idx: number): Promise<PageText | null> => {
     const hit = pageCache.get(idx);
     if (hit) return hit;
-    const page = doc.pages[idx];
-    const read = page
-      ? engine
-          .getPageTextRuns(doc, page)
-          .toPromise()
-          .then((textRuns): PageText => {
-            const runs: TextRun[] = textRuns.runs.map((r) => ({
-              text: r.text,
-              x: r.rect.origin.x,
-              y: r.rect.origin.y,
-              width: r.rect.size.width,
-              height: r.rect.size.height,
-            }));
-            return {
-              pageIndex: idx, width: page.size.width, height: page.size.height,
-              runs, urlLinks: urlLinksByPage.get(idx) ?? [],
-            };
-          })
+    const size = source.pages[idx];
+    const read = size
+      ? source.readRuns(idx).then(
+          (runs): PageText => ({
+            pageIndex: idx, width: size.width, height: size.height,
+            runs, urlLinks: urlLinksByPage.get(idx) ?? [],
+          }),
+        )
       : Promise.resolve(null);
     pageCache.set(idx, read);
     return read;
   };
-  // Pages are independent — fetch all annotation lists concurrently instead
-  // of paying one serialized worker round-trip per page.
-  const annosByPage = await Promise.all(
-    doc.pages.map((page) => engine.getPageAnnotations(doc, page).toPromise()),
-  );
-  for (const [pageIdx, annos] of annosByPage.entries()) {
-    const page = doc.pages[pageIdx];
-    for (const a of annos) {
-      if (a.type !== LINK) continue;
-      const rect = { x: a.rect.origin.x, y: a.rect.origin.y, width: a.rect.size.width, height: a.rect.size.height };
-      const url = uriOf(a.target);
-      if (url) {
-        const arr = urlLinksByPage.get(page.index) ?? [];
-        arr.push({ ...rect, url });
-        urlLinksByPage.set(page.index, arr);
-        continue;
-      }
-      const dest = destOf(a.target);
-      if (!dest) continue;
-      // Flip a KNOWN y from PDF bottom-left space into top-left space; an
-      // unknown y anchors the page top (see destOf).
-      const destPage = doc.pages[dest.pageIndex];
-      const destY = dest.y == null ? 0 : destPage ? destPage.size.height - dest.y : dest.y;
-      links.push({ pageIndex: page.index, ...rect, destPageIndex: dest.pageIndex, destY, destX: dest.x ?? 0 });
+  for (const link of source.links()) {
+    const url = uriOf(link.target);
+    if (url) {
+      const arr = urlLinksByPage.get(link.pageIndex) ?? [];
+      arr.push({ ...link.rect, url });
+      urlLinksByPage.set(link.pageIndex, arr);
+      continue;
     }
+    const dest = destOf(link.target, source.pageIndexOf);
+    if (!dest) continue;
+    links.push({ pageIndex: link.pageIndex, ...link.rect, destPageIndex: dest.pageIndex, destY: dest.y ?? 0, destX: dest.x ?? 0 });
   }
   if (links.length > 0) {
     // Pass 2 — the bibliography lives on the destination pages; ALSO read the
@@ -164,20 +113,20 @@ export async function loadCitations(engine: EngineLike, doc: PdfDocumentObject):
     }
   }
   // Hyperlink path yielded nothing usable — text-layer fallback.
-  return loadCitationsFromText(doc, readPage);
+  return loadCitationsFromText(source.pages.length, readPage);
 }
 
 // How many pages from the end to scan for the References heading.
 const MAX_HEADING_SCAN = 15;
 
 async function loadCitationsFromText(
-  doc: PdfDocumentObject,
+  pageCount: number,
   readPage: (idx: number) => Promise<PageText | null>,
 ): Promise<CitationLoad> {
   // Heading: scan from the last page backward (bibliographies live at the back).
   let refStart: RefAnchor | null = null;
-  const lowest = Math.max(0, doc.pages.length - MAX_HEADING_SCAN);
-  for (let i = doc.pages.length - 1; i >= lowest; i--) {
+  const lowest = Math.max(0, pageCount - MAX_HEADING_SCAN);
+  for (let i = pageCount - 1; i >= lowest; i--) {
     const p = await readPage(i);
     if (!p) continue;
     const found = findReferencesStart([p]);
@@ -187,7 +136,7 @@ async function loadCitationsFromText(
 
   // Entries: heading page through the last page.
   const refPages: PageText[] = [];
-  for (let i = refStart.pageIndex; i < doc.pages.length; i++) {
+  for (let i = refStart.pageIndex; i < pageCount; i++) {
     const p = await readPage(i);
     if (p) refPages.push(p);
   }

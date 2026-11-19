@@ -166,7 +166,7 @@ async fn upload_route_accepts_bodies_over_the_default_limit() {
     let app = xuewen::app::App::builder(pool, library)
         .ingest(ingest)
         .build();
-    let server = TestServer::new(xuewen::web::router(app)).unwrap();
+    let server = TestServer::new(xuewen::web::router(app));
 
     // Over axum's 2 MiB default: the upload limit must let it through to the
     // handler, which then rejects the bytes as not a PDF.

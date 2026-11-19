@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { ChevronDown, ChevronUp, X } from 'lucide-svelte';
-  import { useSearch } from '@embedpdf/plugin-search/svelte';
+  import { ChevronDown, ChevronUp, X } from '@lucide/svelte';
+  import { useSearch, useSearchState } from '@embedpdf/svelte/search';
   import { btn } from './pillStyles';
   import { setFind } from '$features/reader/state.svelte';
 
   let { documentId }: { documentId: string } = $props();
-  const search = useSearch(() => documentId);
+  const search = useSearch();
+  const found = useSearchState();
 
   let query = $state('');
   let inputEl: HTMLInputElement | undefined = $state();
@@ -16,28 +17,26 @@
     inputEl?.focus();
     return () => {
       clearTimeout(debounce);
-      search.provides?.stopSearch();
+      search.clear();
     };
   });
 
+  // A failed or refused search leaves the count at zero, which is all the
+  // bar has to say about it.
   function run(): void {
-    const scope = search.provides;
-    if (!scope) return;
-    const q = query.trim();
-    if (q) scope.searchAllPages(q);
-    else scope.stopSearch();
+    void search.search({ text: query.trim() }).catch(() => {});
   }
   function onInput(): void {
     clearTimeout(debounce);
     debounce = setTimeout(run, 250);
   }
 
-  const count = $derived(search.state.results.length);
+  const count = $derived(found.hitCount);
   function next(): void {
-    if (count) search.provides?.nextResult();
+    if (count) search.nextHit();
   }
   function prev(): void {
-    if (count) search.provides?.previousResult();
+    if (count) search.previousHit();
   }
   function close(): void {
     setFind(documentId, false);
@@ -83,7 +82,7 @@
     onkeydown={onKeydown}
   />
   <span class="min-w-12 text-center text-xs tabular-nums text-stone-500 dark:text-stone-400">
-    {query.trim() ? `${count ? search.state.activeResultIndex + 1 : 0} / ${count}` : ''}
+    {query.trim() ? `${count ? found.activeHitIndex + 1 : 0} / ${count}` : ''}
   </span>
   <button type="button" class={btn} aria-label="Previous match" disabled={!count} onclick={prev}>
     <ChevronUp size={16} />

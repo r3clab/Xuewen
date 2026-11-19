@@ -7,7 +7,7 @@ use axum_test::TestServer;
 async fn server_with_pdf(bytes: &[u8]) -> TestServer {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
     std::fs::write(root.join("missing.pdf"), bytes).unwrap();
-    TestServer::new(support::router(pool, root)).unwrap()
+    TestServer::new(support::router(pool, root))
 }
 
 fn real_pdf() -> Vec<u8> {
@@ -44,7 +44,7 @@ async fn a_rendered_page_is_cached_on_disk() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
     std::fs::write(root.join("missing.pdf"), real_pdf()).unwrap();
     let cached = root.join("preview-cache").join("p1").join("0.png");
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
 
     let first = server.get("/papers/p1/preview/0").await.as_bytes().to_vec();
     assert_eq!(std::fs::read(&cached).unwrap(), first);
@@ -125,7 +125,7 @@ async fn an_unknown_paper_is_not_found() {
 #[tokio::test]
 async fn a_missing_library_file_is_not_found() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
     server
         .get("/api/papers/p1/preview")
         .await

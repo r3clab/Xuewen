@@ -49,6 +49,13 @@ pkgs.rustPlatform.buildRustPackage {
       );
   };
   cargoLock.lockFile = ../../Cargo.lock;
+  # nixpkgs' cargoSetupHook makes zstd-sys and libsqlite3-sys link the
+  # system libraries through pkg-config instead of their vendored copies.
+  nativeBuildInputs = [ pkgs.pkg-config ];
+  buildInputs = [
+    pkgs.sqlite
+    pkgs.zstd
+  ];
   # rust-embed reads frontend/dist at compile time; build.rs would
   # write a placeholder if this were missing.
   preBuild = ''

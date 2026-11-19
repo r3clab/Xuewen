@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ZoomMode } from '@embedpdf/plugin-zoom';
+import { ZoomMode } from '@embedpdf/svelte/stage';
 import { formatScale, isActivePreset, ZOOM_PRESETS } from './zoomPresets';
 
 describe('formatScale', () => {

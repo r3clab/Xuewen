@@ -36,7 +36,7 @@ async fn lists_and_details_papers() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // List: JSON array of summaries, authors as an array, no abstract field.
     let resp = server.get("/api/papers").await;
@@ -104,7 +104,7 @@ async fn paper_detail_includes_summary_when_present() {
         .await
         .unwrap();
 
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Paper with a stored summary: the `summary` key is present with the
     // expected fields.
@@ -140,7 +140,7 @@ async fn streams_pdf_with_range_and_guards_paths() {
     std::fs::write(dir.path().join("outside.pdf"), b"secret").unwrap();
     papers::insert(&pool, &escape).await.unwrap();
 
-    let server = TestServer::new(support::router(pool, library.clone())).unwrap();
+    let server = TestServer::new(support::router(pool, library.clone()));
 
     // Full GET → 200, application/pdf.
     let resp = server.get("/papers/cccc3333/pdf").await;
@@ -179,7 +179,7 @@ async fn restores_a_deleted_paper() {
     papers::insert(&pool, &paper("aaaa1111", "First", PaperStatus::Resolved))
         .await
         .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     server
         .delete("/api/papers/aaaa1111")
@@ -231,7 +231,7 @@ async fn deletes_a_paper_softly() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Before: both listed.
     assert_eq!(
@@ -277,7 +277,7 @@ async fn trashed_paper_detail_export_and_annotations_stay_reachable() {
         .await
         .unwrap();
     trash::soft_delete(&pool, "aaaa1111").await.unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     server.get("/api/papers/aaaa1111").await.assert_status_ok();
     server
@@ -317,8 +317,7 @@ async fn imports_a_pdf_dedups_and_rejects_non_pdf() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     // A real one-page PDF whose header has no DOI/arXiv id.
     let pdf_path = dir.path().join("paper.pdf");
@@ -391,8 +390,7 @@ async fn import_sanitizes_traversal_filenames() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     let pdf_path = dir.path().join("p.pdf");
     support::write_test_pdf(&pdf_path, &["Traversal Test Paper"]);
@@ -414,7 +412,7 @@ async fn import_sanitizes_traversal_filenames() {
 async fn import_returns_503_when_not_configured() {
     let (dir, pool) = support::temp_pool().await;
     // The read-only router (no ingest bundle) must refuse uploads.
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
     let form = MultipartForm::new().add_part(
         "file",
         Part::bytes(b"%PDF-1.4\n".to_vec()).file_name("x.pdf"),
@@ -451,8 +449,7 @@ async fn import_reports_in_trash_for_deleted_paper() {
         App::builder(pool.clone(), library.clone())
             .ingest(ingest)
             .build(),
-    ))
-    .unwrap();
+    ));
 
     let pdf_path = dir.path().join("paper.pdf");
     support::write_test_pdf(&pdf_path, &["A Paper With No Identifier"]);
@@ -509,8 +506,7 @@ async fn import_reports_same_work_for_known_doi() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     // Upload a different file whose first page carries the same DOI. The
     // resolver is offline, but the extracted identifier still lands in the
@@ -556,8 +552,7 @@ async fn identify_search_returns_candidates() {
     );
     let server_http = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     let body: serde_json::Value = server_http
         .get("/api/identify/search")
@@ -584,7 +579,7 @@ async fn identify_search_returns_candidates() {
 #[tokio::test]
 async fn identify_search_needs_ingest_context() {
     let (dir, pool) = support::temp_pool().await;
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
     server
         .get("/api/identify/search")
         .add_query_param("q", "anything")
@@ -634,8 +629,7 @@ async fn identify_applies_doi_candidate_and_guards() {
         App::builder(pool.clone(), library.clone())
             .ingest(ingest)
             .build(),
-    ))
-    .unwrap();
+    ));
 
     // Direct DOI identify: 200, resolved, re-filed to the cite-key path.
     let resp = server
@@ -748,8 +742,7 @@ async fn identify_applies_candidate_without_network() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     let resp = server
         .post(&format!("/api/papers/{}/identify", p.id))
@@ -777,7 +770,7 @@ async fn identify_applies_candidate_without_network() {
 async fn identify_needs_ingest_context() {
     let (dir, pool) = support::temp_pool().await;
     // The read-only router (no ingest bundle) must refuse identify writes.
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
     server
         .post("/api/papers/whatever/identify")
         .json(&serde_json::json!({ "doi": "10.1/x" }))
@@ -823,8 +816,7 @@ async fn identify_applies_arxiv_id_via_api() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library.clone()).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     let resp = server
         .post(&format!("/api/papers/{}/identify", p.id))
@@ -865,8 +857,7 @@ async fn settings_report_and_set_proxy_cookie() {
         App::builder(pool.clone(), library.clone())
             .ingest(ingest)
             .build(),
-    ))
-    .unwrap();
+    ));
 
     // Initially unset; the configured proxy host is reported so the UI can
     // name it instead of hardcoding one deployment's university.
@@ -900,7 +891,7 @@ async fn settings_reports_fold_abstract() {
     // The read-only test router builds its App with `UiConfig::default()`
     // (fold_abstract: true), so this exercises the default straight through.
     let (dir, pool) = support::temp_pool().await;
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     let res = server.get("/api/settings").await;
     res.assert_status_ok();
@@ -934,8 +925,7 @@ async fn import_url_rejects_unsupported_input() {
     );
     let server = TestServer::new(xuewen::web::router(
         App::builder(pool, library).ingest(ingest).build(),
-    ))
-    .unwrap();
+    ));
 
     server
         .post("/api/import")
@@ -963,7 +953,7 @@ async fn projects_crud_membership_and_filter() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Create.
     let resp = server
@@ -1038,7 +1028,7 @@ async fn projects_crud_membership_and_filter() {
 #[tokio::test]
 async fn patch_project_merge_rules() {
     let (dir, pool) = support::temp_pool().await;
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Seed two projects: one to edit, one to collide names with.
     let a: serde_json::Value = server
@@ -1086,7 +1076,7 @@ async fn tags_crud_membership_and_gc() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Add (create-if-missing) -> 200 with {id,name}.
     let resp = server
@@ -1136,7 +1126,7 @@ async fn tags_rename_and_delete() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     let tag: serde_json::Value = server
         .put("/api/papers/aaaa1111/tags")
@@ -1181,7 +1171,7 @@ async fn tag_names_that_normalize_to_empty_are_bad_requests() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     let blank = server
         .put("/api/papers/aaaa1111/tags")
@@ -1226,7 +1216,7 @@ async fn star_and_unstar_paper() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Star -> 204, detail reflects starred:true.
     server
@@ -1260,7 +1250,7 @@ async fn set_and_clear_paper_name() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Set -> 200 echoing the trimmed value; detail reflects it.
     let res = server
@@ -1306,7 +1296,7 @@ async fn set_and_clear_paper_name() {
 #[tokio::test]
 async fn import_url_needs_ingest_context() {
     let (dir, pool) = support::temp_pool().await;
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
     server
         .post("/api/import")
         .json(&serde_json::json!({ "input": "10.1145/x" }))
@@ -1339,7 +1329,7 @@ async fn exports_bibtex_and_biblatex() {
     projects::add_paper(&pool, "aaaa1111", &proj.id)
         .await
         .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // Individual (default bibtex). The `paper` helper sets venue=KDD, no dblp_key -> @article.
     let resp = server.get("/api/papers/aaaa1111/export").await;
@@ -1422,7 +1412,7 @@ async fn paper_rows_carry_starred_tags_and_projects() {
     projects::add_paper(&pool, "aaaa1111", &proj.id)
         .await
         .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // List row.
     let list: Vec<serde_json::Value> = server.get("/api/papers").await.json();
@@ -1483,7 +1473,7 @@ async fn list_filters_by_tag_prefix_and_starred() {
     projects::add_paper(&pool, "aaaa1111", &proj.id)
         .await
         .unwrap();
-    let server = TestServer::new(support::router(pool, dir.path().join("library"))).unwrap();
+    let server = TestServer::new(support::router(pool, dir.path().join("library")));
 
     // ?tag= matches by prefix -> only the tagged paper.
     let by_tag: Vec<serde_json::Value> = server.get("/api/papers?tag=security").await.json();
@@ -1542,7 +1532,7 @@ mod search_api {
         let app = xuewen::app::App::builder(pool, std::path::PathBuf::from("/nonexistent"))
             .search(svc)
             .build();
-        axum_test::TestServer::new(xuewen::web::router(app)).unwrap()
+        axum_test::TestServer::new(xuewen::web::router(app))
     }
 
     #[tokio::test]
@@ -1630,7 +1620,7 @@ mod search_api {
         let app = xuewen::app::App::builder(pool, std::path::PathBuf::from("/nonexistent"))
             .search(svc)
             .build();
-        axum_test::TestServer::new(xuewen::web::router(app)).unwrap()
+        axum_test::TestServer::new(xuewen::web::router(app))
     }
 
     #[tokio::test]
@@ -1720,7 +1710,7 @@ mod search_api {
     async fn search_without_service_is_503() {
         let pool = test_pool().await;
         let router = support::router(pool, std::path::PathBuf::from("/nonexistent"));
-        let server = axum_test::TestServer::new(router).unwrap();
+        let server = axum_test::TestServer::new(router);
         let resp = server.get("/api/search").add_query_param("q", "x").await;
         resp.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
     }

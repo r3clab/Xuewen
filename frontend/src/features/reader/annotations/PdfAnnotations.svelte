@@ -1,15 +1,13 @@
 <script lang="ts">
-  import { Download, Trash2 } from 'lucide-svelte';
-  import { useRegistry } from '@embedpdf/core/svelte';
-  import { useScroll } from '@embedpdf/plugin-scroll/svelte';
-  import { useAnnotation, useAnnotationCapability } from '@embedpdf/plugin-annotation/svelte';
-  import { useDocumentManagerCapability } from '@embedpdf/plugin-document-manager/svelte';
+  import { Download, Trash } from '@lucide/svelte';
+  import { useDocuments, useKernel } from '@embedpdf/svelte/runtime';
+  import { AnnotationToken, useAnnotation } from '@embedpdf/svelte/annotation';
+  import { useStage } from '@embedpdf/svelte/stage';
   import { annotationList, annotations, removeAnnotation } from './store.svelte';
   import { KIND_LABELS } from './adapter';
   import { buildAnnotatedPdf, exportErrorMessage } from './export';
   import { colorHex, colorLabel } from './palette';
   import { annotatedFilename, downloadBlob } from './download';
-  import { openDocumentFully } from '$features/reader/pdf/deck';
   import { pdfUrl } from '$features/reader/pdf/api';
   import { viewer } from '$features/reader/tabs/state.svelte';
   import { toast } from '$shared/ui/toasts.svelte';
@@ -17,24 +15,29 @@
 
   let { documentId }: { documentId: string } = $props();
 
-  const scroll = useScroll(() => documentId);
-  const annotation = useAnnotation(() => documentId);
-  const annotationCapability = useAnnotationCapability();
-  const documents = useDocumentManagerCapability();
-  const registry = useRegistry();
+  const stage = useStage();
+  const annotation = useAnnotation();
+  const documents = useDocuments();
+  const kernel = useKernel();
 
-  // The tab id is the paper id (see PdfPages).
+  // The tab id is the paper id (see PdfDeck).
   const items = $derived(annotationList(documentId));
   const failed = $derived(annotations.error[documentId] ?? null);
   const title = $derived(viewer.tabs.find((t) => t.id === documentId)?.title ?? 'paper');
 
+  /// A row's id is its mark's name in the document (see annotations/sync.ts).
+  function markOf(a: Annotation) {
+    return annotation.list().find((m) => m.nm === a.id) ?? null;
+  }
+
   /// Jump to the mark's page and select it, so the reader can see which one
   /// the panel row refers to. Selecting is best-effort: a row whose payload
-  /// the backend could not parse was never handed to the plugin, so there is
+  /// could not be rebuilt was never restored into the document, so there is
   /// nothing on the page to select — the page jump still works.
   function jump(a: Annotation): void {
-    scroll.provides?.scrollToPage({ pageNumber: a.page_index + 1 });
-    annotation.provides?.selectAnnotation(a.page_index, a.id);
+    stage.goToPage(a.page_index);
+    const mark = markOf(a);
+    if (mark) annotation.selection.select([mark.ref]);
   }
 
   /// Deleting through the plugin (rather than the store) is what keeps the
@@ -42,15 +45,12 @@
   /// sync loop removes the row. A mark that never made it into the document
   /// has no plugin copy, so that one is removed directly.
   async function remove(a: Annotation): Promise<void> {
-    const inDocument = annotation.provides?.getAnnotationById(a.id);
-    if (inDocument) {
-      annotation.provides?.deleteAnnotation(a.page_index, a.id);
-      return;
-    }
+    const mark = markOf(a);
     try {
-      await removeAnnotation(documentId, a.id);
+      if (mark) await annotation.delete(mark.ref);
+      else await removeAnnotation(documentId, a.id);
     } catch (e) {
-      toast('error', (e as Error).message);
+      toast('error', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -60,29 +60,15 @@
   /// who does not have this library. The library's own file is untouched; see
   /// annotations/export.ts for how.
   async function exportAnnotated(): Promise<void> {
-    const docs = documents.provides;
-    const marks = annotationCapability.provides;
-    const engine = registry.registry?.getEngine();
-    if (!docs || !marks || !engine || exporting) return;
+    if (exporting) return;
     exporting = true;
     try {
       const blob = await buildAnnotatedPdf(documentId, items, {
-        // openDocumentFully resolves with the LOADED document, not the
-        // synchronously-resolving outer open task (see pdf/deck.ts).
-        open: (id) => openDocumentFully(docs, { url: pdfUrl(documentId), documentId: id }),
-        close: (id) => void docs.closeDocument(id),
-        scope: (id) => {
-          const s = marks.forDocument(id);
-          return {
-            importAnnotations: (i) => s.importAnnotations(i),
-            commit: () => s.commit().toPromise(),
-            onAnnotationEvent: (h) => s.onAnnotationEvent(h),
-          };
-        },
-        // The document object comes from the open task, never from a Svelte
-        // binding: handing a `$state` proxy to an engine call throws
-        // DataCloneError on the way to the worker.
-        save: (doc) => engine.saveAsCopy(doc).toPromise(),
+        open: (id) => documents.open({ kind: 'url', url: pdfUrl(documentId), id }, { activate: false }),
+        close: (id) => documents.close(id),
+        pages: (id) => documents.listPages(id),
+        scope: (id) => kernel.tryCapability(AnnotationToken, id),
+        download: async (id) => new Uint8Array(await documents.download(id)),
       });
       downloadBlob(blob, annotatedFilename(title));
     } catch (e) {
@@ -151,7 +137,7 @@
               title="Delete"
               onclick={() => void remove(a)}
             >
-              <Trash2 size={12} />
+              <Trash size={12} />
             </button>
           </li>
         {/each}

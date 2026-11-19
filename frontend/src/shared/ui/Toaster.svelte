@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CircleAlert, CircleCheck, Info, X } from 'lucide-svelte';
+  import { CircleExclamationPoint, CircleCheck, Info, X } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
   import { DUR, dur } from './motion';
   import { dismissToast, toasts } from './toasts.svelte';
@@ -20,7 +20,7 @@
       {#if t.kind === 'success'}
         <CircleCheck size={16} class="shrink-0 text-lime-700 dark:text-lime-400" />
       {:else if t.kind === 'error'}
-        <CircleAlert size={16} class="shrink-0 text-red-600 dark:text-red-400" />
+        <CircleExclamationPoint size={16} class="shrink-0 text-red-600 dark:text-red-400" />
       {:else}
         <Info size={16} class="shrink-0 text-stone-500 dark:text-stone-400" />
       {/if}

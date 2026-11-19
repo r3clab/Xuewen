@@ -30,7 +30,7 @@ fn router_with_agent(
 #[tokio::test]
 async fn models_report_unavailable_without_config() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
     let resp = server.get("/api/chat/models").await;
     resp.assert_status_ok();
     let v: serde_json::Value = resp.json();
@@ -40,7 +40,7 @@ async fn models_report_unavailable_without_config() {
 #[tokio::test]
 async fn models_list_agent_backends() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(router_with_agent(pool, root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool, root, stub_agent()));
     let v: serde_json::Value = server.get("/api/chat/models").await.json();
     assert_eq!(v["available"], true);
     assert_eq!(v["models"][0]["id"], "claude_code");
@@ -51,7 +51,7 @@ async fn models_list_agent_backends() {
 #[tokio::test]
 async fn send_streams_tool_and_deltas_and_persists_with_tools() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
 
     let resp = server
         .post("/api/papers/p1/chat")
@@ -78,7 +78,7 @@ async fn send_streams_tool_and_deltas_and_persists_with_tools() {
 #[tokio::test]
 async fn send_error_persists_nothing() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
     let resp = server
         .post("/api/papers/p1/chat")
         .json(&json!({"model_id": "codex", "message": "please fail"}))
@@ -94,7 +94,7 @@ async fn send_error_persists_nothing() {
 #[tokio::test]
 async fn send_with_empty_reply_errors_and_persists_nothing() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
     let resp = server
         .post("/api/papers/p1/chat")
         .json(&json!({"model_id": "claude_code", "message": "answer with empty please"}))
@@ -112,7 +112,7 @@ async fn send_with_empty_reply_errors_and_persists_nothing() {
 #[tokio::test]
 async fn send_validates_model_message_paper_and_config() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let plain = TestServer::new(support::router(pool.clone(), root.clone())).unwrap();
+    let plain = TestServer::new(support::router(pool.clone(), root.clone()));
     // Chat errors carry the API-wide `{"error": string}` body — the shape
     // the frontend's one extraction point (errorFromResponse) parses.
     let resp = plain
@@ -125,7 +125,7 @@ async fn send_validates_model_message_paper_and_config() {
         "agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]"
     );
 
-    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool.clone(), root, stub_agent()));
     let resp = server
         .post("/api/papers/p1/chat")
         .json(&json!({"model_id": "nope", "message": "hi"}))
@@ -175,7 +175,7 @@ async fn history_roundtrip_and_clear() {
     xuewen::agent::history::insert_exchange(&pool, "p1", "q2", "a2", "Codex", Some("not json"))
         .await
         .unwrap();
-    let server = TestServer::new(router_with_agent(pool, root, stub_agent())).unwrap();
+    let server = TestServer::new(router_with_agent(pool, root, stub_agent()));
     let rows: serde_json::Value = server.get("/api/papers/p1/chat").await.json();
     assert_eq!(rows.as_array().unwrap().len(), 4);
     // The wire carries the tool log structured (the shape the live SSE `tool`

@@ -29,7 +29,7 @@ function anyModalOpen(): boolean {
 /// transcript, popovers, the reader's own toolbar — is ordinary DOM text where
 /// native copy already works, so ⌘C must stand aside there. The page area is
 /// the sole exception, and it can never produce a selection to confuse this:
-/// its pages are <img>, its overlays are empty <div>s, the Viewport carries
+/// its pages are <img>, its overlays are empty <div>s, the Stage carries
 /// `select-none`, and pdfCopy clears any stale selection when a PDF selection
 /// begins.
 function hasDomSelection(): boolean {
@@ -81,10 +81,9 @@ export function handleKeydown(e: KeyboardEvent): void {
     }
     return;
   }
-  // ⌘Z / ⇧⌘Z take back the last mark, through the same 'annotations' history
-  // topic the toolbar's undo buttons drive — so the keys and the buttons can
-  // never disagree, and neither can reach whatever else may one day share the
-  // history plugin's timeline. Like ⌘C above this stands aside rather than
+  // ⌘Z / ⇧⌘Z take back the last mark, through the same commands the
+  // toolbar's undo buttons drive — so the keys and the buttons can never
+  // disagree. Like ⌘C above this stands aside rather than
   // guessing: in a text control the browser's own undo is what the typist
   // wants, and on the library view or with an empty stack the command reports
   // it did nothing, so the keystroke goes on untouched. ⌥ is excluded so

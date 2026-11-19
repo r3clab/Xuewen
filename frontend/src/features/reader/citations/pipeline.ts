@@ -1,16 +1,15 @@
 /// The reader's citation pipeline: extract → library index → match →
 /// structured parse → merge → author-year resolution, publishing a progressive
 /// update after each phase that changes what the overlay can show. Lives here
-/// rather than in PdfPages so the sequencing, the cancellation points between
+/// rather than in PdfDocument so the sequencing, the cancellation points between
 /// awaits, and the structured/fallback merge are unit-testable; the component
 /// keeps only the scheduling shell (the per-document one-shot guard,
-/// `$state.snapshot`, `runWhenIdle`).
+/// `runWhenIdle`).
 
-import type { PdfDocumentObject } from '@embedpdf/models';
 import { parseCitations } from './api';
 import { libraryTitleIndex, matchReferences } from './match';
 import type { CitationData } from './references';
-import { loadCitations, type EngineLike } from './load';
+import { loadCitations, type CitationSource } from './load';
 import { mergeStructured } from './refMerge';
 import { resolveAuthorYearMarkers } from './text';
 import type { PaperSummary } from '$shared/api/generated/PaperSummary';
@@ -29,13 +28,12 @@ export interface CitationPipelineHooks {
 /// Never rejects: the reader still works without citation hovers, so any
 /// failure only logs — putting the catch here means no caller can forget it.
 export async function runCitationPipeline(
-  engine: EngineLike,
-  doc: PdfDocumentObject,
+  source: CitationSource,
   documentId: string,
   { isCancelled, onUpdate }: CitationPipelineHooks,
 ): Promise<void> {
   try {
-    const data = await loadCitations(engine, doc);
+    const data = await loadCitations(source);
     if (isCancelled()) return;
     // Markers work before any matching or parsing — publish early so hovers
     // come alive while the slower phases run.

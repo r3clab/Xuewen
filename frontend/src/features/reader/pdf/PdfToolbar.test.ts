@@ -1,12 +1,15 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('@embedpdf/plugin-zoom/svelte', () => ({
-  useZoom: () => ({ state: { currentZoomLevel: 1 }, provides: null }),
+vi.mock('@embedpdf/svelte/stage', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useStage: () => ({}),
+  useStageState: () => ({ currentPageIndex: 0, pageCount: 3, zoomLevel: 1 }),
 }));
-vi.mock('@embedpdf/plugin-scroll/svelte', () => ({
-  useScroll: () => ({ state: { currentPage: 1, totalPages: 3 }, provides: null }),
-}));
+vi.mock('@embedpdf/svelte/runtime', () => ({ useOptionalCapability: () => ({ current: null }) }));
+vi.mock('@embedpdf/svelte/annotation', () => ({ AnnotationToken: 'annotation' }));
+vi.mock('@embedpdf/svelte/interaction', () => ({ InteractionToken: 'interaction' }));
+vi.mock('@embedpdf/svelte/history', () => ({ useHistoryState: () => ({ canUndo: false, canRedo: false }) }));
 
 import userEvent from '@testing-library/user-event';
 import PdfToolbar from './PdfToolbar.svelte';

@@ -1,7 +1,16 @@
 import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PdfAnnotationSubtype } from '@embedpdf/models';
+
+const ref = { kind: 'objectNumber', page: { kind: 'objectNumber', objectNumber: 3 }, objectNumber: 9 };
+const annotationState = { selected: [] as { subtype: string; ref: typeof ref }[] };
+const canDelete = vi.fn(() => true);
+
+vi.mock('@embedpdf/svelte/annotation', () => ({
+  useAnnotation: () => ({ canDelete }),
+  useAnnotationState: () => annotationState,
+}));
+
 import AnnotationSelectionMenu from './AnnotationSelectionMenu.svelte';
 import { registerAnnotationCommands, type AnnotationCommands } from './commands';
 
@@ -14,31 +23,13 @@ const commands: AnnotationCommands = {
   redo: () => true,
 };
 
-/// The plugin's wrapper props. The real action stops pointerdown at capture so
-/// a click in the menu can't reach the page and deselect the mark first; here
-/// it only has to be a valid action.
-const menuWrapperProps = {
-  style: 'position: absolute; left: 10px; top: 20px',
-  action: () => ({ destroy: () => {} }),
-};
-
-function props(over: { structurallyLocked?: boolean; type?: PdfAnnotationSubtype } = {}) {
-  return {
-    menuWrapperProps,
-    context: {
-      type: 'annotation' as const,
-      pageIndex: 2,
-      structurallyLocked: over.structurallyLocked ?? false,
-      contentLocked: false,
-      annotation: {
-        object: { type: over.type ?? PdfAnnotationSubtype.HIGHLIGHT },
-      },
-    },
-  } as unknown as import('svelte').ComponentProps<typeof AnnotationSelectionMenu>;
+function select(...subtypes: string[]): void {
+  annotationState.selected = subtypes.map((subtype) => ({ subtype, ref }));
 }
 
 beforeEach(() => {
   deleteSelection.mockClear();
+  canDelete.mockReturnValue(true);
   registerAnnotationCommands(commands);
 });
 
@@ -47,7 +38,8 @@ afterEach(() => registerAnnotationCommands(null));
 
 describe('the selected mark’s floating menu', () => {
   it('deletes through the same command the Delete key uses', async () => {
-    render(AnnotationSelectionMenu, { props: props() });
+    select('highlight');
+    render(AnnotationSelectionMenu);
     await userEvent.click(screen.getByRole('button', { name: /delete highlight/i }));
     expect(deleteSelection).toHaveBeenCalledTimes(1);
   });
@@ -55,16 +47,22 @@ describe('the selected mark’s floating menu', () => {
   it('falls back to a generic name for a subtype this app never stores', () => {
     // A mark baked into the PDF by another reader — visible and selectable,
     // but not one of the five kinds the sidecar knows how to name.
-    render(AnnotationSelectionMenu, {
-      props: props({ type: PdfAnnotationSubtype.INK }),
-    });
+    select('ink');
+    render(AnnotationSelectionMenu);
     expect(screen.getByRole('button', { name: /delete annotation/i })).toBeInTheDocument();
   });
 
-  it('offers nothing for a mark the PDF has locked', () => {
-    render(AnnotationSelectionMenu, {
-      props: props({ structurallyLocked: true }),
-    });
+  it('offers nothing for a mark the reader may not delete', () => {
+    select('highlight');
+    canDelete.mockReturnValue(false);
+    render(AnnotationSelectionMenu);
+    expect(canDelete).toHaveBeenCalledWith(ref);
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('offers nothing for a multi-selection', () => {
+    select('highlight', 'underline');
+    render(AnnotationSelectionMenu);
     expect(screen.queryByRole('button')).toBeNull();
   });
 });

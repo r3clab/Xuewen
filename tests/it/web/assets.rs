@@ -17,7 +17,7 @@ async fn server() -> (tempfile::TempDir, TestServer) {
     let url = format!("sqlite:{}", dir.path().join("t.db").display());
     let pool = db::connect(&url).await.unwrap();
     let router = support::router(pool, dir.path().to_path_buf());
-    let server = TestServer::new(router).unwrap();
+    let server = TestServer::new(router);
     (dir, server)
 }
 

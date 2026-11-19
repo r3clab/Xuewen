@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, CircleAlert, Copy, FileWarning, Link, Loader, Upload } from 'lucide-svelte';
+  import { Check, CircleExclamationPoint, Copy, FileExclamationPoint, Link, Loader, Upload } from '@lucide/svelte';
   import { clearProxyCookie, setProxyCookie } from './api';
   import {
     closeImport,
@@ -125,13 +125,13 @@
       label: (i) => `in trash — run: xuewen restore ${i.message}`,
     },
     unfetched: {
-      icon: FileWarning,
+      icon: FileExclamationPoint,
       iconClass: 'shrink-0 text-yellow-600',
       bucket: 'skipped',
       label: () => 'no PDF — download & drop in inbox',
     },
     failed: {
-      icon: CircleAlert,
+      icon: CircleExclamationPoint,
       iconClass: 'shrink-0 text-red-500',
       bucket: 'failed',
       label: (i) => i.message ?? '',

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Search, SlidersHorizontal } from 'lucide-svelte';
+  import { Search, SlidersHorizontal } from '@lucide/svelte';
   import { scale } from 'svelte/transition';
   import { clickOutside } from '$shared/ui/clickOutside';
   import { DUR, dur } from '$shared/ui/motion';

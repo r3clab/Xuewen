@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PdfAnnotationSubtype } from '@embedpdf/models';
-import type { PdfDocumentObject } from '@embedpdf/models';
-import type { AnnotationEvent, AnnotationTransferItem } from '@embedpdf/plugin-annotation';
-import {
-  buildAnnotatedPdf,
-  exportDocumentId,
-  exportErrorMessage,
-  type ExportDeps,
-} from './export';
+import type { AnnotationBundle } from '@embedpdf/svelte/annotation';
+import { buildAnnotatedPdf, exportDocumentId, exportErrorMessage, type ExportDeps } from './export';
+import { RESTORE_OPTIONS, type RestorePage } from './adapter';
 import { colorHex } from './palette';
 import type { Annotation } from '$shared/api/generated/Annotation';
+
+const PAGE: RestorePage = { index: 1, ref: { kind: 'objectNumber', objectNumber: 101 }, size: { width: 612, height: 792 } };
+const FIRST: RestorePage = { index: 0, ref: { kind: 'objectNumber', objectNumber: 100 }, size: PAGE.size };
+const QUAD = {
+  upperLeft: { x: 0, y: 0 },
+  upperRight: { x: 10, y: 0 },
+  lowerLeft: { x: 0, y: 10 },
+  lowerRight: { x: 10, y: 10 },
+};
 
 function row(id: string, over: Partial<Annotation> = {}): Annotation {
   return {
@@ -21,12 +24,12 @@ function row(id: string, over: Partial<Annotation> = {}): Annotation {
     quoted_text: 'quoted',
     note: null,
     payload: {
-      annotation: {
-        id,
-        type: PdfAnnotationSubtype.HIGHLIGHT,
-        pageIndex: 1,
-        rect: { origin: { x: 0, y: 0 }, size: { width: 10, height: 10 } },
+      data: {
+        subtype: 'highlight',
+        ref: { kind: 'objectNumber', page: PAGE.ref, objectNumber: 9 },
+        nm: id,
         color: colorHex('amber'),
+        quadPoints: [QUAD],
       },
     },
     created_at: '2026-08-14T00:00:00Z',
@@ -35,64 +38,35 @@ function row(id: string, over: Partial<Annotation> = {}): Annotation {
   };
 }
 
-const doc = { id: 'export:p1', pageCount: 3 } as unknown as PdfDocumentObject;
+const PDF = new Uint8Array([37, 80, 68, 70]); // "%PDF"
 
-/// A stand-in for the throwaway document: the plugin's `loaded` event fires
-/// once the open resolves, the way it does when a PDF's own annotations have
-/// been read.
+/// A stand-in for the throwaway document, recording the order things happen
+/// to it.
 function harness(over: Partial<ExportDeps> = {}) {
-  let handler: ((e: AnnotationEvent) => void) | null = null;
-  const imported: AnnotationTransferItem[][] = [];
-  const closed: string[] = [];
   const order: string[] = [];
-
+  const imported: [AnnotationBundle, typeof RESTORE_OPTIONS][] = [];
+  const created: unknown[] = [];
   const deps: ExportDeps = {
-    open: vi.fn(async () => {
-      order.push('open');
-      // The plugin reads the document's own marks as the document opens.
-      handler?.({ type: 'loaded', documentId: exportDocumentId('p1'), total: 0 });
-      return doc;
-    }),
-    close: vi.fn((id: string) => {
-      order.push('close');
-      closed.push(id);
-    }),
+    open: vi.fn(async () => void order.push('open')),
+    close: vi.fn(async () => void order.push('close')),
+    pages: vi.fn(() => [FIRST, PAGE]),
     scope: vi.fn(() => ({
-      importAnnotations: (items: AnnotationTransferItem[]) => {
+      import: async (bundle: AnnotationBundle, options: typeof RESTORE_OPTIONS) => {
         order.push('import');
-        imported.push(items);
+        imported.push([bundle, options]);
       },
-      commit: vi.fn(async () => {
-        order.push('commit');
-        return true;
-      }),
-      onAnnotationEvent: (h: (e: AnnotationEvent) => void) => {
-        handler = h;
-        return () => {
-          handler = null;
-        };
+      create: async (page: unknown, draft: unknown) => {
+        order.push('create');
+        created.push([page, draft]);
       },
     })),
-    save: vi.fn(async () => {
-      order.push('save');
-      return new Uint8Array([37, 80, 68, 70]).buffer; // "%PDF"
+    download: vi.fn(async () => {
+      order.push('download');
+      return PDF;
     }),
-    timeoutMs: 50,
     ...over,
   };
-
-  return {
-    deps,
-    imported,
-    closed,
-    order,
-    get listening(): boolean {
-      return handler !== null;
-    },
-    fire(e: AnnotationEvent): void {
-      handler?.(e);
-    },
-  };
+  return { deps, order, imported, created };
 }
 
 beforeEach(() => {
@@ -108,43 +82,39 @@ describe('exportDocumentId', () => {
 });
 
 describe('buildAnnotatedPdf', () => {
-  it('replays the marks into a throwaway document and saves that', async () => {
+  it('restores the marks into a throwaway document and downloads that', async () => {
     const h = harness();
     const blob = await buildAnnotatedPdf('p1', [row('a1'), row('a2')], h.deps);
     expect(blob.type).toBe('application/pdf');
-    expect(h.imported[0].map((i) => i.annotation.id)).toEqual(['a1', 'a2']);
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(PDF);
     // Never the paper's own document: the open document must stay untouched,
     // which is the whole reason for a second one.
     expect(h.deps.open).toHaveBeenCalledWith(exportDocumentId('p1'));
-    expect(h.deps.save).toHaveBeenCalledWith(doc);
+    expect(h.deps.download).toHaveBeenCalledWith(exportDocumentId('p1'));
+    const [[bundle, options]] = h.imported;
+    expect(options).toEqual(RESTORE_OPTIONS);
+    expect(bundle.items.map((item) => item.data.nm)).toEqual(['a1', 'a2']);
+    expect(bundle.pages).toEqual([{ page: PAGE.ref, position: 1, size: PAGE.size }]);
   });
 
-  it('commits after the import and before the save', async () => {
+  it('downloads only once the marks are in, then closes the copy', async () => {
     const h = harness();
-    await buildAnnotatedPdf('p1', [row('a1')], h.deps);
-    // Committing early would write an empty copy; saving early would write one
-    // without the marks.
-    expect(h.order).toEqual(['open', 'import', 'commit', 'save', 'close']);
+    const rect = { origin: { x: 0, y: 0 }, size: { width: 10, height: 10 } };
+    const legacy = row('old', { payload: { annotation: { id: 'old', type: 9, rect, segmentRects: [rect] } } });
+    await buildAnnotatedPdf('p1', [row('a1'), legacy], h.deps);
+    expect(h.order).toEqual(['open', 'import', 'create', 'download', 'close']);
+    expect(h.created).toEqual([[PAGE.ref, expect.objectContaining({ subtype: 'highlight', nm: 'old' })]]);
   });
 
-  it('closes the throwaway and stops listening once it is done', async () => {
-    const h = harness();
-    await buildAnnotatedPdf('p1', [row('a1')], h.deps);
-    expect(h.closed).toEqual([exportDocumentId('p1')]);
-    expect(h.listening).toBe(false);
-  });
-
-  it('closes the throwaway even when the save fails', async () => {
+  it('closes the throwaway even when the download fails', async () => {
     const h = harness({
-      save: vi.fn(async () => {
-        throw { code: 3, message: 'saving failed' };
+      download: vi.fn(async () => {
+        throw new Error('saving failed');
       }),
     });
-    await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toBeDefined();
-    // A leaked document would hold a PDFium handle and count against the
-    // manager's open-document cap for the rest of the session.
-    expect(h.closed).toEqual([exportDocumentId('p1')]);
-    expect(h.listening).toBe(false);
+    await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toThrow('saving failed');
+    // A leaked document would hold a PDFium handle for the rest of the session.
+    expect(h.deps.close).toHaveBeenCalledWith(exportDocumentId('p1'));
   });
 
   it('closes the throwaway when the document never opens', async () => {
@@ -154,40 +124,44 @@ describe('buildAnnotatedPdf', () => {
       }),
     });
     await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toThrow('404');
-    expect(h.closed).toEqual([exportDocumentId('p1')]);
+    expect(h.deps.close).toHaveBeenCalledWith(exportDocumentId('p1'));
   });
 
-  it('gives up rather than hanging when the document never finishes loading', async () => {
-    const h = harness({ open: vi.fn(async () => doc), timeoutMs: 10 });
-    await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toThrow(
-      /did not finish loading/,
-    );
-    expect(h.closed).toEqual([exportDocumentId('p1')]);
+  it('refuses rather than exporting a copy without the marks', async () => {
+    const h = harness({ scope: vi.fn(() => null) });
+    await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toThrow(/could not take annotations/);
+    expect(h.deps.download).not.toHaveBeenCalled();
+    expect(h.deps.close).toHaveBeenCalled();
   });
 
-  it('waits for a load that arrives after the open resolves', async () => {
-    const h = harness({ open: vi.fn(async () => doc) });
-    const done = buildAnnotatedPdf('p1', [row('a1')], h.deps);
-    await Promise.resolve(); // let the import happen
-    h.fire({ type: 'loaded', documentId: exportDocumentId('p1'), total: 0 });
-    await expect(done).resolves.toBeInstanceOf(Blob);
+  it('reports the export’s own failure, not a failed close', async () => {
+    const h = harness({
+      download: vi.fn(async () => {
+        throw new Error('saving failed');
+      }),
+      close: vi.fn(async () => {
+        throw new Error('already closed');
+      }),
+    });
+    await expect(buildAnnotatedPdf('p1', [row('a1')], h.deps)).rejects.toThrow('saving failed');
   });
 
   it('skips a row whose payload cannot be rebuilt rather than failing', async () => {
     const h = harness();
     await buildAnnotatedPdf('p1', [row('a1'), row('bad', { payload: null })], h.deps);
-    expect(h.imported[0].map((i) => i.annotation.id)).toEqual(['a1']);
+    const [[bundle]] = h.imported;
+    expect(bundle.items.map((item) => item.data.nm)).toEqual(['a1']);
   });
 });
 
 describe('exportErrorMessage', () => {
-  it('reads the engine’s plain {code, message} reason', () => {
-    // PDFium failures are not Errors, so `.message` is all there is to go on.
-    expect(exportErrorMessage({ code: 3, message: 'password required' })).toBe('password required');
+  it('reads the reason a plugin error gives', () => {
+    expect(exportErrorMessage(new Error('password required'))).toBe('password required');
   });
 
   it('falls back to something a reader can act on', () => {
     expect(exportErrorMessage(null)).toMatch(/exporting the annotated PDF failed/);
     expect(exportErrorMessage({ code: 3 })).toMatch(/exporting the annotated PDF failed/);
+    expect(exportErrorMessage(new Error(''))).toMatch(/exporting the annotated PDF failed/);
   });
 });

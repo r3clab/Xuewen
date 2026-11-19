@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Monitor, Moon, Sun, Upload } from 'lucide-svelte';
+  import { Monitor, Moon, Sun, Upload } from '@lucide/svelte';
   import { openImport } from '$features/importing/queue.svelte';
   import { library, stats } from '$features/library/state.svelte';
   import { filters } from '$features/library/search/state.svelte';

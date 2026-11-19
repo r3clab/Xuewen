@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Bookmark, X } from 'lucide-svelte';
+  import { Bookmark, X } from '@lucide/svelte';
   import NewProjectInput from './NewProjectInput.svelte';
   import {
     addToProject,

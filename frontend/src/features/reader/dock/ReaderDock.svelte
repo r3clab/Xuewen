@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Maximize2, Minimize2, X } from 'lucide-svelte';
+  import { Maximize2, Minimize2, X } from '@lucide/svelte';
   import { fly } from 'svelte/transition';
   import { chat } from '$features/reader/ask/chat.svelte';
   import { DUR, dur } from '$shared/ui/motion';

@@ -1,18 +1,17 @@
 <script lang="ts">
-  import { useScroll } from '@embedpdf/plugin-scroll/svelte';
+  import { usePageList } from '@embedpdf/svelte/runtime';
+  import { useStage } from '@embedpdf/svelte/stage';
   import type { CitationData } from './references';
   import type { PaperSummary } from '$shared/api/generated/PaperSummary';
   import { showCitation, hideCitationSoon } from './state.svelte';
 
   let {
-    documentId,
     pageIndex,
     pageWidthPt,
     pageHeightPt,
     data,
     matches,
   }: {
-    documentId: string;
     pageIndex: number;
     pageWidthPt: number;
     pageHeightPt: number;
@@ -20,7 +19,8 @@
     matches: Map<number, PaperSummary>;
   } = $props();
 
-  const scroll = useScroll(() => documentId);
+  const stage = useStage();
+  const pages = usePageList();
 
   const markers = $derived(data.markers.filter((m) => m.pageIndex === pageIndex));
 
@@ -40,12 +40,12 @@
   // with the viewport edge.
   function jump(refIndex: number) {
     const reference = data.references[refIndex];
-    if (!reference || reference.destPageIndex < 0) return;
-    scroll.provides?.scrollToPage({
-      pageNumber: reference.destPageIndex + 1,
-      pageCoordinates: { x: 0, y: Math.max(0, reference.destY - 24) },
-      behavior: 'smooth',
-    });
+    const page = reference ? pages.current[reference.destPageIndex] : undefined;
+    if (!reference || !page) return;
+    stage.goToDestination(
+      { kind: 'xyz', page: page.ref, x: null, y: Math.max(0, reference.destY - 24), zoom: null },
+      { behavior: 'smooth' },
+    );
   }
 </script>
 

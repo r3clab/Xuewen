@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, Download } from 'lucide-svelte';
+  import { Copy, Download } from '@lucide/svelte';
   import { paperExportUrl } from '$features/library/api';
   import { copyCitation } from '$features/library/cite';
   import { bibFormat } from '$features/library/state.svelte';

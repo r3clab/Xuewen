@@ -7,7 +7,7 @@ use serde_json::json;
 /// them — there is no `build_router_with_annotations` to reach for.
 async fn server(paper: &str) -> TestServer {
     let (pool, root) = support::pool_and_root_with_paper(paper).await;
-    TestServer::new(support::router(pool, root)).unwrap()
+    TestServer::new(support::router(pool, root))
 }
 
 fn highlight(page_index: i64, note: Option<&str>) -> serde_json::Value {
@@ -240,7 +240,7 @@ async fn annotations_are_scoped_to_their_paper() {
     )
     .await
     .unwrap();
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
 
     server
         .put("/api/papers/p1/annotations/shared-id")

@@ -6,7 +6,7 @@
 </script>
 
 <script lang="ts">
-  import { Eraser, SendHorizontal, Square } from 'lucide-svelte';
+  import { Eraser, SendHorizontal, Square } from '@lucide/svelte';
   import { chat, clearChatThread, sendChatMessage, setChatModel, stopChatStream } from './chat.svelte';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
 

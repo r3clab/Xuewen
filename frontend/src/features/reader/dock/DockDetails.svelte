@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Star, Wand2 } from 'lucide-svelte';
+  import { Star, WandSparkles } from '@lucide/svelte';
   import { openIdentify } from '$features/identify/actions';
   import { cachedDetail } from '$features/library/state.svelte';
   import { loadDetail, toggleStar } from '$features/library/actions';
@@ -136,7 +136,7 @@
         onclick={() => openIdentify(d.id, { doi: d.doi, arxiv_id: d.arxiv_id })}
         class="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 px-2 py-1 text-xs font-medium text-amber-700 hover:bg-amber-700/10 dark:border-stone-700 dark:text-amber-500"
       >
-        <Wand2 size={13} /> Identify…
+        <WandSparkles size={13} /> Identify…
       </button>
     </div>
 

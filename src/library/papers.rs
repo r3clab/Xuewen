@@ -270,7 +270,7 @@ pub struct PaperFilter {
 }
 
 /// Append `filter`'s restrictions to a query already inside its WHERE clause.
-pub(crate) fn push_paper_filters(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, filter: &PaperFilter) {
+pub(crate) fn push_paper_filters(qb: &mut QueryBuilder<sqlx::Sqlite>, filter: &PaperFilter) {
     if let Some(st) = filter.status.as_deref().filter(|s| STATUS_KEYS.contains(s)) {
         qb.push(" AND status = ").push_bind(st.to_string());
     }

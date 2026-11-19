@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Copy, ScanSearch, Trash2 } from 'lucide-svelte';
+  import { Copy, ScanSearch, Trash } from '@lucide/svelte';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
   import ContextMenuShell from '$shared/ui/ContextMenuShell.svelte';
   import { closeContextMenu, contextMenu } from './contextMenu.svelte';
@@ -87,7 +87,7 @@
         onclick={() => (mode = 'delete')}
         class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-600/10 dark:text-red-400"
       >
-        <Trash2 size={13} /> Delete…
+        <Trash size={13} /> Delete…
       </button>
     {:else if busy}
       <span class="block px-2 py-1.5 text-xs text-stone-500 dark:text-stone-400">Deleting…</span>

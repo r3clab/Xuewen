@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, Loader, Search } from 'lucide-svelte';
+  import { Check, Loader, Search } from '@lucide/svelte';
   import { applyIdentify } from '$app/actions';
   import { closeIdentify, runIdentifySearch } from './actions';
   import { dropsIdentifier, pseudoDoiHint } from './input';

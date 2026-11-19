@@ -6,7 +6,7 @@ pkgs.buildNpmPackage {
   pname = "xuewen-agent-runner";
   inherit ((lib.importTOML ../../Cargo.toml).workspace.package) version;
   src = ../../agent-runner;
-  npmDepsHash = "sha256-+ERsdA8rx5Nf9IeYd98huAWPixBsOZWEBC4dZttfHnI=";
+  npmDepsHash = "sha256-lpYqN6xQSHASUupbl7YW6wdE5BvFL5V0LinyrKZjRkI=";
   # No build script — this is plain ESM shipped as-is with its deps.
   dontNpmBuild = true;
   doCheck = true;

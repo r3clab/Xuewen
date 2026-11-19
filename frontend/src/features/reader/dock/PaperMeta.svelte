@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ExternalLink } from 'lucide-svelte';
+  import { ExternalLink } from '@lucide/svelte';
   import type { PaperDetail } from '$shared/api/generated/PaperDetail';
   import { abbreviateVenue } from '$features/library/venue';
   import StatusPill from '$features/library/StatusPill.svelte';

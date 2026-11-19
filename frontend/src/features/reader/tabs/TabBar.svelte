@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LibraryBig, X } from 'lucide-svelte';
+  import { LibraryBig, X } from '@lucide/svelte';
   import { flip } from 'svelte/animate';
   import { crossfade, fade } from 'svelte/transition';
   import { DUR, dur } from '$shared/ui/motion';

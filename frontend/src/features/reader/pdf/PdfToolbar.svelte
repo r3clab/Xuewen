@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { ChevronDown, ChevronLeft, ChevronRight, Contrast, Eclipse, PanelLeft, Search, SunDim, ZoomIn, ZoomOut } from 'lucide-svelte';
-  import { useZoom } from '@embedpdf/plugin-zoom/svelte';
-  import { useScroll } from '@embedpdf/plugin-scroll/svelte';
+  import { ChevronDown, ChevronLeft, ChevronRight, Contrast, Eclipse, PanelLeft, Search, SunDim, ZoomIn, ZoomOut } from '@lucide/svelte';
+  import { useStage, useStageState } from '@embedpdf/svelte/stage';
   import AnnotationHistory from '$features/reader/annotations/AnnotationHistory.svelte';
   import AnnotationTools from '$features/reader/annotations/AnnotationTools.svelte';
   import ToolbarMenu from './ToolbarMenu.svelte';
@@ -15,19 +14,19 @@
 
   let { documentId, pill }: { documentId: string; pill: PillHide } = $props();
 
-  const zoom = useZoom(() => documentId);
-  const scroll = useScroll(() => documentId);
+  const stage = useStage();
+  const view = useStageState();
 
   // --- page-number input: mirrors currentPage except while being edited ---
   let pageText = $state('1');
   let pageEditing = $state(false);
   let annotationMenuOpen = $state(false);
   $effect(() => {
-    if (!pageEditing) pageText = String(scroll.state.currentPage);
+    if (!pageEditing) pageText = String(view.currentPageIndex + 1);
   });
   function commitPage(target: HTMLInputElement): void {
-    const n = clampPage(pageText, scroll.state.totalPages);
-    if (n !== null) scroll.provides?.scrollToPage({ pageNumber: n });
+    const n = clampPage(pageText, view.pageCount);
+    if (n !== null) stage.goToPage(n - 1);
     target.blur();
   }
 
@@ -91,8 +90,8 @@
     class={btn}
     aria-label="Previous page"
     title="Previous page"
-    disabled={scroll.state.currentPage <= 1}
-    onclick={() => scroll.provides?.scrollToPreviousPage()}
+    disabled={view.currentPageIndex <= 0}
+    onclick={() => stage.previousPage()}
   >
     <ChevronLeft size={16} />
   </button>
@@ -109,26 +108,26 @@
       if (e.key === 'Enter') commitPage(e.currentTarget);
       else if (e.key === 'Escape') {
         e.stopPropagation(); // the global cascade must not see this
-        pageText = String(scroll.state.currentPage);
+        pageText = String(view.currentPageIndex + 1);
         e.currentTarget.blur();
       }
     }}
   />
-  <span class="text-sm text-stone-500 dark:text-stone-400">/ {scroll.state.totalPages}</span>
+  <span class="text-sm text-stone-500 dark:text-stone-400">/ {view.pageCount}</span>
   <button
     type="button"
     class={btn}
     aria-label="Next page"
     title="Next page"
-    disabled={scroll.state.currentPage >= scroll.state.totalPages}
-    onclick={() => scroll.provides?.scrollToNextPage()}
+    disabled={view.currentPageIndex >= view.pageCount - 1}
+    onclick={() => stage.nextPage()}
   >
     <ChevronRight size={16} />
   </button>
 
   <span class="h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-800"></span>
 
-  <button type="button" class={btn} aria-label="Zoom out" title="Zoom out" onclick={() => zoom.provides?.zoomOut()}>
+  <button type="button" class={btn} aria-label="Zoom out" title="Zoom out" onclick={() => stage.zoomOut()}>
     <ZoomOut size={16} />
   </button>
   <ToolbarMenu bind:open={zoomMenuOpen} label="Zoom presets" panelClass="w-28 p-1">
@@ -140,7 +139,7 @@
         aria-expanded={zoomMenuOpen}
         onclick={() => (zoomMenuOpen = !zoomMenuOpen)}
       >
-        {formatScale(zoom.state.currentZoomLevel)}
+        {formatScale(view.zoomLevel)}
         <ChevronDown size={12} />
       </button>
     {/snippet}
@@ -149,12 +148,12 @@
         type="button"
         role="menuitem"
         class={`block w-full rounded-lg px-2 py-1 text-left text-xs ${
-          isActivePreset(p, zoom.state.currentZoomLevel)
+          isActivePreset(p, view.zoomLevel)
             ? 'bg-amber-700/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-500'
             : 'text-stone-600 hover:bg-parchment hover:text-ink dark:text-stone-300 dark:hover:bg-stone-800'
         }`}
         onclick={() => {
-          zoom.provides?.requestZoom(p.level);
+          stage.zoomTo(typeof p.level === 'number' ? p.level : { mode: p.level });
           zoomMenuOpen = false;
         }}
       >
@@ -162,14 +161,14 @@
       </button>
     {/each}
   </ToolbarMenu>
-  <button type="button" class={btn} aria-label="Zoom in" title="Zoom in" onclick={() => zoom.provides?.zoomIn()}>
+  <button type="button" class={btn} aria-label="Zoom in" title="Zoom in" onclick={() => stage.zoomIn()}>
     <ZoomIn size={16} />
   </button>
 
   <span class="h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-800"></span>
 
-  <AnnotationTools {documentId} onHoldChange={(held) => (annotationMenuOpen = held)} />
-  <AnnotationHistory {documentId} />
+  <AnnotationTools onHoldChange={(held) => (annotationMenuOpen = held)} />
+  <AnnotationHistory />
 
   <span class="h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-800"></span>
 

@@ -14,26 +14,27 @@ tokio = { version = "1", features = [
   "process",
   "signal",
 ] }
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "sqlite",
   "macros",
   "migrate",
 ] }
 uuid = { version = "1", features = ["v7", "v5"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 regex = "1"
 percent-encoding = "2" # already transitive via reqwest/url; promoted for direct use
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = [
-  "rustls-tls",
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "query",
   "multipart",
   "json",
   "stream",
@@ -41,20 +42,20 @@ reqwest = { version = "0.12", default-features = false, features = [
 futures-util = "0.3"
 async-stream = "0.3"
 serde_json = "1"
-roxmltree = "0.20"
+roxmltree = "0.21"
 strsim = "0.11"
-notify = "6"
+notify = "8"
 unicode-normalization = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 rust-embed = "8"
 mime_guess = "2"
 flate2 = "1"
-brotli = "8"
-tantivy = "0.26"
-qdrant-edge = "=0.8.0" # beta: API and on-disk format may change between releases
-hayro = "0.7" # pure-Rust PDF rasterizer for the picker previews (src/preview)
+brotli = "9"
+tantivy = "0.27"
+qdrant-edge = "=0.9.0" # beta: API and on-disk format may change between releases
+hayro = "0.9" # pure-Rust PDF rasterizer for the picker previews (src/preview)
 async-trait = "0.1.89"
 tokio-util = { version = "0.7", features = ["rt"] }
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
@@ -73,7 +74,7 @@ tempfile = "3"
 xuewen = { path = ".", features = ["test-support"] }
 printpdf = "0.12"
 wiremock = "0.6"
-axum-test = "17"
+axum-test = "21"
 
 [workspace]
 members = [".", "desktop"]

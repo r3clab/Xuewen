@@ -13,7 +13,7 @@ fn chat_reply(text: &str) -> serde_json::Value {
 async fn parses_references_heuristically_without_llm() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
     // Plain router: no LLM anywhere - heuristics answer.
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
     let body = json!({"references": [
         "[1] D. Kingma and J. Ba, \"Adam: A method for stochastic optimization,\" in Proc. of ICLR, 2015."
     ]});
@@ -42,7 +42,7 @@ async fn parses_leftovers_via_llm_and_caches() {
     let svc = xuewen::citations::CitationsService::for_tests(pool.clone(), &upstream.uri(), "m");
     let server = {
         let app = xuewen::app::App::builder(pool, root).citations(svc).build();
-        TestServer::new(xuewen::web::router(app)).unwrap()
+        TestServer::new(xuewen::web::router(app))
     };
 
     // Heuristically unparseable (no anchors, no year) -> goes to the LLM.
@@ -59,7 +59,7 @@ async fn parses_leftovers_via_llm_and_caches() {
 #[tokio::test]
 async fn unknown_paper_is_404() {
     let (pool, root) = support::pool_and_root_with_paper("p1").await;
-    let server = TestServer::new(support::router(pool, root)).unwrap();
+    let server = TestServer::new(support::router(pool, root));
     let resp = server
         .post("/api/papers/nope/citations")
         .json(&json!({"references": ["x"]}))
@@ -74,7 +74,7 @@ async fn empty_references_is_bad_request() {
     let svc = xuewen::citations::CitationsService::for_tests(pool.clone(), &upstream.uri(), "m");
     let server = {
         let app = xuewen::app::App::builder(pool, root).citations(svc).build();
-        TestServer::new(xuewen::web::router(app)).unwrap()
+        TestServer::new(xuewen::web::router(app))
     };
 
     let resp = server

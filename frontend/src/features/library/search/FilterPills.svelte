@@ -3,7 +3,7 @@
 </script>
 
 <script lang="ts">
-  import { Bookmark, Ellipsis, Star } from 'lucide-svelte';
+  import { Bookmark, Ellipsis, Star } from '@lucide/svelte';
   import NewProjectInput from '$features/library/organization/NewProjectInput.svelte';
   import PillMenu from './PillMenu.svelte';
   import {

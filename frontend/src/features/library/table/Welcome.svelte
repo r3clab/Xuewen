@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Upload } from 'lucide-svelte';
+  import { Upload } from '@lucide/svelte';
   import { openImport } from '$features/importing/queue.svelte';
   import { library } from '$features/library/state.svelte';
   import { projects } from '$features/library/organization/state.svelte';

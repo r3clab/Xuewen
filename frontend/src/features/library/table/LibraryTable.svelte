@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowDown, ArrowUp, Bookmark, Star, Tag, Trash2, X } from 'lucide-svelte';
+  import { ArrowDown, ArrowUp, Bookmark, Star, Tag, Trash, X } from '@lucide/svelte';
   import ColumnHeaderMenu from './ColumnHeaderMenu.svelte';
   import ColumnResizeHandle from './ColumnResizeHandle.svelte';
   import ConfirmButtons from '$shared/ui/ConfirmButtons.svelte';
@@ -278,7 +278,7 @@
           disabled={busy}
           onclick={() => (confirmingDelete = true)}
         >
-          <Trash2 size={13} /> Delete
+          <Trash size={13} /> Delete
         </button>
       {/if}
       <button type="button" aria-label="Clear selection" class={bulkBtn} onclick={clearSelection}>
