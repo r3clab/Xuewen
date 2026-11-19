@@ -48,7 +48,7 @@ let
     programs.rumdl-format.enable = true;
     programs.rustfmt.enable = true;
     programs.rustfmt.package = (flake.lib.rustToolchain pkgs).override { extensions = [ "rustfmt" ]; };
-    programs.rustfmt.edition = (lib.importTOML ../Cargo.toml).package.edition;
+    programs.rustfmt.edition = (lib.importTOML ../Cargo.toml).workspace.package.edition;
     programs.taplo.enable = true;
     programs.typos.enable = true;
     programs.typos.configFile = "${typosConfig}";

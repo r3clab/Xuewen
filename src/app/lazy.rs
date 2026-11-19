@@ -42,8 +42,8 @@ impl<T, E> Lazy<T, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn deferred_retries_failures_and_caches_the_first_success() {

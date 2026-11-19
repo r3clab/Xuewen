@@ -1,5 +1,5 @@
-use super::error::Error;
 use super::App;
+use super::error::Error;
 use crate::ingest::pipeline::{IdentifyOutcome, IngestCtx};
 use crate::library::model::{Identifier, Paper};
 use crate::metadata::resolve::ResolvedMetadata;

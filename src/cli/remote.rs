@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use super::search::PaperLabel;
 use crate::search::{IndexStatus, SearchResults};

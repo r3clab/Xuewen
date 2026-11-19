@@ -1,5 +1,5 @@
-use super::error::Error;
 use super::App;
+use super::error::Error;
 use crate::config::Config;
 use crate::library::papers;
 use crate::summary::store;

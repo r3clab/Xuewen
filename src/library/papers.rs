@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -465,10 +465,12 @@ mod tests {
         assert!(taken_excl.contains("he2016deepa"));
 
         // Both keys sort just below this base, but neither extends it.
-        assert!(cite_keys_with_base(&pool, "he2016deeq", None)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            cite_keys_with_base(&pool, "he2016deeq", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -574,14 +576,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.0, None, "empty authors must be stored as SQL NULL");
-        assert!(get(&pool, &a.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .meta
-            .authors
-            .0
-            .is_empty());
+        assert!(
+            get(&pool, &a.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .meta
+                .authors
+                .0
+                .is_empty()
+        );
         // Non-empty round-trips.
         let mut b = sample_paper("01890000-0000-7000-8000-0000000000e6", "hf");
         b.meta.authors = Authors(vec!["Kaiming He".into(), "Xiangyu Zhang".into()]);
@@ -596,14 +600,16 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(get(&pool, &b.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .meta
-            .authors
-            .0
-            .is_empty());
+        assert!(
+            get(&pool, &b.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .meta
+                .authors
+                .0
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -863,14 +869,18 @@ mod tests {
                 .id,
             p.id
         );
-        assert!(find_by_identifier(&pool, Some("10.9/other"), None, None)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(find_by_identifier(&pool, None, None, None)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            find_by_identifier(&pool, Some("10.9/other"), None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_by_identifier(&pool, None, None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

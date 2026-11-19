@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 
-use super::error::Error;
 use super::App;
+use super::error::Error;
 use crate::library::settings;
 
 pub(crate) const PROXY_COOKIE: &str = "proxy_cookie";

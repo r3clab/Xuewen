@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use crate::library::model::{
-    canonical_arxiv, canonical_doi, Authors, Identifier, Paper, PaperMeta, PaperStatus,
+    Authors, Identifier, Paper, PaperMeta, PaperStatus, canonical_arxiv, canonical_doi,
 };
 use crate::library::papers;
 use crate::metadata::resolve::ResolvedMetadata;

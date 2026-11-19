@@ -360,21 +360,23 @@ impl SearchService {
 
         // Best chunk per paper, in vector score order.
         let mut semantic_best: Vec<vector::VecHit> = Vec::new();
-        if req.semantic && semantic.available && !q.is_empty() {
-            if let Some(tier) = self.semantic.tier() {
-                match Self::semantic_search(tier, q, &req.fields, scope.as_deref()).await {
-                    Ok(hits) => {
-                        let mut seen = std::collections::HashSet::new();
-                        for h in hits {
-                            if seen.insert(h.paper_id.clone()) {
-                                semantic_best.push(h);
-                            }
+        if req.semantic
+            && semantic.available
+            && !q.is_empty()
+            && let Some(tier) = self.semantic.tier()
+        {
+            match Self::semantic_search(tier, q, &req.fields, scope.as_deref()).await {
+                Ok(hits) => {
+                    let mut seen = std::collections::HashSet::new();
+                    for h in hits {
+                        if seen.insert(h.paper_id.clone()) {
+                            semantic_best.push(h);
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("semantic search failed: {e}");
-                        semantic = SemanticState::unavailable(e.to_string());
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!("semantic search failed: {e}");
+                    semantic = SemanticState::unavailable(e.to_string());
                 }
             }
         }

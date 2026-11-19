@@ -517,9 +517,11 @@ mod tests {
         let none: &[String] = &[];
         assert!(validate_repo_url("https://github.com/x/y", none).is_ok());
         assert!(validate_repo_url("http://github.com/x/y", none).is_err());
-        assert!(validate_repo_url("git@github.com:x/y.git", none)
-            .unwrap_err()
-            .contains("https://"));
+        assert!(
+            validate_repo_url("git@github.com:x/y.git", none)
+                .unwrap_err()
+                .contains("https://")
+        );
         assert!(validate_repo_url("https://user:pw@github.com/x/y", none).is_err());
         assert!(validate_repo_url("https://user@github.com/x/y", none).is_err());
         assert!(validate_repo_url("https://:pw@github.com/x/y", none).is_err());
@@ -659,7 +661,7 @@ mod tests {
         let (_src, url) = git_repo();
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
 
@@ -669,7 +671,7 @@ mod tests {
             "p1".into(),
             url,
             LIMITS,
-            gen,
+            clone_gen,
         )
         .await;
 
@@ -680,10 +682,11 @@ mod tests {
         assert!(ws.join("repo/.git").exists());
         assert!(ws.join("repo/big.bin").exists());
         assert!(
-            !ws.join(format!("{STAGING_PREFIX}{gen}.lock")).exists(),
+            !ws.join(format!("{STAGING_PREFIX}{clone_gen}.lock"))
+                .exists(),
             "the pid lock must not outlive the job"
         );
-        assert!(!ws.join(format!("{STAGING_PREFIX}{gen}")).exists());
+        assert!(!ws.join(format!("{STAGING_PREFIX}{clone_gen}")).exists());
     }
 
     #[tokio::test]
@@ -691,7 +694,7 @@ mod tests {
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
         let url = Url::from_directory_path(std::env::temp_dir().join("nonexistent-repo")).unwrap();
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
 
@@ -701,7 +704,7 @@ mod tests {
             "p1".into(),
             url,
             LIMITS,
-            gen,
+            clone_gen,
         )
         .await;
 
@@ -710,7 +713,7 @@ mod tests {
         assert!(c.error.unwrap().starts_with("git clone failed: "));
         assert!(
             !crate::agent::workspace_dir(lib.path(), "p1")
-                .join(format!("{STAGING_PREFIX}{gen}.lock"))
+                .join(format!("{STAGING_PREFIX}{clone_gen}.lock"))
                 .exists(),
             "the pid lock must not outlive a failed job"
         );
@@ -723,7 +726,7 @@ mod tests {
         let (_src, url) = git_repo();
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
         let limits = CloneLimits {
@@ -737,7 +740,7 @@ mod tests {
             "p1".into(),
             url,
             limits,
-            gen,
+            clone_gen,
         )
         .await;
 
@@ -746,7 +749,7 @@ mod tests {
         assert!(c.error.unwrap().contains("over the 1 MB limit"));
         let ws = crate::agent::workspace_dir(lib.path(), "p1");
         assert!(!ws.join("repo").exists());
-        assert!(!ws.join(format!("{STAGING_PREFIX}{gen}")).exists());
+        assert!(!ws.join(format!("{STAGING_PREFIX}{clone_gen}")).exists());
     }
 
     /// A server that accepts the connection and never answers stalls git
@@ -763,7 +766,7 @@ mod tests {
         .unwrap();
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
         let limits = CloneLimits {
@@ -779,7 +782,7 @@ mod tests {
                 "p1".into(),
                 url,
                 limits,
-                gen,
+                clone_gen,
             ),
         )
         .await
@@ -798,7 +801,7 @@ mod tests {
         let (_src, url) = git_repo();
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
         let ws = crate::agent::workspace_dir(lib.path(), "p1");
@@ -811,7 +814,7 @@ mod tests {
             "p1".into(),
             url,
             LIMITS,
-            gen,
+            clone_gen,
         ));
         tokio::time::sleep(Duration::from_secs(2)).await;
         let c = store::get_paper_code(&pool, "p1").await.unwrap().unwrap();
@@ -830,7 +833,7 @@ mod tests {
         let (_src, url) = git_repo();
         let lib = tempfile::tempdir().unwrap();
         let pool = pool_with_p1().await;
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", url.as_str())
             .await
             .unwrap();
         run_clone(
@@ -839,7 +842,7 @@ mod tests {
             "p1".into(),
             url,
             LIMITS,
-            gen,
+            clone_gen,
         )
         .await;
         let ws = crate::agent::workspace_dir(lib.path(), "p1");
@@ -898,16 +901,16 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("INSERT INTO papers (id, content_hash, rel_path, added_at, status) VALUES ('p1','h','p.pdf','2026-01-01T00:00:00+00:00','resolved')")
             .execute(&pool).await.unwrap();
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
             .await
             .unwrap();
         let ws = crate::agent::workspace_dir(lib.path(), "p1");
-        tokio::fs::create_dir_all(ws.join(format!("{STAGING_PREFIX}{gen}")))
+        tokio::fs::create_dir_all(ws.join(format!("{STAGING_PREFIX}{clone_gen}")))
             .await
             .unwrap();
         // This test process stands in for the sibling: its pid is live.
         tokio::fs::write(
-            ws.join(format!("{STAGING_PREFIX}{gen}.lock")),
+            ws.join(format!("{STAGING_PREFIX}{clone_gen}.lock")),
             std::process::id().to_string(),
         )
         .await
@@ -919,10 +922,13 @@ mod tests {
         assert_eq!(c.status, CodeStatus::Cloning, "live clone must survive");
         assert_eq!(
             store::current_clone_gen(&pool, "p1").await.unwrap(),
-            Some(gen)
+            Some(clone_gen)
         );
-        assert!(ws.join(format!("{STAGING_PREFIX}{gen}")).exists());
-        assert!(ws.join(format!("{STAGING_PREFIX}{gen}.lock")).exists());
+        assert!(ws.join(format!("{STAGING_PREFIX}{clone_gen}")).exists());
+        assert!(
+            ws.join(format!("{STAGING_PREFIX}{clone_gen}.lock"))
+                .exists()
+        );
     }
 
     /// A dead-pid lock and an unparseable one both read as crash debris:
@@ -968,11 +974,14 @@ mod tests {
 
         reconcile_startup(&pool, lib.path()).await;
 
-        for (id, ws, gen) in [("p1", &ws1, gen1), ("p2", &ws2, gen2)] {
+        for (id, ws, clone_gen) in [("p1", &ws1, gen1), ("p2", &ws2, gen2)] {
             let c = store::get_paper_code(&pool, id).await.unwrap().unwrap();
             assert_eq!(c.status, CodeStatus::Error, "{id}");
-            assert!(!ws.join(format!("{STAGING_PREFIX}{gen}")).exists());
-            assert!(!ws.join(format!("{STAGING_PREFIX}{gen}.lock")).exists());
+            assert!(!ws.join(format!("{STAGING_PREFIX}{clone_gen}")).exists());
+            assert!(
+                !ws.join(format!("{STAGING_PREFIX}{clone_gen}.lock"))
+                    .exists()
+            );
         }
 
         // The bump: the dead job's own late failure write misses the guard.
@@ -994,10 +1003,10 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("INSERT INTO papers (id, content_hash, rel_path, added_at, status) VALUES ('p1','h','p.pdf','2026-01-01T00:00:00+00:00','resolved')")
             .execute(&pool).await.unwrap();
-        let gen = store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
+        let clone_gen = store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
             .await
             .unwrap();
-        store::set_paper_code_ready(&pool, "p1", "abc1234", 42, gen)
+        store::set_paper_code_ready(&pool, "p1", "abc1234", 42, clone_gen)
             .await
             .unwrap();
 

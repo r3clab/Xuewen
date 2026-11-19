@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::ResolvedMetadata;
-use crate::http::{encode_doi_path, HttpClient};
+use crate::http::{HttpClient, encode_doi_path};
 use crate::text::{collapse_ws, strip_tags};
 
 /// Fetch the Crossref work record for a DOI from `{base}/works/{doi}`;
@@ -115,10 +115,11 @@ mod tests {
             md.abstract_text.as_deref(),
             Some("Knowledge graphs are used to improve recommendation.")
         );
-        assert!(md
-            .venue
-            .unwrap()
-            .starts_with("Proceedings of the 25th ACM SIGKDD"));
+        assert!(
+            md.venue
+                .unwrap()
+                .starts_with("Proceedings of the 25th ACM SIGKDD")
+        );
         assert_eq!(md.source, "crossref");
     }
 
@@ -164,8 +165,10 @@ mod tests {
 
     #[test]
     fn empty_search_is_empty() {
-        assert!(parse_search(r#"{"message":{"items":[]}}"#)
-            .unwrap()
-            .is_empty());
+        assert!(
+            parse_search(r#"{"message":{"items":[]}}"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

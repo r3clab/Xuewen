@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+use super::Ctx;
 use super::output::print_outcome;
 use super::signals::cancel_on_signal;
-use super::Ctx;
-use crate::app::error::Error;
 use crate::app::App;
+use crate::app::error::Error;
 use crate::ingest::import::{ImportError, Imported};
 use crate::ingest::refresh::RefreshTarget;
 

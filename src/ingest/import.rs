@@ -1,6 +1,6 @@
 use super::fetch::Fetcher;
 use super::pipeline::{IngestCtx, Outcome};
-use super::source::{parse_source, pdf_target, source_identifier, Source};
+use super::source::{Source, parse_source, pdf_target, source_identifier};
 use crate::library::model::Identifier;
 use crate::metadata::resolve::{ResolvedMetadata, Resolver};
 
@@ -85,27 +85,28 @@ async fn import_source(
     // the reason the import failed.
     let mut cookie_expired = false;
     let mut network_error = None;
-    if let (Some(target), Some(cookie)) = (target, cookie) {
-        if target.requires_proxy && fetcher.proxy_enabled() {
-            match fetcher.fetch_proxied(&target.url, cookie).await {
-                Ok(Some(bytes)) => return Ok(Fetched::Pdf { bytes, hint }),
-                Ok(None) => cookie_expired = true, // non-PDF: likely expired session
-                Err(e) => network_error = Some(e.context("proxied fetch")),
-            }
+    if let (Some(target), Some(cookie)) = (target, cookie)
+        && target.requires_proxy
+        && fetcher.proxy_enabled()
+    {
+        match fetcher.fetch_proxied(&target.url, cookie).await {
+            Ok(Some(bytes)) => return Ok(Fetched::Pdf { bytes, hint }),
+            Ok(None) => cookie_expired = true, // non-PDF: likely expired session
+            Err(e) => network_error = Some(e.context("proxied fetch")),
         }
     }
 
     // 3. Open-access fallback via Unpaywall (needs a DOI).
-    if let Source::Doi(doi) = &src {
-        if let Some(oa) = resolver.oa_pdf_url(doi).await {
-            match fetcher.fetch_plain(&oa).await {
-                Ok(Some(bytes)) => return Ok(Fetched::Pdf { bytes, hint }),
-                // Unpaywall asserted a PDF at this URL, so a non-PDF body is
-                // itself noteworthy (link rot, an interstitial page).
-                Ok(None) => tracing::warn!("oa fetch for {oa} returned a non-PDF body"),
-                Err(e) => {
-                    network_error = Some(e.context(format!("open-access fetch of {oa}")));
-                }
+    if let Source::Doi(doi) = &src
+        && let Some(oa) = resolver.oa_pdf_url(doi).await
+    {
+        match fetcher.fetch_plain(&oa).await {
+            Ok(Some(bytes)) => return Ok(Fetched::Pdf { bytes, hint }),
+            // Unpaywall asserted a PDF at this URL, so a non-PDF body is
+            // itself noteworthy (link rot, an interstitial page).
+            Ok(None) => tracing::warn!("oa fetch for {oa} returned a non-PDF body"),
+            Err(e) => {
+                network_error = Some(e.context(format!("open-access fetch of {oa}")));
             }
         }
     }
@@ -254,7 +255,7 @@ mod orchestration_tests {
     #[tokio::test]
     async fn paywalled_no_cookie_no_oa_is_unfetched() {
         let fetcher = Fetcher::new(None).unwrap(); // proxy disabled
-                                                   // ACM DOI, no cookie, offline resolver → no OA, no metadata → Unfetched.
+        // ACM DOI, no cookie, offline resolver → no OA, no metadata → Unfetched.
         let out = import_source(&fetcher, &Resolver::offline(), "10.1145/paywalled", None)
             .await
             .unwrap();

@@ -11,7 +11,7 @@ use crate::pdf::Pages;
 mod service;
 pub mod store;
 
-pub(crate) use service::{run, SummaryService};
+pub(crate) use service::{SummaryService, run};
 
 /// Pages a summary is written from: the paper proper, not its appendices.
 const SOURCE_PAGES: u32 = 12;

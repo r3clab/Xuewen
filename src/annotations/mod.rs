@@ -313,9 +313,11 @@ mod tests {
     fn rejects_a_blank_or_overlong_id() {
         assert!(validate_id("a1").is_ok());
         assert!(validate_id("  ").unwrap_err().contains("empty"));
-        assert!(validate_id(&"x".repeat(MAX_ID_LEN + 1))
-            .unwrap_err()
-            .contains("at most"));
+        assert!(
+            validate_id(&"x".repeat(MAX_ID_LEN + 1))
+                .unwrap_err()
+                .contains("at most")
+        );
     }
 
     #[test]

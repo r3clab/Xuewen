@@ -4,7 +4,7 @@ use clap::Subcommand;
 use serde::Deserialize;
 
 use super::output;
-use super::{freshness, remote, Ctx};
+use super::{Ctx, freshness, remote};
 use crate::library::model::Paper;
 use crate::search::indexer::{self, Scope};
 use crate::search::{IndexStatus, SearchResults, SearchService, TierCounts};
@@ -124,10 +124,10 @@ async fn search_here(
 }
 
 fn print_search(report: &SearchResults<PaperLabel>, keyword_only: bool) {
-    if let Some(reason) = &report.semantic.reason {
-        if !keyword_only {
-            eprintln!("note: semantic search unavailable — {reason}");
-        }
+    if let Some(reason) = &report.semantic.reason
+        && !keyword_only
+    {
+        eprintln!("note: semantic search unavailable — {reason}");
     }
     if report.results.is_empty() {
         println!("no matches");
@@ -216,7 +216,7 @@ mod tests {
 
     use super::*;
     use crate::library::model::PaperStatus;
-    use crate::search::{fts, RequestOverrides, SearchRequest};
+    use crate::search::{RequestOverrides, SearchRequest, fts};
     use crate::testutil::{paper, serve, temp_pool};
 
     struct Served {

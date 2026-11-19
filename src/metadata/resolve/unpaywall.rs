@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::http::{encode_doi_path, HttpClient};
+use crate::http::{HttpClient, encode_doi_path};
 
 /// Query Unpaywall for a DOI and return the best OA PDF URL, if any.
 pub(crate) async fn fetch(

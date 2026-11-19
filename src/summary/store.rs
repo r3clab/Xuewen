@@ -241,10 +241,12 @@ mod tests {
         );
 
         upsert(&pool, "p1", &sample(), "gpt-x").await.unwrap();
-        assert!(due_ids(&pool, 10, 100, FUTURE_CUTOFF)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            due_ids(&pool, 10, 100, FUTURE_CUTOFF)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

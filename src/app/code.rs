@@ -1,5 +1,5 @@
-use super::error::Error;
 use super::App;
+use super::error::Error;
 use crate::agent::store::PaperCode;
 use crate::agent::{code, store};
 use crate::library::model::Paper;

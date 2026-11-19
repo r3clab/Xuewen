@@ -89,10 +89,14 @@ async fn project_rename_keeps_names_unique() {
         fails(&config, &["project", "rename", "Fuzzing 2", "kernels"])
             .contains("a project with that name already exists")
     );
-    assert!(fails(&config, &["project", "new", "kernels"])
-        .contains("a project with that name already exists"));
-    assert!(fails(&config, &["project", "rename", "kernels", "  "])
-        .contains("project name cannot be empty"));
+    assert!(
+        fails(&config, &["project", "new", "kernels"])
+            .contains("a project with that name already exists")
+    );
+    assert!(
+        fails(&config, &["project", "rename", "kernels", "  "])
+            .contains("project name cannot be empty")
+    );
 }
 
 #[tokio::test]
@@ -150,32 +154,36 @@ async fn annotation_add_validates_and_lists_the_note() {
         fails(&config, &["annotation", "add", "p1", "--page", "0", "x"])
             .contains("invalid value '0' for '--page <PAGE>'")
     );
-    assert!(fails(
-        &config,
-        &[
-            "annotation",
-            "add",
-            "p1",
-            "--page",
-            "1",
-            "--color",
-            "ink",
-            "x"
-        ]
-    )
-    .contains("invalid value 'ink' for '--color <COLOR>'"));
-    assert!(fails(
-        &config,
-        &[
-            "annotation",
-            "add",
-            "p1",
-            "--page",
-            "1",
-            &"n".repeat(10_001)
-        ]
-    )
-    .contains("note must be at most 10000 characters"));
+    assert!(
+        fails(
+            &config,
+            &[
+                "annotation",
+                "add",
+                "p1",
+                "--page",
+                "1",
+                "--color",
+                "ink",
+                "x"
+            ]
+        )
+        .contains("invalid value 'ink' for '--color <COLOR>'")
+    );
+    assert!(
+        fails(
+            &config,
+            &[
+                "annotation",
+                "add",
+                "p1",
+                "--page",
+                "1",
+                &"n".repeat(10_001)
+            ]
+        )
+        .contains("note must be at most 10000 characters")
+    );
 }
 
 async fn summary_model(pool: &SqlitePool) -> String {

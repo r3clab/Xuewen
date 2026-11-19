@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+use super::Ctx;
 use super::browse::FilterArgs;
 use super::output::{self, confirm};
-use super::Ctx;
 use crate::library::export::BibFormat;
 use crate::library::papers::{self, PaperName};
 use crate::library::trash;

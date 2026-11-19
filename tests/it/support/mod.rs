@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use xuewen::app::App;
 
+use xuewen::ingest::Ingest;
 use xuewen::ingest::fetch::Fetcher;
 use xuewen::ingest::pipeline::{IngestCtx, Libraries};
-use xuewen::ingest::Ingest;
 use xuewen::metadata::resolve::Resolver;
 pub use xuewen::testutil::{sample_paper, temp_pool};
 

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use xuewen::ingest::pipeline::{IngestCtx, Libraries};
 use xuewen::metadata::resolve::Resolver;
-use xuewen::search::{fts, indexer, SearchRequest, SearchService};
+use xuewen::search::{SearchRequest, SearchService, fts, indexer};
 
 /// Two text lines: a title-looking first line, then the body phrase. If the
 /// ingest heuristics take the first line as the title, the search phrase

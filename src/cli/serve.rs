@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use super::signals::cancel_on_signal;
 use super::Ctx;
+use super::signals::cancel_on_signal;
 use crate::app::App;
 
 #[derive(clap::Args)]

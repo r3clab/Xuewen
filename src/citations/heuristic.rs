@@ -632,7 +632,9 @@ mod tests {
         assert_eq!(r.authors.last().map(String::as_str), Some("Li Zhang"));
         assert_eq!(
             r.venue.as_deref(),
-            Some("Proceedings of the 2016 ACM SIGSAC Conference on Computer and Communications Security (CCS '16)")
+            Some(
+                "Proceedings of the 2016 ACM SIGSAC Conference on Computer and Communications Security (CCS '16)"
+            )
         );
     }
 
@@ -651,7 +653,9 @@ mod tests {
         );
         assert_eq!(
             r.title.as_deref(),
-            Some("Redactable blockchain \u{2013} or \u{2013} rewriting history in bitcoin and friends")
+            Some(
+                "Redactable blockchain \u{2013} or \u{2013} rewriting history in bitcoin and friends"
+            )
         );
         assert_eq!(
             r.authors,

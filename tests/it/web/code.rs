@@ -127,10 +127,12 @@ async fn purge_clears_paper_code_chat_and_agent_workspace() {
         .unwrap();
     let pdf = root.join("missing.pdf");
     std::fs::write(&pdf, b"%PDF-1.4").unwrap();
-    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "p1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let ws = xuewen::agent::workspace_dir(&root, "p1");
     let repo_dir = ws.join("repo");
@@ -153,14 +155,18 @@ async fn purge_clears_paper_code_chat_and_agent_workspace() {
         .await
         .unwrap();
 
-    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(xuewen::agent::history::list(&pool, "p1")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        xuewen::agent::history::list(&pool, "p1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(!pdf.exists());
     assert!(!ws.exists());
     assert!(
@@ -185,10 +191,12 @@ async fn deleting_paper_cascades_to_paper_code() {
     xuewen::agent::store::upsert_paper_code_cloning(&pool, "p1", "https://github.com/x/y")
         .await
         .unwrap();
-    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "p1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     sqlx::query("DELETE FROM papers WHERE id = ?")
         .bind("p1")
@@ -196,8 +204,10 @@ async fn deleting_paper_cascades_to_paper_code() {
         .await
         .expect("delete should succeed under the ON DELETE CASCADE fix");
 
-    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

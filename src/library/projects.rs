@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
@@ -255,10 +255,12 @@ mod tests {
         let kept = update(&pool, &p.id, None).await.unwrap().unwrap();
         assert_eq!(kept.name, "Survey v2");
         // Unknown id → None.
-        assert!(update(&pool, "nope", Some(&name("X")))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            update(&pool, "nope", Some(&name("X")))
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Delete.
         assert!(delete(&pool, &p.id).await.unwrap());

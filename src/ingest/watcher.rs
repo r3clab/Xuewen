@@ -244,10 +244,12 @@ mod tests {
         std::fs::create_dir_all(inbox.join("_processed")).unwrap();
         File::create(inbox.join("_processed/old.pdf")).unwrap();
 
-        assert!(catch_up_scan(&inbox.join("missing"))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            catch_up_scan(&inbox.join("missing"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let found = catch_up_scan(inbox).await.unwrap();
         assert_eq!(
             found,

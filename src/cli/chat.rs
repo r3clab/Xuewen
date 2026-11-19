@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::output::confirm;
 use super::Ctx;
+use super::output::confirm;
 use crate::agent::history::{self, ChatRole};
 
 #[derive(Subcommand)]

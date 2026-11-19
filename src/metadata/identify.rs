@@ -154,22 +154,22 @@ pub(crate) fn guess_title(text: &str) -> Option<String> {
         let Some(first) = title_line(line) else {
             continue;
         };
-        if ends_mid_phrase(&first) {
-            if let Some(next) = lines.next().and_then(title_line) {
-                if let Some(stem) = first.strip_suffix('-') {
-                    // A trailing '-' is a mid-word split ("Hyperdimen-" / "sional") only
-                    // when both sides are lowercase; otherwise it's a hyphenated compound
-                    // wrapped at the hyphen ("State-of-the-" / "Art") — keep the hyphen.
-                    let mid_word = stem.chars().last().is_some_and(|c| c.is_lowercase())
-                        && next.chars().next().is_some_and(|c| c.is_lowercase());
-                    return Some(if mid_word {
-                        format!("{stem}{next}")
-                    } else {
-                        format!("{first}{next}")
-                    });
-                }
-                return Some(format!("{first} {next}"));
+        if ends_mid_phrase(&first)
+            && let Some(next) = lines.next().and_then(title_line)
+        {
+            if let Some(stem) = first.strip_suffix('-') {
+                // A trailing '-' is a mid-word split ("Hyperdimen-" / "sional") only
+                // when both sides are lowercase; otherwise it's a hyphenated compound
+                // wrapped at the hyphen ("State-of-the-" / "Art") — keep the hyphen.
+                let mid_word = stem.chars().last().is_some_and(|c| c.is_lowercase())
+                    && next.chars().next().is_some_and(|c| c.is_lowercase());
+                return Some(if mid_word {
+                    format!("{stem}{next}")
+                } else {
+                    format!("{first}{next}")
+                });
             }
+            return Some(format!("{first} {next}"));
         }
         return Some(first);
     }

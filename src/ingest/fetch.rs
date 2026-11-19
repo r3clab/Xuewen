@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 
 use super::MAX_PDF_BYTES;
@@ -20,7 +20,7 @@ pub struct Fetcher {
 /// Percent-encode a URL for use as the `?url=` value of the EZproxy login.
 /// Encodes everything except the RFC3986 unreserved set.
 fn encode_target(s: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
     // NON_ALPHANUMERIC minus the RFC3986 unreserved marks = encode everything
     // except [A-Za-z0-9._~-], matching EZproxy's expectations.
     const TARGET: &AsciiSet = &NON_ALPHANUMERIC

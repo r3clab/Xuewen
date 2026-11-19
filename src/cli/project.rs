@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::{output, Ctx};
+use super::{Ctx, output};
 use crate::library::papers;
 use crate::library::projects::{self, ProjectName};
 

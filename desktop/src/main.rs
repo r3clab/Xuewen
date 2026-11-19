@@ -32,7 +32,9 @@ fn run() -> Result<()> {
     let bundle = bundle::bundle_dirs();
     if let Some((macos_dir, _)) = &bundle {
         let path = std::env::var("PATH").ok();
-        std::env::set_var("PATH", bootstrap::prepend_path(macos_dir, path.as_deref()));
+        // SAFETY: no other thread exists yet (the log worker and runtimes
+        // start below), so nothing can read the environment concurrently.
+        unsafe { std::env::set_var("PATH", bootstrap::prepend_path(macos_dir, path.as_deref())) };
     }
 
     // A GUI app has no terminal: log to ~/Library/Logs/Xuewen/.
@@ -56,11 +58,11 @@ fn run() -> Result<()> {
 
     let mut cfg = xuewen::config::Config::load(&cfg_path)
         .with_context(|| format!("config file: {}", cfg_path.display()))?;
-    if let Some((_, resources)) = &bundle {
-        if cfg.ai.agent.runner.is_none() {
-            // In-memory only — never written back to the user's config.
-            cfg.ai.agent.runner = Some(resources.join("agent-runner/src/runner.mjs"));
-        }
+    if let Some((_, resources)) = &bundle
+        && cfg.ai.agent.runner.is_none()
+    {
+        // In-memory only — never written back to the user's config.
+        cfg.ai.agent.runner = Some(resources.join("agent-runner/src/runner.mjs"));
     }
 
     // The backend runs on our own tokio runtime; hand its handle to Tauri so

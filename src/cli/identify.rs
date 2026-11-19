@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::output::{self, author_line, confirm};
-use super::{in_trash, Ctx};
+use super::{Ctx, in_trash};
 use crate::ingest::pipeline::IdentifyOutcome;
 use crate::library::model::Identifier;
 

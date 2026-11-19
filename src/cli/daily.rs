@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Subcommand;
 
 use super::remote::{self, DailyStart};
-use super::{freshness, Ctx};
+use super::{Ctx, freshness};
 use crate::daily::store::{self, DailyRun, DailyStatus};
-use crate::daily::{scheduler, DailyService, Disabled};
+use crate::daily::{DailyService, Disabled, scheduler};
 use crate::search::indexer::{self, Scope};
 use crate::search::{SearchService, Semantic};
 

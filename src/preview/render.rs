@@ -7,7 +7,7 @@
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
+use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 
 /// Raster width cap. The picker shows pages at ~250 CSS px, so this covers a
 /// 2× display with headroom and keeps a cached page well under 100 KB. Pages

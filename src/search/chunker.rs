@@ -165,9 +165,10 @@ mod tests {
         let para = sentence.repeat(60); // ~2500 chars, no blank lines
         let out = body_chunks(&para);
         assert!(out.len() >= 2);
-        assert!(out
-            .iter()
-            .all(|c| c.text.len() <= TARGET_CHARS + OVERLAP_CHARS + 2));
+        assert!(
+            out.iter()
+                .all(|c| c.text.len() <= TARGET_CHARS + OVERLAP_CHARS + 2)
+        );
     }
 
     #[test]

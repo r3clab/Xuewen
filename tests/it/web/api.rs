@@ -1,7 +1,7 @@
 use crate::support;
 
-use axum_test::multipart::{MultipartForm, Part};
 use axum_test::TestServer;
+use axum_test::multipart::{MultipartForm, Part};
 use wiremock::matchers::{method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use xuewen::app::App;
@@ -1506,7 +1506,7 @@ async fn list_sorts_by_a_named_order_and_rejects_unknown_ones() {
 mod search_api {
     use super::*;
     use std::path::Path;
-    use xuewen::search::{fts, SearchService};
+    use xuewen::search::{SearchService, fts};
 
     async fn server_with_search(pool: sqlx::SqlitePool, dir: &Path) -> axum_test::TestServer {
         let (fts_idx, _) = fts::FtsIndex::open(&dir.join("search-index")).unwrap();

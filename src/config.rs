@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use percent_encoding::{percent_decode_str, percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -743,9 +743,11 @@ login_url = "https://proxy.uchicago.edu/login?url="
         let login: ProxyLogin = "https://proxy.uchicago.edu/login?url=".parse().unwrap();
         assert_eq!(login.prefix(), "https://proxy.uchicago.edu/login?url=");
         assert_eq!(login.host(), "proxy.uchicago.edu");
-        assert!("proxy.uchicago.edu/login?url="
-            .parse::<ProxyLogin>()
-            .is_err());
+        assert!(
+            "proxy.uchicago.edu/login?url="
+                .parse::<ProxyLogin>()
+                .is_err()
+        );
         assert!("data:text/plain,x".parse::<ProxyLogin>().is_err());
     }
 

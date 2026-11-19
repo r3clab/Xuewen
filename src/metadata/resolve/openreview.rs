@@ -157,11 +157,12 @@ mod tests {
                 "Anthony Widjaja Lin"
             ]
         );
-        assert!(c
-            .abstract_text
-            .as_deref()
-            .unwrap()
-            .starts_with("We study succinctness"));
+        assert!(
+            c.abstract_text
+                .as_deref()
+                .unwrap()
+                .starts_with("We study succinctness")
+        );
         assert_eq!(
             c.url.as_deref(),
             Some("https://openreview.net/forum?id=Yxz92UuPLQ")

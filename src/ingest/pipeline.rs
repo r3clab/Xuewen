@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use super::fields::{paper_meta, unique_rival, ResolveInputs};
+use super::fields::{ResolveInputs, paper_meta, unique_rival};
 use crate::config::Config;
 use crate::http::RetryPolicy;
 use crate::library::model::{Identifier, Paper};
@@ -291,10 +291,10 @@ impl IngestCtx {
             }
             // Lost a race with a concurrent ingest of the same work? Report the
             // winner's outcome instead of surfacing a constraint error.
-            if db::is_unique_violation(&e) {
-                if let Some(rival) = unique_rival(&self.pool, &paper).await? {
-                    return Ok(Outcome::lost_race(&paper, &rival));
-                }
+            if db::is_unique_violation(&e)
+                && let Some(rival) = unique_rival(&self.pool, &paper).await?
+            {
+                return Ok(Outcome::lost_race(&paper, &rival));
             }
             return Err(e);
         }

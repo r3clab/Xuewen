@@ -6,7 +6,7 @@ mod openreview;
 mod unpaywall;
 
 use crate::http::{HttpClient, RetryPolicy};
-use crate::library::model::{canonical_arxiv, canonical_doi, Identifier};
+use crate::library::model::{Identifier, canonical_arxiv, canonical_doi};
 use crate::metadata::matching;
 use anyhow::Result;
 use std::time::Duration;
@@ -449,10 +449,10 @@ fn rank_candidates(query: &str, cands: Vec<ResolvedMetadata>) -> Vec<ResolvedMet
             .as_deref()
             .map(|d| format!("doi:{}", canonical_doi(d)))
             .or_else(|| c.dblp_key.as_deref().map(|k| format!("dblp:{k}")));
-        if let Some(key) = key {
-            if !seen.insert(key) {
-                continue;
-            }
+        if let Some(key) = key
+            && !seen.insert(key)
+        {
+            continue;
         }
         out.push(c);
     }
@@ -538,7 +538,7 @@ mod tests {
         }
         let ranked = rank_candidates(query, cands);
         assert_eq!(ranked.len(), 8); // capped
-                                     // Exact-title match ranks first; its DOI-duplicate is gone.
+        // Exact-title match ranks first; its DOI-duplicate is gone.
         assert_eq!(ranked[0].dblp_key.as_deref(), Some("conf/uss/GulerAAH19"));
         assert_eq!(
             ranked.iter().filter(|c| c.doi.is_some()).count(),

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use super::output::{author_line, ellipsize, title};
 use super::Ctx;
+use super::output::{author_line, ellipsize, title};
 use crate::citations::StructuredReference;
 use crate::library::papers;
 

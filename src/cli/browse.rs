@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-use super::{output, Ctx};
+use super::{Ctx, output};
 use crate::library::model::{Paper, PaperStatus};
 use crate::library::{papers, projects, tags};
 

@@ -207,7 +207,7 @@ impl AgentService {
     pub fn run_turn(
         self: &Arc<Self>,
         req: TurnRequest,
-    ) -> impl futures_util::Stream<Item = AgentEvent> {
+    ) -> impl futures_util::Stream<Item = AgentEvent> + use<> {
         let runner = self.runner.clone();
         let timeout = self.timeout;
         async_stream::stream! {

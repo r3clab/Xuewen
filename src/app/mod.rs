@@ -14,15 +14,15 @@ mod trash;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-use crate::agent::code::CloneLimits;
 use crate::agent::AgentService;
+use crate::agent::code::CloneLimits;
 use crate::annotations::AnnotationsService;
 use crate::citations::CitationsService;
 use crate::config::{Config, UiConfig};
@@ -30,8 +30,8 @@ use crate::daily::DailyService;
 use crate::ingest::Ingest;
 use crate::library::model::Paper;
 use crate::preview::PreviewService;
-use crate::search::vector::VectorStore;
 use crate::search::SearchService;
+use crate::search::vector::VectorStore;
 use crate::summary::SummaryService;
 use crate::tasks::Tasks;
 use crate::translate::TranslateService;
@@ -147,10 +147,10 @@ impl App {
     }
 
     pub(crate) async fn publish_address(&self, addr: SocketAddr) {
-        if let Some(vectors) = &self.inner.vectors {
-            if let Err(e) = vectors.publish_addr(addr).await {
-                tracing::warn!("could not publish the server address for the CLI: {e:#}");
-            }
+        if let Some(vectors) = &self.inner.vectors
+            && let Err(e) = vectors.publish_addr(addr).await
+        {
+            tracing::warn!("could not publish the server address for the CLI: {e:#}");
         }
     }
 

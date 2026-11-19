@@ -1,10 +1,10 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use regex::Regex;
 use std::sync::LazyLock;
 
 use super::store::{self, DailyStatus};
-use super::{feed, score, DailyService};
+use super::{DailyService, feed, score};
 use crate::library::model::{ARXIV_ABS_BASE, ARXIV_PDF_BASE};
 use crate::summary::generate_summary;
 
@@ -211,7 +211,7 @@ async fn prune_old(svc: &DailyService, batch_date: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::DailyConfig;
-    use crate::daily::{store, DailyService};
+    use crate::daily::{DailyService, store};
     use crate::llm::LlmClient;
     use crate::search::embedder::Embedder;
     use serde_json::json;
@@ -438,9 +438,11 @@ Abstract: Very similar to the library.</summary>
         assert_eq!(run.status, DailyStatus::Ok);
         assert!(run.error.unwrap().contains("2/2 summaries failed"));
         let (_, papers) = store::latest_batch(&pool).await.unwrap().unwrap();
-        assert!(papers
-            .iter()
-            .all(|p| p.summary.is_none() && p.tldr().is_none()));
+        assert!(
+            papers
+                .iter()
+                .all(|p| p.summary.is_none() && p.tldr().is_none())
+        );
     }
 
     #[tokio::test]

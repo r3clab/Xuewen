@@ -1,8 +1,8 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use super::error::Error;
 use super::App;
+use super::error::Error;
 use crate::library::model::Paper;
 use crate::library::trash;
 
@@ -24,10 +24,10 @@ impl App {
 }
 
 fn warn_unless_gone(path: &Path, removed: std::io::Result<()>) {
-    if let Err(e) = removed {
-        if e.kind() != ErrorKind::NotFound {
-            tracing::warn!("could not remove {}: {e}", path.display());
-        }
+    if let Err(e) = removed
+        && e.kind() != ErrorKind::NotFound
+    {
+        tracing::warn!("could not remove {}: {e}", path.display());
     }
 }
 

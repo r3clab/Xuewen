@@ -1,7 +1,7 @@
 [package]
 name = "xuewen"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
 license = "MIT"
 
 [dependencies]
@@ -81,6 +81,7 @@ members = [".", "desktop"]
 # tauri.conf.json (no `version` key) falls back to the desktop crate's, and
 # the nix/ packages read it with lib.importTOML.
 [workspace.package]
+edition = "2024"
 version = "0.1.2"
 
 # Hashing is the one place a dev build does real work per request, and

@@ -116,10 +116,12 @@ async fn code_commands_refuse_a_trashed_paper() {
             "{args:?}"
         );
     }
-    assert!(xuewen::agent::store::get_paper_code(&pool, "cccc3333")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "cccc3333")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -129,10 +131,12 @@ async fn code_set_needs_agent_ask_like_the_web_does() {
         fails(&config, &["code", "set", "p1", "https://github.com/x/y"]),
         "Error: agent ask is not configured — set [ai.agent.claude_code] or [ai.agent.codex]\n"
     );
-    assert!(xuewen::agent::store::get_paper_code(&pool, "p1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        xuewen::agent::store::get_paper_code(&pool, "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

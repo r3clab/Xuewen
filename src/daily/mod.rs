@@ -5,18 +5,18 @@ mod score;
 pub mod store;
 
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::SqlitePool;
 
 use crate::config::{Config, DailyConfig};
-use crate::http::{user_agent, HttpClient, RetryPolicy};
+use crate::http::{HttpClient, RetryPolicy, user_agent};
 use crate::library::model::ARXIV_PDF_BASE;
 use crate::llm::LlmClient;
+use crate::search::Semantic;
 use crate::search::embedder::Embedder;
 use crate::search::vector::VectorStore;
-use crate::search::Semantic;
 use crate::tasks::Tasks;
 
 const ARXIV_FEED_BASE: &str = "https://rss.arxiv.org/atom";

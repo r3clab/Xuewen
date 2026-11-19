@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use qdrant_edge::{
-    Condition, CreateIndex, Distance, EdgeConfig, EdgeShard, EdgeVectorParams, FieldCondition,
-    FieldIndexOperations, Filter, JsonPath, Match, Memory, NamedQuery, OperationError, Payload,
-    PayloadFieldSchema, PayloadSchemaType, PointId, PointInsertOperations, PointOperations,
-    PointStruct, QueryEnum, Range, ScrollRequestBuilder, SearchRequestBuilder, UpdateOperation,
-    VectorStructInternal, WithPayloadInterface, WithVector, DEFAULT_VECTOR_NAME,
+    Condition, CreateIndex, DEFAULT_VECTOR_NAME, Distance, EdgeConfig, EdgeShard, EdgeVectorParams,
+    FieldCondition, FieldIndexOperations, Filter, JsonPath, Match, Memory, NamedQuery,
+    OperationError, Payload, PayloadFieldSchema, PayloadSchemaType, PointId, PointInsertOperations,
+    PointOperations, PointStruct, QueryEnum, Range, ScrollRequestBuilder, SearchRequestBuilder,
+    UpdateOperation, VectorStructInternal, WithPayloadInterface, WithVector,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -314,10 +314,10 @@ impl VectorStore {
             };
             match open_blocking(dir, *dims, OpenMode::LoadOrCreate) {
                 Ok((held, opened)) => {
-                    if let Some(addr) = publish {
-                        if let Err(e) = held.lock.publish(*addr) {
-                            tracing::warn!("could not publish the server address for the CLI: {e}");
-                        }
+                    if let Some(addr) = publish
+                        && let Err(e) = held.lock.publish(*addr)
+                    {
+                        tracing::warn!("could not publish the server address for the CLI: {e}");
                     }
                     *state = State::Open(held);
                     Ok(Some(opened))
@@ -571,7 +571,7 @@ fn open_blocking(dir: &Path, dims: usize, mode: OpenMode) -> Result<(Held, Opene
                     dir: dir.to_path_buf(),
                     stored,
                     configured: dims,
-                })
+                });
             }
             None => return Err(OpenError::unusable(dir, "no unnamed vector configured")),
         }

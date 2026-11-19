@@ -6,7 +6,7 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::now_rfc3339;
 use crate::library::model::Paper;
-use crate::library::papers::{push_paper_filters, PaperFilter};
+use crate::library::papers::{PaperFilter, push_paper_filters};
 use crate::search::chunker::{self, Chunk};
 
 /// State of a paper's derived search indexes. May outlive its paper (tombstone).
@@ -474,9 +474,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(replace_body(&pool, "p1", &body(&["one", "two"]), "h1")
-            .await
-            .unwrap());
+        assert!(
+            replace_body(&pool, "p1", &body(&["one", "two"]), "h1")
+                .await
+                .unwrap()
+        );
         assert_eq!(
             body_chunks(&pool, "p1").await.unwrap(),
             body(&["one", "two"])
@@ -501,18 +503,22 @@ mod tests {
         );
 
         // Re-extracting the same text rewrites the doc but keeps the vectors.
-        assert!(!replace_body(&pool, "p1", &body(&["one", "two"]), "h2")
-            .await
-            .unwrap());
+        assert!(
+            !replace_body(&pool, "p1", &body(&["one", "two"]), "h2")
+                .await
+                .unwrap()
+        );
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_some());
         assert_eq!(row.content_hash, "h2");
 
         // A different body invalidates both; chunk 0 belongs to the vector tier.
         mark_all_done(&pool, "p1").await;
-        assert!(replace_body(&pool, "p1", &body(&["three"]), "h3")
-            .await
-            .unwrap());
+        assert!(
+            replace_body(&pool, "p1", &body(&["three"]), "h3")
+                .await
+                .unwrap()
+        );
         let row = &all_index_rows(&pool).await.unwrap()[0];
         assert!(row.fts_indexed_at.is_none() && row.vectors_indexed_at.is_none());
         assert_eq!(body_chunks(&pool, "p1").await.unwrap(), body(&["three"]));
@@ -751,10 +757,12 @@ mod tests {
             .unwrap();
         assert_eq!(got, vec!["a".to_string()]);
 
-        assert!(filtered_paper_ids(&pool, &with_tag("ml"))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            filtered_paper_ids(&pool, &with_tag("ml"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let starred_only = PaperFilter {
             starred: Some(true),

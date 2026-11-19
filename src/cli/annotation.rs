@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use super::output::{confirm, ellipsize};
 use super::Ctx;
+use super::output::{confirm, ellipsize};
 use crate::annotations::{AnnotationColor, AnnotationKind, NewAnnotation};
 use crate::app::error::Error;
 use crate::library::papers;

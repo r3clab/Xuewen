@@ -51,7 +51,7 @@ pub(super) struct Signals {
 #[cfg(unix)]
 impl Signals {
     pub(super) fn install() -> Self {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         Self {
             interrupt: signal(SignalKind::interrupt())
                 .expect("failed to install the Ctrl-C handler"),

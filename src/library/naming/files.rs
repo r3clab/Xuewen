@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 
 /// Move `src` into `dir` under its basename, uniquifying on collision

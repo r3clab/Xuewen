@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use ts_rs::TS;
 
-use super::{history, store, AgentEvent, AgentService, TurnMessage, TurnPaper, TurnRequest};
+use super::{AgentEvent, AgentService, TurnMessage, TurnPaper, TurnRequest, history, store};
 use crate::library::model::Paper;
 
 pub(crate) struct AskRequest {
@@ -46,7 +46,7 @@ pub(crate) async fn start(
     library_root: &Path,
     paper: &Paper,
     req: AskRequest,
-) -> Result<impl Stream<Item = TurnEvent> + Send + 'static, AskError> {
+) -> Result<impl Stream<Item = TurnEvent> + Send + use<>, AskError> {
     let Some(backend) = agent.backend(&req.model_id).cloned() else {
         return Err(AskError::Invalid("unknown model_id"));
     };

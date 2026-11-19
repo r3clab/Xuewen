@@ -1,13 +1,13 @@
 use std::io::IsTerminal as _;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
-use super::signals::{Interrupted, Signal, Signals};
 use super::Ctx;
-use crate::agent::ask::{AskRequest, ToolCall, TurnEvent};
+use super::signals::{Interrupted, Signal, Signals};
 use crate::agent::AgentService;
+use crate::agent::ask::{AskRequest, ToolCall, TurnEvent};
 use crate::library::model::Paper;
 
 #[derive(clap::Args)]

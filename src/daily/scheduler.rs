@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Timelike, Utc};
 use tokio_util::sync::CancellationToken;
 
-use super::store::{self, DailyStatus};
 use super::DailyService;
+use super::store::{self, DailyStatus};
 
 /// Parse `[daily].run_at` as 24h "HH:MM".
 pub(crate) fn parse_run_at(s: &str) -> anyhow::Result<(u32, u32)> {

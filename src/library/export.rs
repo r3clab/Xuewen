@@ -1,5 +1,5 @@
 use super::naming;
-use crate::library::model::{Paper, ARXIV_ABS_BASE};
+use crate::library::model::{ARXIV_ABS_BASE, Paper};
 
 #[derive(
     Clone,
@@ -114,27 +114,27 @@ fn venue_field(kind: &str, fmt: BibFormat) -> &'static str {
 }
 
 fn entry_key(p: &Paper) -> String {
-    if let Some(k) = p.cite_key.as_deref() {
-        if !k.is_empty() {
-            return k.to_string();
-        }
+    if let Some(k) = p.cite_key.as_deref()
+        && !k.is_empty()
+    {
+        return k.to_string();
     }
-    if let (Some(first), Some(year)) = (p.meta.authors.0.first(), p.meta.year) {
-        if let Some(s) = naming::surname(first) {
-            let base = naming::fold_ascii_alnum(&format!("{s}{year}"));
-            if !base.is_empty() {
-                return base;
-            }
+    if let (Some(first), Some(year)) = (p.meta.authors.0.first(), p.meta.year)
+        && let Some(s) = naming::surname(first)
+    {
+        let base = naming::fold_ascii_alnum(&format!("{s}{year}"));
+        if !base.is_empty() {
+            return base;
         }
     }
     p.id.clone()
 }
 
 fn entry_url(p: &Paper) -> Option<String> {
-    if let Some(u) = p.meta.url.as_deref() {
-        if !u.is_empty() {
-            return Some(u.to_string());
-        }
+    if let Some(u) = p.meta.url.as_deref()
+        && !u.is_empty()
+    {
+        return Some(u.to_string());
     }
     p.meta
         .arxiv_id
@@ -279,8 +279,10 @@ mod tests {
 
         p.meta.authors = Authors(vec![]);
         p.meta.year = None;
-        assert!(format_entry(&p, BibFormat::Bibtex)
-            .starts_with("@inproceedings{01890000-0000-7000-8000-000000000001,"));
+        assert!(
+            format_entry(&p, BibFormat::Bibtex)
+                .starts_with("@inproceedings{01890000-0000-7000-8000-000000000001,")
+        );
     }
 
     #[test]

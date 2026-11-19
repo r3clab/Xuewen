@@ -31,8 +31,8 @@ use crate::config::Config;
 use crate::db;
 use crate::library::model::Paper;
 use crate::library::papers;
-use crate::search::vector::OpenMode;
 use crate::search::Semantic;
+use crate::search::vector::OpenMode;
 
 #[derive(Parser)]
 #[command(name = "xuewen", version)]

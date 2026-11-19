@@ -5,10 +5,10 @@ use axum::routing::post;
 use axum::{Json, Router};
 
 use super::fetch_paper;
-use super::papers::{attach_row_extras, PaperSummary};
+use super::papers::{PaperSummary, attach_row_extras};
 use crate::app::{App, Trash};
-use crate::citations::matching::{self, CitedReference};
 use crate::citations::StructuredReference;
+use crate::citations::matching::{self, CitedReference};
 use crate::library::papers;
 use crate::web::error::ApiError;
 use crate::web::extract::{ApiJson, ApiPath};

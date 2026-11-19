@@ -143,7 +143,9 @@ mod tests {
 
     #[test]
     fn one_matching_surname_is_enough() {
-        let t = PaperText::new("Microsoft COCO: Common Objects in Context\nTsung-Yi Lin, Piotr Dollár, C. Lawrence Zitnick");
+        let t = PaperText::new(
+            "Microsoft COCO: Common Objects in Context\nTsung-Yi Lin, Piotr Dollár, C. Lawrence Zitnick",
+        );
         // Diacritics and hyphens fold away on both sides.
         assert!(t.corroborates(&names(&["Piotr Dollár"])));
         assert!(t.corroborates(&names(&["Nobody At All", "Serge Zitnick"])));

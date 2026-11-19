@@ -6,7 +6,7 @@
 
 use crate::config::Resolved;
 use crate::http::{HttpClient, RetryPolicy};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 
 pub struct LlmClient {

@@ -6,7 +6,7 @@ use wiremock::matchers::{method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use xuewen::app::App;
 use xuewen::config::DailyConfig;
-use xuewen::daily::{store, DailyService};
+use xuewen::daily::{DailyService, store};
 use xuewen::llm::LlmClient;
 use xuewen::search::embedder::Embedder;
 

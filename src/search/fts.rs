@@ -1,17 +1,17 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::directory::error::LockError;
-use tantivy::directory::{Directory, DirectoryLock, MmapDirectory, INDEX_WRITER_LOCK, META_LOCK};
+use tantivy::directory::{Directory, DirectoryLock, INDEX_WRITER_LOCK, META_LOCK, MmapDirectory};
 use tantivy::query::{
     BooleanQuery, Occur, PhraseQuery, Query, QueryParser, TermQuery, TermSetQuery,
 };
-use tantivy::schema::{Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{Field, IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::TokenStream;
-use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument, TantivyError, Term};
+use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, TantivyError, Term, doc};
 use ts_rs::TS;
 
 use super::snippet::Snippet;
@@ -65,11 +65,7 @@ impl FieldSel {
         for part in csv.unwrap_or("").split(',').map(str::trim) {
             sel.select(part);
         }
-        if sel.any() {
-            sel
-        } else {
-            Self::all()
-        }
+        if sel.any() { sel } else { Self::all() }
     }
 
     /// Turn on the field `name` addresses. Returns whether it named one, so
@@ -306,7 +302,7 @@ impl FtsIndex {
             match self.index.writer(WRITER_HEAP_BYTES) {
                 Ok(w) => *guard = Some(w),
                 Err(TantivyError::LockFailure(LockError::LockBusy, _)) => {
-                    return Ok(WriterClaim::Busy)
+                    return Ok(WriterClaim::Busy);
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -478,9 +474,9 @@ impl FtsIndex {
             if !enabled {
                 continue;
             }
-            let mut gen = SnippetGenerator::create(searcher, query, field)?;
-            gen.set_max_num_chars(200);
-            if let Some(snippet) = Snippet::highlighted(&gen.snippet_from_doc(doc)) {
+            let mut generator = SnippetGenerator::create(searcher, query, field)?;
+            generator.set_max_num_chars(200);
+            if let Some(snippet) = Snippet::highlighted(&generator.snippet_from_doc(doc)) {
                 return Ok((name, snippet));
             }
         }
@@ -598,10 +594,11 @@ mod tests {
         assert!(!dir.path().join("meta.json").exists());
         let (idx, created) = FtsIndex::open(dir.path()).unwrap();
         assert!(created);
-        assert!(idx
-            .search("title", &[], &FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("title", &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The writer holder may be a running server: an index this build cannot
@@ -756,10 +753,11 @@ mod tests {
             .unwrap();
         let mut sel = FieldSel::none();
         sel.title = true;
-        assert!(idx
-            .search("quicksort", &[], &sel, 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("quicksort", &[], &sel, 10, None)
+                .unwrap()
+                .is_empty()
+        );
         let mut sel = FieldSel::none();
         sel.body = true;
         let hits = idx.search("quicksort", &[], &sel, 10, None).unwrap();
@@ -796,10 +794,11 @@ mod tests {
 
         // A scope nothing matches yields nothing.
         let scope = vec!["zz".to_string()];
-        assert!(idx
-            .search("quicksort", &[], &FieldSel::all(), 10, Some(&scope))
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("quicksort", &[], &FieldSel::all(), 10, Some(&scope))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -843,10 +842,11 @@ mod tests {
         let (idx, _dir) = open_tmp();
         idx.upsert(&doc("p1", "Old Title", "b")).unwrap();
         idx.upsert(&doc("p1", "New Title", "b")).unwrap();
-        assert!(idx
-            .search("old", &[], &FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("old", &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             idx.search("new", &[], &FieldSel::all(), 10, None)
                 .unwrap()
@@ -854,10 +854,11 @@ mod tests {
             1
         );
         idx.delete("p1").unwrap();
-        assert!(idx
-            .search("new", &[], &FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("new", &[], &FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -952,9 +953,10 @@ mod tests {
             "fuzzing resistance",
         ))
         .unwrap();
-        assert!(idx
-            .search("fuzzing", &[], &FieldSel::all(), 0, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            idx.search("fuzzing", &[], &FieldSel::all(), 0, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

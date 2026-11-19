@@ -3,8 +3,8 @@ use crate::support;
 use axum_test::TestServer;
 use serde_json::json;
 use std::path::PathBuf;
-use xuewen::agent::history::ChatRole;
 use xuewen::agent::AgentService;
+use xuewen::agent::history::ChatRole;
 use xuewen::config::{AgentBackendConfig, AgentConfig};
 
 fn stub_agent() -> std::sync::Arc<AgentService> {
@@ -102,10 +102,12 @@ async fn send_error_persists_nothing() {
         .await;
     resp.assert_status_ok();
     assert_eq!(kinds(&sse_events(&resp.text())).last(), Some(&"error"));
-    assert!(xuewen::agent::history::list(&pool, "p1")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        xuewen::agent::history::list(&pool, "p1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -121,10 +123,12 @@ async fn send_with_empty_reply_errors_and_persists_nothing() {
     let last = events.last().unwrap();
     assert_eq!(last["type"], "error");
     assert!(last["message"].as_str().unwrap().contains("empty reply"));
-    assert!(xuewen::agent::history::list(&pool, "p1")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        xuewen::agent::history::list(&pool, "p1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

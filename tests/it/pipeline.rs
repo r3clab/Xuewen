@@ -6,8 +6,8 @@ use xuewen::db;
 use xuewen::ingest::pipeline::{Disposal, IngestCtx, Libraries, Outcome};
 use xuewen::library::model::{Authors, Identifier, PaperMeta, PaperStatus};
 use xuewen::library::{papers, trash};
-use xuewen::metadata::resolve::grobid::Grobid;
 use xuewen::metadata::resolve::Resolver;
+use xuewen::metadata::resolve::grobid::Grobid;
 
 const TEI_FIXTURE: &str = support::fixture!("grobid_bert.tei.xml");
 const DBLP_BERT_FIXTURE: &str = support::fixture!("dblp_bert.json");
@@ -73,9 +73,11 @@ async fn ingests_pdf_and_dedups() {
     assert!(paths.iter().any(|p| p == "/works"), "{paths:?}");
 
     // File was copied into the library and the original moved to _processed.
-    assert!(library
-        .join(format!("_unsorted/{}.pdf", paper.content_hash))
-        .exists());
+    assert!(
+        library
+            .join(format!("_unsorted/{}.pdf", paper.content_hash))
+            .exists()
+    );
     assert_eq!(paper.cite_key, None);
     assert!(!pdf_path.exists());
     assert!(processed.join("paper.pdf").exists());
@@ -360,12 +362,14 @@ async fn grobid_title_drives_dblp_resolution() {
     assert_eq!(paper.meta.status, PaperStatus::Resolved);
     assert_eq!(paper.meta.source.as_deref(), Some("dblp"));
     // DBLP has no abstract; the GROBID abstract is backfilled.
-    assert!(paper
-        .meta
-        .abstract_text
-        .as_deref()
-        .unwrap()
-        .contains("language representation model"));
+    assert!(
+        paper
+            .meta
+            .abstract_text
+            .as_deref()
+            .unwrap()
+            .contains("language representation model")
+    );
 }
 
 #[tokio::test]

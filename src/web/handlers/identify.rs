@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use super::fetch_paper;
-use super::papers::{paper_refs, PaperDetail};
+use super::papers::{PaperDetail, paper_refs};
 use crate::app::{App, Trash};
 use crate::ingest::pipeline::IdentifyOutcome;
 use crate::library::model::Identifier;

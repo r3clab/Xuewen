@@ -232,14 +232,16 @@ mod tests {
 
     #[test]
     fn matching_hashes_are_not_work() {
-        assert!(plan(
-            &[ps("a", "h", "s", false)],
-            &[row("a", "h", "s")],
-            Some("m1"),
-            Utc::now()
-        )
-        .index
-        .is_empty());
+        assert!(
+            plan(
+                &[ps("a", "h", "s", false)],
+                &[row("a", "h", "s")],
+                Some("m1"),
+                Utc::now()
+            )
+            .index
+            .is_empty()
+        );
     }
 
     #[test]

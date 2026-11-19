@@ -13,7 +13,7 @@ use crate::pdf::Pages;
 use crate::search::planner::VectorWork;
 use crate::search::store::{ErrorTier, VectorsDone};
 use crate::search::vector::{OpenError, OpenMode};
-use crate::search::{chunker, fts, planner, store, vector, SearchService, Semantic};
+use crate::search::{SearchService, Semantic, chunker, fts, planner, store, vector};
 use crate::tasks::Tasks;
 
 /// Docs staged per Tantivy commit: few enough segments for a rebuild, yet a
@@ -118,16 +118,16 @@ pub(crate) async fn rebuild(
         Semantic::Unavailable(e) if do_vectors => anyhow::bail!("{e}"),
         _ => {}
     }
-    if let Some(lock) = fts_lock {
-        if let Err(e) = lock.wipe() {
-            if let Some(store) = semantic.store() {
-                store.close_gracefully().await;
-            }
-            return Err(e.context(format!(
-                "could not clear search index dir {}",
-                search.index_dir.display()
-            )));
+    if let Some(lock) = fts_lock
+        && let Err(e) = lock.wipe()
+    {
+        if let Some(store) = semantic.store() {
+            store.close_gracefully().await;
         }
+        return Err(e.context(format!(
+            "could not clear search index dir {}",
+            search.index_dir.display()
+        )));
     }
     let svc = SearchService::open(pool.clone(), search, semantic).await?;
     if svc.claim_writer().await? == fts::WriterClaim::Busy {
@@ -224,10 +224,10 @@ pub(crate) async fn sweep_scoped(
     }
     sweep.commit_staged().await;
     let summary = sweep.summary;
-    if let Some(tier) = tier.filter(|_| summary.vectors_touched > 0) {
-        if let Err(e) = tier.store.optimize().await {
-            tracing::warn!("vector store optimize: {e:#}");
-        }
+    if let Some(tier) = tier.filter(|_| summary.vectors_touched > 0)
+        && let Err(e) = tier.store.optimize().await
+    {
+        tracing::warn!("vector store optimize: {e:#}");
     }
     Ok(summary)
 }
@@ -582,10 +582,10 @@ async fn run(
     };
     loop {
         let store_waiting = svc.semantic.acquire_waiting(&svc.pool).await;
-        if let Some(w) = &mut watch {
-            if let Err(e) = w.mark_seen().await {
-                tracing::warn!("search index: reading the database version: {e:#}");
-            }
+        if let Some(w) = &mut watch
+            && let Err(e) = w.mark_seen().await
+        {
+            tracing::warn!("search index: reading the database version: {e:#}");
         }
         let retry_at = match sweep(&svc, &library_root).await {
             Ok(s) => {
@@ -666,7 +666,7 @@ async fn claim_writer_when_free(
 mod tests {
     use super::*;
     use crate::library::model::{Authors, Paper, PaperMeta, PaperStatus};
-    use crate::search::{fts, store, vector, SearchService};
+    use crate::search::{SearchService, fts, store, vector};
     use crate::testutil::write_pdf;
     use serde_json::json;
     use std::path::Path;
@@ -861,12 +861,13 @@ mod tests {
         let f = fixture(None).await;
         insert_paper_with_pdf(&f, "p1", "Fuzzing Firmware", "the body words").await;
         assert_eq!(sweep_in(&f).await.unwrap().indexed, 1);
-        assert!(f
-            .svc
-            .fts
-            .search("bisimulation", &[], &fts::FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            f.svc
+                .fts
+                .search("bisimulation", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
 
         // Delete the PDF: a re-extract would now fail loudly, so a green
         // sweep proves the notes path reused the chunks already in SQLite.
@@ -967,9 +968,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.deindexed, 1);
-        assert!(vector_hits(f.svc.semantic.store().unwrap())
-            .await
-            .is_empty());
+        assert!(
+            vector_hits(f.svc.semantic.store().unwrap())
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -986,11 +989,13 @@ mod tests {
         let (fts_idx, _) = fts::FtsIndex::open(f._dirs[1].path()).unwrap();
         let keyless = SearchService::open_with(f.svc.pool.clone(), fts_idx, None);
         assert_eq!(sweep(&keyless, &f.library_root).await.unwrap().deindexed, 1);
-        assert!(keyless
-            .fts
-            .search("Fuzzing", &[], &fts::FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyless
+                .fts
+                .search("Fuzzing", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
         let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
         assert_eq!(rows.len(), 1, "the row outlives the Tantivy doc");
         assert!(rows[0].fts_indexed_at.is_none());
@@ -999,9 +1004,11 @@ mod tests {
 
         assert_eq!(sweep_in(&f).await.unwrap().deindexed, 1);
         assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
-        assert!(vector_hits(f.svc.semantic.store().unwrap())
-            .await
-            .is_empty());
+        assert!(
+            vector_hits(f.svc.semantic.store().unwrap())
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1404,17 +1411,20 @@ mod tests {
             .unwrap();
         let s = sweep_in(&f).await.unwrap();
         assert_eq!(s.deindexed, 1);
-        assert!(f
-            .svc
-            .fts
-            .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            f.svc
+                .fts
+                .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
         assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
-        assert!(store::body_chunks(&f.svc.pool, "p1")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            store::body_chunks(&f.svc.pool, "p1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // Vector delete for a no-embedder service is skipped, not an error.
     }
 
@@ -1449,12 +1459,13 @@ mod tests {
             .unwrap();
         let s = sweep_in(&f).await.unwrap();
         assert_eq!((s.deindexed, s.failed), (0, 1));
-        assert!(f
-            .svc
-            .fts
-            .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            f.svc
+                .fts
+                .search("fuzzing", &[], &fts::FieldSel::all(), 10, None)
+                .unwrap()
+                .is_empty()
+        );
         let rows = store::all_index_rows(&f.svc.pool).await.unwrap();
         assert_eq!(rows.len(), 1, "the row is the only record of the points");
         assert!(rows[0].fts_indexed_at.is_none());
@@ -1487,9 +1498,11 @@ mod tests {
         );
         assert_eq!(sweep(&retry, &f.library_root).await.unwrap().deindexed, 1);
         assert!(store::all_index_rows(&f.svc.pool).await.unwrap().is_empty());
-        assert!(vector_hits(retry.semantic.store().unwrap())
-            .await
-            .is_empty());
+        assert!(
+            vector_hits(retry.semantic.store().unwrap())
+                .await
+                .is_empty()
+        );
     }
 
     struct RebuildFixture {

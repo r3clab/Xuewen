@@ -2,7 +2,7 @@
 //! the LLM chat/embeddings clients, and the daily feed, plus the outbound
 //! user-agent, URL-encoding and bounded-download helpers those callers share.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 
 /// The polite user-agent for outbound API calls: `xuewen/<version>`, plus a
@@ -23,7 +23,7 @@ pub(crate) fn user_agent(email: Option<&str>) -> String {
 /// (double-decode) — plus the parser-fragile CONTROLS/space/`"`/`<`/`>`/`` ` ``
 /// set. Legacy SICI DOIs (`10.1002/(SICI)…<1893::AID-APP1>…;2-9`) are real.
 pub(crate) fn encode_doi_path(doi: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
     const DOI_PATH: &AsciiSet = &CONTROLS
         .add(b' ')
         .add(b'"')
@@ -368,10 +368,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(client()
-            .get_text(&format!("{}/x", server.uri()))
-            .await
-            .is_err());
+        assert!(
+            client()
+                .get_text(&format!("{}/x", server.uri()))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

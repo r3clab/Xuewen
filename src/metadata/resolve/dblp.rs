@@ -87,10 +87,11 @@ fn clean_title(s: &str) -> String {
 /// name (e.g. "Hong Hu 0004"); strip that suffix so we store the plain name.
 fn clean_author(s: &str) -> String {
     let name = collapse_ws(s);
-    if let Some((head, tail)) = name.rsplit_once(' ') {
-        if tail.len() == 4 && tail.bytes().all(|b| b.is_ascii_digit()) {
-            return head.to_string();
-        }
+    if let Some((head, tail)) = name.rsplit_once(' ')
+        && tail.len() == 4
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        return head.to_string();
     }
     name
 }

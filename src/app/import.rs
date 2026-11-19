@@ -2,9 +2,9 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+use super::App;
 use super::error::Error;
 use super::settings::PROXY_COOKIE;
-use super::App;
 use crate::ingest::import::{ImportError, Imported};
 use crate::ingest::pipeline::Outcome;
 use crate::ingest::refresh::{self, RefreshSummary, RefreshTarget};

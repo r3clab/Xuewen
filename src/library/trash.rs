@@ -102,12 +102,14 @@ mod tests {
         soft_delete(&pool, &p.id).await.unwrap();
         assert!(restore(&pool, &p.id).await.unwrap());
         assert!(!restore(&pool, &p.id).await.unwrap()); // idempotent: already active
-        assert!(papers::get(&pool, &p.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .deleted_at
-            .is_none());
+        assert!(
+            papers::get(&pool, &p.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_none()
+        );
         assert_eq!(
             papers::list(
                 &pool,

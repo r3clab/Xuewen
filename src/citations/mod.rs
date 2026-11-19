@@ -2,7 +2,7 @@ pub(crate) mod heuristic;
 pub(crate) mod matching;
 mod store;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -271,26 +271,25 @@ impl CitationsService {
             heuristic_gen: HEURISTIC_GEN,
             llm: None,
         };
-        if let Some(llm) = &self.llm {
-            if !leftover.is_empty() {
-                let leftover_refs: Vec<String> =
-                    leftover.iter().map(|&i| refs[i].clone()).collect();
-                match Self::parse_leftovers(llm, &leftover_refs).await {
-                    Ok(results) => {
-                        for (&slot, r) in leftover.iter().zip(results) {
-                            parsed[slot] = r.map(|reference| CachedReference {
-                                src: Source::Llm(llm.model().to_string()),
-                                reference,
-                            });
-                        }
-                        provenance.llm = Some(llm.model().to_string());
+        if let Some(llm) = &self.llm
+            && !leftover.is_empty()
+        {
+            let leftover_refs: Vec<String> = leftover.iter().map(|&i| refs[i].clone()).collect();
+            match Self::parse_leftovers(llm, &leftover_refs).await {
+                Ok(results) => {
+                    for (&slot, r) in leftover.iter().zip(results) {
+                        parsed[slot] = r.map(|reference| CachedReference {
+                            src: Source::Llm(llm.model().to_string()),
+                            reference,
+                        });
                     }
-                    Err(e) => {
-                        // Partial result, cache skipped: the next open of
-                        // this paper retries the LLM part.
-                        tracing::warn!("citation LLM fallback failed: {e}");
-                        return Ok(references(parsed));
-                    }
+                    provenance.llm = Some(llm.model().to_string());
+                }
+                Err(e) => {
+                    // Partial result, cache skipped: the next open of
+                    // this paper retries the LLM part.
+                    tracing::warn!("citation LLM fallback failed: {e}");
+                    return Ok(references(parsed));
                 }
             }
         }

@@ -5,7 +5,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::papers::{attach_row_extras, PaperSummary};
+use super::papers::{PaperSummary, attach_row_extras};
 use crate::app::App;
 use crate::search::{SearchHit, SearchResults};
 use crate::web::error::ApiError;

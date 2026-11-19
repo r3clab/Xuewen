@@ -127,10 +127,10 @@ impl TranslateService {
 
     pub(crate) fn default_provider(&self) -> TranslateProvider {
         // Explicit config wins if that provider is available; else first available.
-        if let Some(p) = self.cfg.provider {
-            if self.provider_available(p) {
-                return p;
-            }
+        if let Some(p) = self.cfg.provider
+            && self.provider_available(p)
+        {
+            return p;
         }
         if self.llm.is_some() {
             TranslateProvider::Llm

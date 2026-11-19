@@ -85,10 +85,11 @@ mod tests {
         assert_eq!(md.authors, vec!["Ashish Vaswani", "Noam Shazeer"]);
         assert_eq!(md.doi.as_deref(), Some("10.5555/3295222.3295349"));
         assert_eq!(md.url.as_deref(), Some("http://arxiv.org/abs/1706.03762v5"));
-        assert!(md
-            .abstract_text
-            .unwrap()
-            .starts_with("The dominant sequence"));
+        assert!(
+            md.abstract_text
+                .unwrap()
+                .starts_with("The dominant sequence")
+        );
         assert_eq!(md.source, "arxiv");
     }
 

@@ -63,7 +63,7 @@ pub async fn upsert_paper_code_cloning(
     paper_id: &str,
     repo_url: &str,
 ) -> Result<i64> {
-    let gen: i64 = sqlx::query_scalar(
+    let clone_gen: i64 = sqlx::query_scalar(
         "INSERT INTO paper_code (paper_id, repo_url, status, clone_gen) VALUES (?, ?, 'cloning', 0)
          ON CONFLICT(paper_id) DO UPDATE SET repo_url = excluded.repo_url, status = 'cloning',
            commit_sha = NULL, error = NULL, cloned_at = NULL, size_bytes = NULL,
@@ -74,7 +74,7 @@ pub async fn upsert_paper_code_cloning(
     .bind(repo_url)
     .fetch_one(pool)
     .await?;
-    Ok(gen)
+    Ok(clone_gen)
 }
 
 /// The current `clone_gen` for a paper, or `None` if no row exists. A clone job
@@ -199,9 +199,11 @@ mod tests {
         assert_eq!(c.repo_url, "https://github.com/x/y");
         assert_eq!(current_clone_gen(&pool, "p1").await.unwrap(), Some(0));
 
-        assert!(set_paper_code_ready(&pool, "p1", "abc1234", 42_000, gen0)
-            .await
-            .unwrap());
+        assert!(
+            set_paper_code_ready(&pool, "p1", "abc1234", 42_000, gen0)
+                .await
+                .unwrap()
+        );
         let c = get_paper_code(&pool, "p1").await.unwrap().unwrap();
         assert_eq!(c.status, CodeStatus::Ready);
         assert_eq!(c.commit_sha.as_deref(), Some("abc1234"));
@@ -224,12 +226,16 @@ mod tests {
 
         // A write guarded by the stale generation is dropped (0 rows), while
         // the current generation's write lands.
-        assert!(!set_paper_code_error(&pool, "p1", "stale", gen0)
-            .await
-            .unwrap());
-        assert!(set_paper_code_error(&pool, "p1", "boom", gen1)
-            .await
-            .unwrap());
+        assert!(
+            !set_paper_code_error(&pool, "p1", "stale", gen0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            set_paper_code_error(&pool, "p1", "boom", gen1)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             get_paper_code(&pool, "p1")
                 .await

@@ -177,10 +177,10 @@ pub(crate) async fn run(svc: Arc<SummaryService>, cancel: CancellationToken) {
         }
     };
     loop {
-        if let Some(w) = &mut watch {
-            if let Err(e) = w.mark_seen().await {
-                tracing::warn!("summaries: reading the database version: {e:#}");
-            }
+        if let Some(w) = &mut watch
+            && let Err(e) = w.mark_seen().await
+        {
+            tracing::warn!("summaries: reading the database version: {e:#}");
         }
         match svc.sweep().await {
             Ok(n) if n > 0 => {
@@ -347,10 +347,12 @@ mod tests {
         );
 
         assert_eq!(svc.sweep().await.unwrap(), 1);
-        assert!(crate::summary::store::get(&pool, "p1")
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            crate::summary::store::get(&pool, "p1")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -483,10 +485,12 @@ mod tests {
         );
 
         assert!(svc.summarize_one("p1").await.unwrap());
-        assert!(crate::summary::store::get(&pool, "p1")
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            crate::summary::store::get(&pool, "p1")
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let (n,): (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM summary_failures WHERE paper_id = ?")
